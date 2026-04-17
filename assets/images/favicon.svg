@@ -1,0 +1,17 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="favicon-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2" result="blur" />
+      <feFlood flood-color="#00d084" flood-opacity="0.8" result="glowColor"/>
+      <feComposite in="glowColor" in2="blur" operator="in" result="softGlow"/>
+      <feMerge>
+        <feMergeNode in="softGlow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <circle cx="15" cy="15" r="4" fill="#94a3b8" /> 
+  <circle cx="15" cy="32" r="6" fill="#00d084" filter="url(#favicon-glow)" /> 
+  <circle cx="15" cy="49" r="4" fill="#94a3b8" /> 
+  <path d="M35 15 L 50 32 L 35 49" fill="none" stroke="#00d084" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" filter="url(#favicon-glow)"/>
+</svg>
