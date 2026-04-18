@@ -101,7 +101,7 @@ class G360App:
         self.page.bgcolor = "#0b1220"
         self.page.padding = 0
         self.page.window_resizable = True  # Permite redimensionar la ventana
-        self.page.window_icon = "/images/favicon.ico"
+        self.page.window_icon = "images/favicon.ico"
 
     def _init_components(self):
         logger.info("Inicializando componentes de UI.")

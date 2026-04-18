@@ -1,0 +1,25 @@
+=======================================================
+            G360 NC SUSTENTOR - VERSION PORTABLE
+=======================================================
+
+✅ NO REQUIERE INSTALACION NINGUNA
+
+📋 PASOS:
+1. Descomprime esta carpeta en cualquier lugar de tu PC
+2. Doble CLICK en el archivo:  run.bat
+3. Listo!
+
+✅ FUNCIONAMIENTO AUTOMATICO:
+- La primera vez crea automaticamente el acceso directo en tu Escritorio
+- El CMD se cierra automaticamente
+- Solo se abre la aplicacion
+- Cuando cierras la aplicacion todo se cierra completamente
+
+✅ REQUISITOS:
+- Windows 10 / 11
+- Solo necesita conexion a internet la PRIMERA vez que se ejecuta
+
+✅ SOPORTE:
+Version 2.0.1 - G360 Ecosystem
+
+=======================================================
