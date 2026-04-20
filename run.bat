@@ -32,7 +32,6 @@ if not exist ".venv\Scripts\python.exe" (
     echo.
 )
 
-REM Ejecutar app
 echo Iniciando aplicacion...
 call .venv\Scripts\activate.bat
 python main.py
