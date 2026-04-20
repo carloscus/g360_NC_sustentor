@@ -34,13 +34,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 echo Iniciando aplicacion...
 call .venv\Scripts\activate.bat
-python main.py
+start /wait python main.py
 
-REM Mantener ventana abierta si hay error
-if errorlevel 1 (
-    echo.
-    echo ERROR: La aplicacion termino con error (codigo: %errorlevel%)
-    pause
-)
-
+REM Cerrar CMD automaticamente cuando termine la app
 exit /b
