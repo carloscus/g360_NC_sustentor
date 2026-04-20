@@ -27,9 +27,17 @@ if not exist "%USERPROFILE%\Desktop\%SHORTCUT_NAME%" (
 :: ==============================================
 where uv >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [i] Instalando entorno ligero G360...
+    echo [i] Instalando motor de ejecucion UV (G360 Lightweight)...
     powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-    set "UV_PATH=%USERPROFILE%\.cargo\bin\uv.exe"
+    
+    :: Deteccion dinamica de la ruta de instalacion de usuario
+    if exist "%LOCALAPPDATA%\uv\uv.exe" (
+        set "UV_PATH=%LOCALAPPDATA%\uv\uv.exe"
+    ) else if exist "%USERPROFILE%\.cargo\bin\uv.exe" (
+        set "UV_PATH=%USERPROFILE%\.cargo\bin\uv.exe"
+    ) else (
+        set "UV_PATH=uv"
+    )
 ) else (
     set "UV_PATH=uv"
 )

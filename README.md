@@ -7,8 +7,10 @@
 ## ✨ Funcionalidades Destacadas
 
 ### 🧠 Inteligencia de Procesamiento
-- **Motor FIFO Inverso:** Algoritmo optimizado que vincula requerimientos con las facturas de compra más recientes, garantizando que el sustento cumpla con los criterios contables de "última entrada, primera salida".
-- **Estrategias de Ordenamiento:** Permite elegir entre sustentar por **"Más Recientes"** (orden cronológico) o por **"Mayor Volumen"** (priorizando facturas con más cantidad comprada).
+- **Motor FIFO Inverso Mejorado:** Algoritmo optimizado que vincula requerimientos con las facturas de compra más recientes, garantizando que el sustento cumpla con los criterios contables. Rastrea cantidad por documento para evitar repeticiones entre reportes múltiples.
+- **Gestión Multi-Reporte:** Sistema inteligente de descuento de inventario que asegura que cada factura se use solo una vez entre múltiples reportes. Descuenta automáticamente todas las facturas utilizadas por artículo, evitando el doble conteo.
+- **Normalización de Documentos:** Limpieza automática de prefijos duplicados (F204-F204-51999 → F204-51999) para garantizar formato correcto en reportes.
+- **Estrategias de Ordenamiento:** Permite elegir entre sustentar por "Más Recientes" (orden cronológico) o por "Mayor Volumen" (priorizando facturas con más cantidad comprada).
 - **Limpieza de Datos Robusta:** Corrección automática de errores comunes de digitación (ej: 'O' por '0'), eliminación de caracteres invisibles (BOM UTF-8), y normalización de IDs de artículos para evitar duplicados por formato.
 
 ### 📊 Visualización y Dashboard
@@ -17,9 +19,9 @@
 - **Vista Previa en Tiempo Real:** Tabla de datos interactiva para inspeccionar el historial antes de iniciar el procesamiento.
 
 ### 📑 Generación de Reportes Pro
-- **Fórmulas Vivas en Excel:** El reporte generado no contiene solo valores estáticos; incluye fórmulas de Excel (`ROUND`, `SUM`, multiplicaciones). Si el usuario edita una celda, el reporte se actualiza automáticamente.
+- **Fórmulas Vivas en Excel:** El reporte generado incluye fórmulas de Excel (ROUND, SUM, multiplicaciones). Si el usuario edita una celda, el reporte se actualiza automáticamente.
 - **Jerarquía de Totales:** Resumen financiero (Subtotal, IGV, Total) ubicado en la parte superior derecha para una lectura ejecutiva inmediata.
-- **Gestión de Archivos Inteligente:** Sistema de resolución de conflictos que pregunta al usuario si desea **Sobrescribir**, **Crear una Copia** versionada o **Saltar** un archivo en caso de duplicados en el Escritorio.
+- **Gestión de Archivos Inteligente:** Sistema de resolución de conflictos que pregunta al usuario si desea Sobrescribir, Crear una Copia versionada o Saltar un archivo en caso de duplicados en el Escritorio.
 
 ---
 
@@ -34,7 +36,7 @@ El reporte Excel utiliza un sistema de semáforos para facilitar la revisión:
 
 ## 📂 Estructura de Datos Requerida
 
-Para asegurar el correcto funcionamiento, el sistema requiere dos archivos Excel (puedes usar el botón **"Descargar Plantillas"** en la app):
+Para asegurar el correcto funcionamiento, el sistema requiere dos archivos Excel (puedes usar el botón "Descargar Plantillas" en la app):
 
 ### 1. Historial de Compras (Base Total)
 Archivo exportado del ERP que contiene todas las ventas al cliente. El procesador busca automáticamente las cabeceras basándose en palabras clave.
@@ -49,17 +51,24 @@ Archivo exportado del ERP que contiene todas las ventas al cliente. El procesado
 Archivo con los productos que el cliente desea devolver:
 - `CODIGO`: SKU del producto.
 - `CANTIDAD_NC`: Unidades a sustentar.
-- `PORCENTAJE_DESC`: Descuento a aplicar (ej: `3%`, `1.25` o `0.03`). *Mínimo recomendado: 0.5%*.
+- `PORCENTAJE_DESC`: Descuento a aplicar (ej: 3%, 1.25 o 0.03). Mínimo recomendado: 0.5%.
 
 ---
 
 ## 🏗️ Arquitectura del Proyecto
 
 El proyecto sigue una arquitectura modular y escalable:
-- **`src/core/processor.py`**: El cerebro del sistema. Maneja la limpieza de Pandas, el motor FIFO y la lógica de negocio.
-- **`src/excel/generator.py`**: Gestiona la creación de archivos `openpyxl`, la aplicación de estilos G360 y la inserción de fórmulas.
-- **`main.py`**: Controlador de la interfaz gráfica Flet y orquestador de los flujos asíncronos.
+- **`src/core/processor.py`**: El cerebro del sistema. Maneja la limpieza de Pandas, el motor FIFO inverso y la lógica de negocio. Incluye campo DOCUMENTOS_CANTIDAD para rastrear cantidad por documento.
+- **`src/excel/generator.py`**: Gestiona la creación de archivos openpyxl, la aplicación de estilos G360 y la inserción de fórmulas.
+- **`main.py`**: Controlador de la interfaz gráfica Flet y orquestador de los flujos asíncronos. Incluye gestión inteligente de inventario multi-reporte.
 - **`assets/`**: Recursos visuales (Logos G360).
+
+### Cambios en v2.0.1
+- Eliminación de imports no utilizados (logging, pandas en generator, Path, get_column_letter).
+- Mejora en FIFO inverso: normalización de serie y número de documento para evitar prefijos duplicados.
+- Sistema de rastreo por documento: cada artículo ahora registra cuánto se toma de cada factura (DOCUMENTOS_CANTIDAD).
+- Descuento inteligente: _update_inventory_balances itera por cada documento utilizado, no solo el más reciente.
+- Sincronización completa entre versión principal y portable.
 
 ---
 
@@ -72,7 +81,7 @@ El reporte final está optimizado para una revisión ejecutiva:
     - `TOTAL FACTURADO`: Cantidad x P.U. Original.
     - `DESC. UNITARIO`: Monto exacto del descuento por unidad.
     - `SUBTOTAL NC`: El monto total a devolver por ese ítem.
-    - `FACTURAS`: Lista concatenada de documentos que sirven de sustento.
+    - `FACTURAS`: Lista de documentos (correctamente formateados) que sirven de sustento.
     - `ALERTA`: Mensajes de error o advertencia si el stock es insuficiente o los precios varían.
 
 ---
@@ -81,7 +90,7 @@ El reporte final está optimizado para una revisión ejecutiva:
 
 1. **Requisitos:** Python 3.10 o superior (Recomendado 3.12+).
 2. **Automatización:** Se incluye un archivo `run.bat` que gestiona automáticamente:
-   - Creación del entorno virtual (`.venv`).
+   - Creación del entorno virtual (.venv).
    - Instalación de dependencias actualizadas.
    - Lanzamiento de la aplicación.
 3. **Ejecución:**
@@ -96,5 +105,6 @@ El reporte final está optimizado para una revisión ejecutiva:
 - `openpyxl`: Motor de lectura/escritura de archivos XLSX.
 
 ---
+
 **Desarrollado para el Ecosistema G360.**
 *Precisión, Velocidad y Auditoría.*

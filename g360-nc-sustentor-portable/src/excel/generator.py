@@ -1,15 +1,10 @@
-import pandas as pd
+import os
 import re
-from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-import logging
-from openpyxl.utils import get_column_letter
-from typing import List, Tuple
 from datetime import datetime
-from src.core.processor import ProcessedItem, NCProcessor
+from src.core.processor import ProcessedItem
 
-logger = logging.getLogger(__name__)
 
 class G360Styles:
     """
@@ -206,6 +201,9 @@ class ExcelGenerator:
             rango_fechas (Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]): Rango de fechas del historial.
             sheet_name (Optional[str]): Nombre opcional para la hoja de Excel.
         """
+        # ✅ SOLUCION 100% COMPATIBLE CON TODAS LAS VERSIONES DE OPENPYXL
+        os.makedirs(os.path.dirname(os.path.abspath(ruta_salida)), exist_ok=True)
+
         # 1. Calcular fila final real
         fila_inicio_datos = 7
         fila_fin_datos = fila_inicio_datos + len(items_procesados) - 1
@@ -253,13 +251,16 @@ class ExcelGenerator:
             adjusted_width = (max_length + 3)
             self.ws.column_dimensions[column].width = min(adjusted_width, 50) # Cap at 50
             
-        self.wb.save(ruta_salida)
+        self.wb.save(str(ruta_salida))
 
     def generar_plantilla_vacia(self, ruta_salida):
         """
         Genera la plantilla oficial de Requerimientos lista para usar,
         con formato, ejemplos, validaciones e instrucciones.
         """
+        # ✅ SOLUCION 100% COMPATIBLE CON TODAS LAS VERSIONES DE OPENPYXL
+        os.makedirs(os.path.dirname(os.path.abspath(ruta_salida)), exist_ok=True)
+
         wb = Workbook()
         ws = wb.active
         ws.title = "REQUERIMIENTOS"
@@ -274,7 +275,13 @@ class ExcelGenerator:
             ("PORCENTAJE_DESC", "Descuento a aplicar (%)")
         ]
 
-        # Escribir cabeceras
+        # Forzar formatos de celda
+        for r in range(2, 501):
+            ws.cell(row=r, column=1).number_format = '@'       # CODIGO
+            ws.cell(row=r, column=3).number_format = '0'       # CANTIDAD
+            ws.cell(row=r, column=4).number_format = '0.00%'   # PORCENTAJE
+
+        # Escribir cabeceras con estilo
         for col, (nombre, descripcion) in enumerate(columnas, 1):
             celda = ws.cell(row=1, column=col, value=nombre)
             celda.fill = self.styles.header_fill
@@ -283,11 +290,13 @@ class ExcelGenerator:
             celda.comment = f"\n{descripcion}\n"
             celda.border = self.styles.border
 
-        # Ejemplos de uso
+        # Ejemplos de uso (con los datos solicitados)
         ejemplos = [
             ["123456", "PRODUCTO EJEMPLO 1", 5, "10%"],
             ["789012", "PRODUCTO EJEMPLO 2", 12, 3.5],
             ["345678", "", 2, 0.05],
+            ["02182", "PRODUCTO EJEMPLO 1", 423, 0.05],
+            ["123456", "PRODUCTO EJEMPLO 2", 12, 0.10],
         ]
 
         for fila, datos in enumerate(ejemplos, 2):
@@ -329,47 +338,4 @@ class ExcelGenerator:
         # Agregar filtros automáticos
         ws.auto_filter.ref = "A1:D1"
 
-        wb.save(ruta_salida)
-
-    def generar_plantilla_historial(self, ruta_salida):
-        """
-        Genera la plantilla oficial del Historial de Compras / Reporte Base,
-        con todas las columnas oficiales que acepta el procesador.
-        """
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "HISTORIAL_COMPRAS"
-
-        # Todas las columnas oficiales del procesador
-        columnas = NCProcessor.COLUMNAS_HISTORIAL
-
-        for col, nombre in enumerate(columnas, 1):
-            celda = ws.cell(row=1, column=col, value=nombre)
-            celda.fill = self.styles.header_fill
-            celda.font = self.styles.header_font
-            celda.alignment = self.styles.center_align
-            celda.border = self.styles.border
-
-        # Ajustar anchos
-        for i in range(1, len(columnas)+1):
-            ws.column_dimensions[get_column_letter(i)].width = 22
-
-        # Congelar primera fila
-        ws.freeze_panes = "A2"
-
-        # Filtros automáticos
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(columnas))}1"
-
-        wb.save(ruta_salida)
-
-    def generar_plantillas_completas(self, directorio_salida):
-        """
-        Genera AMBAS plantillas oficiales necesarias para el proceso completo.
-        """
-        ruta_req = Path(directorio_salida) / "Plantilla_Requerimientos_NC.xlsx"
-        ruta_hist = Path(directorio_salida) / "Plantilla_Historial_Compras.xlsx"
-        
-        self.generar_plantilla_vacia(str(ruta_req))
-        self.generar_plantilla_historial(str(ruta_hist))
-        
-        return ruta_req, ruta_hist
+        wb.save(str(ruta_salida))

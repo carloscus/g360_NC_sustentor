@@ -3,6 +3,7 @@ import flet as ft
 import pandas as pd
 import os
 import re
+import shutil
 import threading
 from collections import Counter
 import logging
@@ -26,8 +27,8 @@ if getattr(sys, 'frozen', False):
     # Si es un ejecutable, el directorio base es donde está el EXE
     BASE_DIR = Path(sys.executable).parent
 else:
-    # Si es script, buscamos la raíz del ecosistema (3 niveles arriba)
-    BASE_DIR = Path(__file__).resolve().parent.parent.parent
+    # MODO DESARROLLO: Directorio base es la carpeta actual del proyecto
+    BASE_DIR = Path(__file__).resolve().parent
 
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
@@ -76,6 +77,15 @@ class G360App:
         self.G360_SURFACE = "#151e2e"
         self.G360_BG_DARK = "#0b1220"
 
+        # Rutas de Plantillas Oficiales
+        self.TEMPLATES_DIR = BASE_DIR / "assets" / "templates"
+        self.PLANTILLA_REQUERIMIENTOS = self.TEMPLATES_DIR / "G360_Plantilla_REQUERIMIENTOS.xlsx"
+        self.PLANTILLA_HISTORIAL = self.TEMPLATES_DIR / "G360_Plantilla_HISTORIAL.xlsx"
+        
+        # Verificar y generar plantillas si no existen al iniciar
+        self._verificar_plantillas()
+
+        # 2. Configuración inicial de la página (ventana)
         # 2. Configuración inicial de la página (ventana)
         self._setup_page()
 
@@ -343,6 +353,11 @@ class G360App:
                     self._actualizar_card_ui(self.card_historial, True, e.files[0].name)
                     self.status.value = f"✅ Historial vinculado: {e.files[0].name}"
                     self.status.color = self.G360_SUCCESS
+            except PermissionError:
+                self.historial_path = None
+                self._actualizar_card_ui(self.card_historial, False, "Acceso Denegado")
+                self.status.value = "❌ El historial está abierto o bloqueado por otro programa."
+                self.status.color = "red"
             except Exception as ex:
                 self.historial_path = None
                 self._actualizar_card_ui(self.card_historial, False, "Error")
@@ -570,28 +585,51 @@ class G360App:
         self.page.update()
         logger.info("Estado de la aplicación y UI reseteados completamente.")
 
-    def crear_plantillas(self, e):
-        logger.info("Iniciando generación de plantillas oficiales...")
+    def _verificar_plantillas(self):
+        """Verifica que las plantillas oficiales existan en assets/templates"""
         try:
-            desktop = Path.home() / "Desktop"
-            logger.debug(f"Ruta de plantillas: {desktop}")
-            
-            # Generar AMBAS plantillas oficiales necesarias para el proceso
-            ExcelGenerator().generar_plantillas_completas(str(desktop))
-            
-            if os.name == 'nt' and not self.page.web:
-                os.startfile(str(desktop))
-            
-            self.page.snack_bar = ft.SnackBar(ft.Text("✅ ✅ Ambas plantillas generadas correctamente en Escritorio"))
-            self.page.snack_bar.open = True
-            self.status.value = "✅ Plantillas de Requerimientos e Historial creadas exitosamente"
-            self.status.color = self.G360_SUCCESS
-            self.page.update()
-            logger.info("Plantillas generadas y escritorio abierto.")
+            self.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+            if self.PLANTILLA_REQUERIMIENTOS.exists() and self.PLANTILLA_HISTORIAL.exists():
+                logger.info("✅ Plantillas disponibles en assets/templates")
+            else:
+                logger.warning(f"⚠️ Plantillas no encontradas en {self.TEMPLATES_DIR}")
         except Exception as ex:
-            self.status.value = f"❌ Error plantillas: {str(ex)}"
-            self.status.color = "red"
-            self.page.update()
+            logger.warning(f"No se pudieron verificar las plantillas: {str(ex)}")
+
+    def crear_plantillas(self, e):
+        def task():
+            logger.info("Copiando plantillas oficiales desde assets/templates al Escritorio...")
+            try:
+                copied_count = 0
+                
+                for template_path in [self.PLANTILLA_REQUERIMIENTOS, self.PLANTILLA_HISTORIAL]:
+                    if template_path.exists():
+                        # Verificación de duplicados con opción de "Guardar como" (Crear Copia)
+                        dest_path = self._get_unique_out_path(template_path.name)
+                        if dest_path:
+                            shutil.copy2(template_path, dest_path)
+                            copied_count += 1
+                
+                if copied_count > 0:
+                    desktop = Path.home() / "Desktop"
+                    if os.name == 'nt' and not self.page.web:
+                        os.startfile(str(desktop))
+                    
+                    self.page.snack_bar = ft.SnackBar(ft.Text(f"✅ Se exportaron {copied_count} plantillas al Escritorio"))
+                    self.page.snack_bar.open = True
+                    self.status.value = f"✅ {copied_count} plantillas exportadas"
+                    self.status.color = self.G360_SUCCESS
+                else:
+                    self.status.value = "❌ Plantillas no encontradas en assets/templates"
+                    self.status.color = "red"
+                
+                self.page.update()
+            except Exception as ex:
+                self.status.value = f"❌ Error plantillas: {str(ex)}"
+                self.status.color = "red"
+                self.page.update()
+        
+        threading.Thread(target=task, daemon=True).start()
 
     def preguntar_sobrescribir(self, filename):
         self.dialog_event.clear()
@@ -624,12 +662,12 @@ class G360App:
         """Aplica el ordenamiento seleccionado por el usuario al historial."""
         if self.rg_tipo_orden.value == "fecha" and "FECHA_ORIG" in df.columns:
             df["FECHA_DT"] = pd.to_datetime(df["FECHA_ORIG"], dayfirst=True, errors="coerce", format="mixed")
-            return df.sort_values(by="FECHA_DT", ascending=False).drop(columns=["FECHA_DT"])
             logger.debug("Historial ordenado por fecha (más recientes primero).")
+            return df.sort_values(by="FECHA_DT", ascending=False).drop(columns=["FECHA_DT"])
         elif self.rg_tipo_orden.value == "cantidad" and "CANTIDAD" in df.columns:
             df["CANT_NUM"] = pd.to_numeric(df["CANTIDAD"], errors="coerce").fillna(0)
-            return df.sort_values(by="CANT_NUM", ascending=False).drop(columns=["CANT_NUM"])
             logger.debug("Historial ordenado por cantidad (mayor volumen primero).")
+            return df.sort_values(by="CANT_NUM", ascending=False).drop(columns=["CANT_NUM"])
         return df
 
     def _get_unique_out_path(self, base_name: str) -> Optional[Path]:
@@ -650,18 +688,73 @@ class G360App:
         return out_path
 
     def _update_inventory_balances(self, df_h: pd.DataFrame, items: list) -> pd.DataFrame:
-        """Descuenta las cantidades procesadas del historial actual."""
+        """Descuenta las cantidades procesadas del historial actual por cada documento utilizado."""
         for item in items:
-            mask = (
-                (df_h["NRO_DOC"] == item.NRO_DOC) & 
-                (df_h["SERIE_DOC"] == item.SERIE_DOC) & 
-                (df_h["ID_ARTICULO"] == item.ID_ARTICULO)
-            )
-            if mask.any():
-                match_idx = df_h[mask].index[0]
-                nuevo_v = float(df_h.at[match_idx, "CANTIDAD"]) - float(item.CANTIDAD_REAL_ENCONTRADA or 0)
-                logger.debug(f"Descontando {item.CANTIDAD_REAL_ENCONTRADA} de '{item.ID_ARTICULO}' (Doc: {item.NRO_DOC}). Nuevo saldo: {nuevo_v}")
-                df_h.at[match_idx, "CANTIDAD"] = max(0.0, nuevo_v)
+            # Si el item tiene el mapeo de cantidad por documento, usarlo
+            if item.DOCUMENTOS_CANTIDAD:
+                for doc_str, cant_tomada in item.DOCUMENTOS_CANTIDAD.items():
+                    # Parsear el documento para obtener serie y nro
+                    # Formato: F204-51999 => tipo=F, serie=204, nro=51999
+                    if '-' in doc_str:
+                        tipo_serie, nro_target = doc_str.rsplit('-', 1)
+                        tipo_target = tipo_serie[0] if tipo_serie else 'F'
+                        serie_target = tipo_serie[1:] if len(tipo_serie) > 1 else ''
+                    else:
+                        continue
+                    
+                    # Normalizar y buscar el documento en el historial
+                    mask_match = False
+                    for idx, row in df_h.iterrows():
+                        if row["ID_ARTICULO"] != item.ID_ARTICULO:
+                            continue
+                        
+                        # Normalizar SERIE_DOC
+                        serie_h = str(row['SERIE_DOC']).strip()
+                        while serie_h.upper().startswith(tipo_target.upper()):
+                            serie_h = serie_h[1:]
+                        serie_h = serie_h.lstrip('-').strip()
+                        
+                        # Normalizar NRO_DOC
+                        nro_h = str(row['NRO_DOC']).strip()
+                        if '-' in nro_h:
+                            nro_h = nro_h.split('-', 1)[1]
+                        while nro_h.upper().startswith(tipo_target.upper()):
+                            nro_h = nro_h[1:]
+                        nro_h = nro_h.lstrip('-').strip()
+                        
+                        # Comparar
+                        if serie_h == serie_target and nro_h == nro_target:
+                            nuevo_v = float(df_h.at[idx, "CANTIDAD"]) - float(cant_tomada or 0)
+                            logger.debug(f"Descontando {cant_tomada} de '{item.ID_ARTICULO}' Doc({doc_str}). Nuevo saldo: {nuevo_v}")
+                            df_h.at[idx, "CANTIDAD"] = max(0.0, nuevo_v)
+                            mask_match = True
+                            break
+                    
+                    if not mask_match:
+                        logger.warning(f"No se encontró documento {doc_str} para {item.ID_ARTICULO} en el historial.")
+            else:
+                # Fallback: usar el documento más reciente si no existe mapeo
+                mask = (
+                    (df_h["ID_ARTICULO"] == item.ID_ARTICULO)
+                )
+                # Filtrar por NRO y SERIE normalizados
+                nro_item = str(item.NRO_DOC).strip()
+                serie_item = str(item.SERIE_DOC).strip()
+                for idx in df_h[mask].index:
+                    if df_h.at[idx, "ID_ARTICULO"] == item.ID_ARTICULO:
+                        match_found = False
+                        try:
+                            if nro_item in str(df_h.at[idx, "NRO_DOC"]) and serie_item in str(df_h.at[idx, "SERIE_DOC"]):
+                                match_found = True
+                        except:
+                            pass
+                        
+                        if match_found:
+                            nuevo_v = float(df_h.at[idx, "CANTIDAD"]) - float(item.CANTIDAD_REAL_ENCONTRADA or 0)
+                            logger.debug(f"Descontando {item.CANTIDAD_REAL_ENCONTRADA} de '{item.ID_ARTICULO}' (Doc: {item.NRO_DOC}). Nuevo saldo: {nuevo_v}")
+                            df_h.at[idx, "CANTIDAD"] = max(0.0, nuevo_v)
+                            break
+        
         return df_h[pd.to_numeric(df_h["CANTIDAD"], errors="coerce").fillna(0) > 0].reset_index(drop=True)
 
     def generar_flow(self):
@@ -684,25 +777,24 @@ class G360App:
             for idx, req_path in enumerate(self.requerimientos_paths):
                 logger.info(f"Procesando archivo de requerimientos {idx + 1}/{len(self.requerimientos_paths)}: {Path(req_path).name}")
                 self.status.value = f"⏳ Procesando {idx + 1}/{len(self.requerimientos_paths)}..."
-                self.page.update()
-
-                df_r = pd.read_excel(req_path, dtype=str)
-                logger.debug(f"Requerimiento leído: {len(df_r)} filas.")
-                proc = NCProcessor(df_h)
-                # df_h ya viene limpio del paso inicial, proc lo reutiliza de forma eficiente.
-                
-                items, docs = proc.procesar_lote(df_r, forzar_cantidad_solicitada=self.sw_forzar_cant.value)
-
-                logger.debug(f"Lote procesado. {len(items)} ítems y {len(docs)} documentos únicos.")
-                # Determinar nombre de pestaña y ruta de salida
-                all_docs = [doc for it in items for doc in it.DOCUMENTOS]
-                sheet_n = str(Counter(all_docs).most_common(1)[0][0]) if all_docs else "Sustento"
-                out_path = self._get_unique_out_path(f"PARTE_{idx + 1}_{base_fname}")
-                logger.debug(f"Ruta de salida para el reporte: {out_path}")
-                if not out_path: continue
-
-                logger.info(f"Generando reporte Excel para Lote {idx + 1}")
                 try:
+                    self.page.update()
+                    df_r = pd.read_excel(req_path, dtype=str)
+                    logger.debug(f"Requerimiento leído: {len(df_r)} filas.")
+                    proc = NCProcessor(df_h)
+                    # df_h ya viene limpio del paso inicial, proc lo reutiliza de forma eficiente.
+                    
+                    items, docs = proc.procesar_lote(df_r, forzar_cantidad_solicitada=self.sw_forzar_cant.value)
+
+                    logger.debug(f"Lote procesado. {len(items)} ítems y {len(docs)} documentos únicos.")
+                    # Determinar nombre de pestaña y ruta de salida
+                    all_docs = [doc for it in items for doc in it.DOCUMENTOS]
+                    sheet_n = str(Counter(all_docs).most_common(1)[0][0]) if all_docs else "Sustento"
+                    out_path = self._get_unique_out_path(f"PARTE_{idx + 1}_{base_fname}")
+                    logger.debug(f"Ruta de salida para el reporte: {out_path}")
+                    if not out_path: continue
+
+                    logger.info(f"Generando reporte Excel para Lote {idx + 1}")
                     logger.info(f"Escribiendo reporte Excel: {out_path}")
                     ExcelGenerator().generar_reporte(
                         str(out_path), self.txt_cliente.value, f"{self.txt_motivo.value} (P{idx + 1})",
@@ -717,9 +809,15 @@ class G360App:
                     if not self.page.web and os.name == 'nt':
                         os.startfile(str(out_path))
                         logger.debug(f"Archivo {out_path.name} abierto mediante el sistema operativo.")
+                except PermissionError:
+                    logger.error(f"Acceso denegado a archivo en Lote {idx + 1}.")
+                    self.status.value = f"❌ Error: Archivo abierto o bloqueado en Lote {idx + 1}."
+                    self.status.color = "red"
+                    self.page.update()
+                    continue
                 except Exception as ex:
                     logger.error(f"No se pudo completar la escritura del reporte: {ex}")
-                    self.status.value = f"❌ Error: ¿'{out_path.name}' está abierto en Excel?"
+                    self.status.value = f"❌ Error: ¿Archivo abierto en Excel? ({ex})"
                     self.status.color = "red"
                     self.page.update()
                     continue

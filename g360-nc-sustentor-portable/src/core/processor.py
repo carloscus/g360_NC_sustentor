@@ -2,8 +2,7 @@ import pandas as pd
 import re
 import logging
 from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
-from functools import lru_cache
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +26,7 @@ class ProcessedItem:
     STATUS: str
     NRO_DOC: str = ""
     SERIE_DOC: str = ""
+    DOCUMENTOS_CANTIDAD: Dict[str, float] = field(default_factory=dict)  # Mapeo de doc => cantidad tomada
 
 
 class NCProcessor:
@@ -87,7 +87,7 @@ class NCProcessor:
             # 2. Normalizar nombres de columnas y validación
             df = self._normalize_column_names(df)
 
-        # 1. Copia profunda y limpieza de tipos de datos
+        # 3. Copia profunda y limpieza de tipos de datos
         df = self._clean_data_types(df.copy())
 
         # 4. Procesar fechas y ordenar
@@ -243,14 +243,39 @@ class NCProcessor:
         Lógica core de asignación: recorre el historial (ya ordenado por fecha DESC)
         y va descontando de las facturas la cantidad necesaria para sustentar la NC.
         Detecta si un artículo proviene de múltiples precios/facturas.
+        Retorna también el mapeo de cantidad por documento para auditoría posterior.
         """
-        res = {"docs": [], "precios": set(), "asignado": 0, "restante": cantidad_nc}
+        res = {"docs": [], "doc_cantidad": {}, "precios": set(), "asignado": 0, "restante": cantidad_nc}
         for _, fila in articulo_historial.iterrows():
-            if res["restante"] <= 0: break
+            if res["restante"] <= 0:
+                break
             tomar = min(fila['CANTIDAD'], res["restante"])
-            tipo = str(fila['TPO_DOC'])[0] if fila['TPO_DOC'] else 'F'
-            doc_full = f"{tipo}{fila['SERIE_DOC']}-{fila['NRO_DOC']}"
-            if doc_full not in res["docs"]: res["docs"].append(doc_full)
+            tipo = str(fila['TPO_DOC']).strip()
+            tipo = tipo[0] if tipo else 'F'
+
+            # Extraer serie: limpiar prefijos y guiones
+            serie = str(fila['SERIE_DOC']).strip()
+            # Eliminar el tipo de documento si está al inicio
+            while serie.upper().startswith(tipo.upper()):
+                serie = serie[1:]
+            # Eliminar guiones
+            serie = serie.lstrip('-').strip()
+
+            # Extraer número: eliminar prefijos y tipo
+            nro = str(fila['NRO_DOC']).strip()
+            # Si nro contiene guión, tomar la parte numérica después del guión
+            if '-' in nro:
+                nro = nro.split('-', 1)[1]
+            # Eliminar cualquier prefijo de tipo que haya quedado
+            while nro.upper().startswith(tipo.upper()):
+                nro = nro[1:]
+            nro = nro.lstrip('-').strip()
+
+            doc_full = f"{tipo}{serie}-{nro}"
+            if doc_full not in res["docs"]:
+                res["docs"].append(doc_full)
+                res["doc_cantidad"][doc_full] = 0
+            res["doc_cantidad"][doc_full] += tomar
             res["precios"].add(round(fila['PRECIO_UNID'], 2))
             res["asignado"] += tomar
             res["restante"] -= tomar
@@ -275,7 +300,8 @@ class NCProcessor:
             CANTIDAD_REAL_ENCONTRADA=cant_f, PRECIO_UNITARIO=precio_ref,
             MONTO_DESCUENTO_UNITARIO=m_desc_u, PRECIO_NETO_FINAL=round(precio_ref - m_desc_u, 4),
             SUBTOTAL_DESCUENTO=round(m_desc_u * cant_f, 2), PORCENTAJE_APLICADO=porc,
-            DOCUMENTOS=asig["docs"], STATUS=status, NRO_DOC=str(reciente['NRO_DOC']), SERIE_DOC=str(reciente['SERIE_DOC'])
+            DOCUMENTOS=asig["docs"], STATUS=status, NRO_DOC=str(reciente['NRO_DOC']), SERIE_DOC=str(reciente['SERIE_DOC']),
+            DOCUMENTOS_CANTIDAD=asig.get("doc_cantidad", {})
         )
 
     def _crear_item_error(self, cod, cant, porc) -> ProcessedItem:
