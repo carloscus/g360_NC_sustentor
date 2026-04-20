@@ -17,60 +17,63 @@ if not exist "%USERPROFILE%\Desktop\%SHORTCUT_NAME%" (
     echo =======================================================
     echo.
     echo [i] Creando acceso directo en el escritorio...
-    powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%USERPROFILE%\Desktop\%SHORTCUT_NAME%'); $Shortcut.TargetPath = '%TARGET_PATH%'; $Shortcut.WorkingDirectory = '%WORKING_DIR%'; $Shortcut.IconLocation = '%ICON_PATH%'; $Shortcut.Save()"
+    powershell -NoProfile -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%USERPROFILE%\Desktop\%SHORTCUT_NAME%'); $Shortcut.TargetPath = '%TARGET_PATH%'; $Shortcut.WorkingDirectory = '%WORKING_DIR%'; $Shortcut.IconLocation = '%ICON_PATH%'; $Shortcut.Save()"
     echo [OK] Acceso directo creado exitosamente.
     echo.
     timeout /t 2 /nobreak >nul
 )
 
 :: ==============================================
-:: 1. VERIFICAR PYTHON
+:: 1. VERIFICAR E INSTALAR UV SI ES NECESARIO
 :: ==============================================
-python --version >nul 2>&1
+echo [i] Verificando motor UV...
+where uv >nul 2>&1
 if %errorlevel% neq 0 (
-    echo.
-    echo [ERROR] Python no esta instalado o no esta en PATH
-    echo [i] Descargalo desde: https://www.python.org/downloads/
-    echo [i] IMPORTANTE: Durante la instalacion, marca "Add Python to PATH"
-    echo.
-    pause
-    exit /b 1
+    echo [i] Instalando UV (gestor de dependencias rapido)...
+    powershell -NoProfile -ExecutionPolicy ByPass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+    if !errorlevel! neq 0 (
+        echo [ERROR] Fallo al instalar UV. Revisa tu conexion a internet.
+        pause
+        exit /b 1
+    )
 )
 
+:: Detectar ruta de UV
+set "UV_PATH=uv"
+if exist "%LOCALAPPDATA%\uv\uv.exe" (
+    set "UV_PATH=%LOCALAPPDATA%\uv\uv.exe"
+) else if exist "%USERPROFILE%\.cargo\bin\uv.exe" (
+    set "UV_PATH=%USERPROFILE%\.cargo\bin\uv.exe"
+)
+
+echo [i] UV encontrado: !UV_PATH!
+
 :: ==============================================
-:: 2. CREAR VENV SI NO EXISTE
+:: 2. CREAR VENV CON UV SI ES NECESARIO
 :: ==============================================
 if not exist ".venv" (
-    echo [i] Creando entorno virtual (.venv)...
-    python -m venv .venv
+    echo [i] Creando entorno virtual con UV...
+    "!UV_PATH!" venv .venv --python 3.12
     if !errorlevel! neq 0 (
-        echo [ERROR] Fallo al crear el entorno virtual
-        pause
-        exit /b 1
+        echo [WARN] No se pudo crear venv con Python 3.12, intentando con Python por defecto...
+        "!UV_PATH!" venv .venv
+        if !errorlevel! neq 0 (
+            echo [ERROR] Fallo al crear entorno virtual
+            pause
+            exit /b 1
+        )
     )
 )
 
 :: ==============================================
-:: 3. ACTIVAR VENV E INSTALAR DEPENDENCIAS
+:: 3. INSTALAR DEPENDENCIAS CON UV
 :: ==============================================
-echo [i] Activando entorno virtual...
-call .venv\Scripts\activate.bat
-if %errorlevel% neq 0 (
-    echo [ERROR] Fallo al activar el entorno virtual
+echo [i] Instalando dependencias...
+"!UV_PATH!" pip install -r requirements.txt
+if !errorlevel! neq 0 (
+    echo [ERROR] Fallo al instalar dependencias
     pause
     exit /b 1
-)
-
-echo [i] Verificando dependencias...
-pip install -q -r requirements.txt
-if %errorlevel% neq 0 (
-    echo [i] Instalando desde pyproject.toml...
-    pip install -q .
-    if !errorlevel! neq 0 (
-        echo [ERROR] Fallo al instalar dependencias
-        pause
-        exit /b 1
-    )
 )
 
 :: ==============================================
@@ -78,10 +81,10 @@ if %errorlevel% neq 0 (
 :: ==============================================
 echo [i] Iniciando aplicacion G360 NC-Sustentor...
 echo.
-python main.py
-if %errorlevel% neq 0 (
+"!UV_PATH!" run --python 3.12 main.py
+if !errorlevel! neq 0 (
     echo.
-    echo [ERROR] La aplicacion termino con un error (codigo: %errorlevel%)
+    echo [ERROR] La aplicacion termino con un error (codigo: !errorlevel!)
     pause
 )
 
