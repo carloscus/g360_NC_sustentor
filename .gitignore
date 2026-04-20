@@ -49,9 +49,14 @@ Thumbs.db
 
 # Cache uv
 .uv/
+uv.lock
 
 # IDE
 .vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# Portable version - ignore virtual env and cache
+**/g360-nc-sustentor-portable/.venv/
+**/g360-nc-sustentor-portable/uv.lock
