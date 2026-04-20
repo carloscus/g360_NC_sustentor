@@ -1,6 +1,13 @@
 @echo off
 setlocal enabledelayedexpansion
 title G360 NC-Sustentor
+
+REM Minimizar ventana CMD
+if not defined MINIMIZED (
+    start /min "" "%~0" %*
+    exit /b
+)
+
 cd /d "%~dp0"
 
 REM Primera ejecucion
@@ -34,7 +41,6 @@ if not exist ".venv\Scripts\python.exe" (
 
 echo Iniciando aplicacion...
 call .venv\Scripts\activate.bat
-start /wait python main.py
+python main.py
 
-REM Cerrar CMD automaticamente cuando termine la app
 exit /b
