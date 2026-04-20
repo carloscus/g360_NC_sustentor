@@ -1,13 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
 title G360 NC-Sustentor
-
-REM Minimizar ventana CMD
-if not defined MINIMIZED (
-    start /min "" "%~0" %*
-    exit /b
-)
-
 cd /d "%~dp0"
 
 REM Primera ejecucion
@@ -41,6 +34,6 @@ if not exist ".venv\Scripts\python.exe" (
 
 echo Iniciando aplicacion...
 call .venv\Scripts\activate.bat
-python main.py
+powershell -WindowStyle Minimized -Command "python main.py"
 
 exit /b
