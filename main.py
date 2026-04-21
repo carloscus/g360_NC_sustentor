@@ -611,7 +611,7 @@ class G360App:
                             copied_count += 1
                 
                 if copied_count > 0:
-                    desktop = Path.home() / "Desktop"
+                    desktop = self._get_desktop_path()
                     if os.name == 'nt' and not self.page.web:
                         os.startfile(str(desktop))
                     
@@ -670,9 +670,16 @@ class G360App:
             return df.sort_values(by="CANT_NUM", ascending=False).drop(columns=["CANT_NUM"])
         return df
 
+    def _get_desktop_path(self) -> Path:
+        """Obtiene la ruta real del Escritorio, comprobando si usa OneDrive u otras rutas."""
+        onedrive_desktop = Path.home() / "OneDrive" / "Desktop"
+        if onedrive_desktop.exists():
+            return onedrive_desktop
+        return Path.home() / "Desktop"
+
     def _get_unique_out_path(self, base_name: str) -> Optional[Path]:
         """Gestiona la existencia del archivo y retorna la ruta final o None si se salta."""
-        out_path = Path.home() / "Desktop" / base_name
+        out_path = self._get_desktop_path() / base_name
         if out_path.exists():
             choice = self.preguntar_sobrescribir(out_path.name)
             if choice == "skip":
@@ -724,9 +731,12 @@ class G360App:
                         
                         # Comparar
                         if serie_h == serie_target and nro_h == nro_target:
-                            nuevo_v = float(df_h.at[idx, "CANTIDAD"]) - float(cant_tomada or 0)
+                            precio_u = float(df_h.at[idx, "PRECIO_UNID"])
+                            nuevo_v = max(0.0, float(df_h.at[idx, "CANTIDAD"]) - float(cant_tomada or 0))
                             logger.debug(f"Descontando {cant_tomada} de '{item.ID_ARTICULO}' Doc({doc_str}). Nuevo saldo: {nuevo_v}")
-                            df_h.at[idx, "CANTIDAD"] = max(0.0, nuevo_v)
+                            df_h.at[idx, "CANTIDAD"] = nuevo_v
+                            # Sincronización de SOLES para evitar saltos de precio en Reporte 2
+                            df_h.at[idx, "SOLES"] = round(nuevo_v * precio_u, 4)
                             mask_match = True
                             break
                     
@@ -750,88 +760,112 @@ class G360App:
                             pass
                         
                         if match_found:
-                            nuevo_v = float(df_h.at[idx, "CANTIDAD"]) - float(item.CANTIDAD_REAL_ENCONTRADA or 0)
+                            precio_u = float(df_h.at[idx, "PRECIO_UNID"])
+                            nuevo_v = max(0.0, float(df_h.at[idx, "CANTIDAD"]) - float(item.CANTIDAD_REAL_ENCONTRADA or 0))
                             logger.debug(f"Descontando {item.CANTIDAD_REAL_ENCONTRADA} de '{item.ID_ARTICULO}' (Doc: {item.NRO_DOC}). Nuevo saldo: {nuevo_v}")
-                            df_h.at[idx, "CANTIDAD"] = max(0.0, nuevo_v)
+                            df_h.at[idx, "CANTIDAD"] = nuevo_v
+                            # Sincronizar SOLES para que el P.U. no salte en el Reporte 2
+                            df_h.at[idx, "SOLES"] = round(nuevo_v * precio_u, 4)
                             break
         
         return df_h[pd.to_numeric(df_h["CANTIDAD"], errors="coerce").fillna(0) > 0].reset_index(drop=True)
 
     def generar_flow(self):
+        logger.info("Iniciando flujo de generación de reportes.")
         self.progress.visible = True
         self.btn_generar.disabled = True
         self.page.update()
-        
-        def task():
-            logger.info("Iniciando flujo de generación de reportes.")
-            try:
-                cli_clean = re.sub(r'[\\/*?:"<>|]', "", self.txt_cliente.value).strip().replace(" ", "_")
-                base_fname = f"NC_{cli_clean}_{datetime.now().strftime('%d%m%Y')}.xlsx"
-                logger.debug(f"Nombre base del archivo de salida: {base_fname}")
+        try:
+            cli_clean = re.sub(r'[\\/*?:"<>|]', "", self.txt_cliente.value).strip().replace(" ", "_")
+            base_fname = f"NC_{cli_clean}_{datetime.now().strftime('%d%m%Y')}.xlsx"
+            logger.debug(f"Nombre base del archivo de salida: {base_fname}")
+            
+            # Carga y ordenamiento inicial
+            df_h_original = pd.read_excel(self.historial_path, dtype=str)
+            logger.info(f"Historial base cargado: {len(df_h_original)} filas.")
+            proc_hist_initial = NCProcessor(df_h_original) # Para limpiar el historial una vez
+            df_h = self._sort_historial(proc_hist_initial.historial.copy()) # Usar el historial limpio y luego ordenar
+            logger.info(f"Historial normalizado y ordenado por {self.rg_tipo_orden.value}: {len(df_h)} registros válidos.")
 
-                # Carga y ordenamiento inicial
-                df_h_original = pd.read_excel(self.historial_path, dtype=str)
-                logger.info(f"Historial base cargado: {len(df_h_original)} filas.")
-                proc_hist_initial = NCProcessor(df_h_original) # Para limpiar el historial una vez
-                df_h = self._sort_historial(proc_hist_initial.historial.copy()) # Usar el historial limpio y luego ordenar
-                logger.info(f"Historial normalizado y ordenado por {self.rg_tipo_orden.value}: {len(df_h)} registros válidos.")
+            for idx, req_path in enumerate(self.requerimientos_paths):
+                logger.info(f"Procesando archivo de requerimientos {idx + 1}/{len(self.requerimientos_paths)}: {Path(req_path).name}")
+                self.status.value = f"⏳ Procesando {idx + 1}/{len(self.requerimientos_paths)}..."
+                try:
+                    self.page.update()
+                    df_r = pd.read_excel(req_path, dtype=str)
+                    logger.debug(f"Requerimiento leído: {len(df_r)} filas.")
+                    proc = NCProcessor(df_h)
+                    # df_h ya viene limpio del paso inicial, proc lo reutiliza de forma eficiente.
+                    
+                    items, docs = proc.procesar_lote(df_r, forzar_cantidad_solicitada=self.sw_forzar_cant.value)
 
-                for idx, req_path in enumerate(self.requerimientos_paths):
-                    logger.info(f"Procesando archivo de requerimientos {idx + 1}/{len(self.requerimientos_paths)}: {Path(req_path).name}")
-                    self.status.value = f"⏳ Procesando {idx + 1}/{len(self.requerimientos_paths)}..."
-                    try:
-                        self.page.update()
-                        df_r = pd.read_excel(req_path, dtype=str)
-                        logger.debug(f"Requerimiento leído: {len(df_r)} filas.")
-                        proc = NCProcessor(df_h)
-                        
-                        items, docs = proc.procesar_lote(df_r, forzar_cantidad_solicitada=self.sw_forzar_cant.value)
+                    logger.debug(f"Lote procesado. {len(items)} ítems y {len(docs)} documentos únicos.")
+                    # LÓGICA INTELIGENTE DE SELECCIÓN DE FACTURA DE REFERENCIA
+                    doc_stats = {} # {doc: {'frecuencia': 0, 'monto_nc': 0.0}}
+                    for it in items:
+                        # Estimamos cuánto del subtotal de la NC pertenece a cada factura basándonos en la proporción de cantidad
+                        for doc, cant_en_doc in it.DOCUMENTOS_CANTIDAD.items():
+                            if doc not in doc_stats: doc_stats[doc] = {'frecuencia': 0, 'monto_nc': 0.0}
+                            doc_stats[doc]['frecuencia'] += 1
+                            # Proporción: (Cant tomada del doc / Cant total encontrada) * Subtotal NC
+                            prop = cant_en_doc / it.CANTIDAD_REAL_ENCONTRADA if it.CANTIDAD_REAL_ENCONTRADA > 0 else 0
+                            doc_stats[doc]['monto_nc'] += it.SUBTOTAL_DESCUENTO * prop
 
-                        logger.debug(f"Lote procesado. {len(items)} ítems y {len(docs)} documentos únicos.")
-                        all_docs = [doc for it in items for doc in it.DOCUMENTOS]
-                        sheet_n = str(Counter(all_docs).most_common(1)[0][0]) if all_docs else "Sustento"
-                        
-                        # Verificación de duplicados con opción de "Guardar como"
-                        out_path = self._get_unique_out_path(f"PARTE_{idx + 1}_{base_fname}")
-                        logger.debug(f"Ruta de salida para el reporte: {out_path}")
-                        if not out_path: continue
+                    # Ordenar facturas por frecuencia (desc) y luego por monto (desc)
+                    ranking_docs = sorted(
+                        doc_stats.keys(), 
+                        key=lambda d: (doc_stats[d]['frecuencia'], doc_stats[d]['monto_nc']), 
+                        reverse=True
+                    )
+                    
+                    # Si la más frecuente tiene un monto muy bajo (ej. < 5% del total NC), 
+                    # evaluamos si la segunda tiene mucha más relevancia económica.
+                    final_ref_doc = ranking_docs[0] if ranking_docs else "Sustento"
+                    if len(ranking_docs) > 1:
+                        monto_total_nc = sum(d['monto_nc'] for d in doc_stats.values())
+                        if doc_stats[ranking_docs[0]]['monto_nc'] < (monto_total_nc * 0.05) and doc_stats[ranking_docs[1]]['monto_nc'] > doc_stats[ranking_docs[0]]['monto_nc']:
+                            final_ref_doc = ranking_docs[1]
+                    
+                    # Verificación de duplicados con opción de "Guardar como"
+                    out_path = self._get_unique_out_path(f"PARTE_{idx + 1}_{base_fname}")
+                    logger.debug(f"Ruta de salida para el reporte: {out_path}")
+                    if not out_path: continue
 
-                        logger.info(f"Generando reporte Excel para Lote {idx + 1}")
-                        ExcelGenerator().generar_reporte(
-                            str(out_path), self.txt_cliente.value, f"{self.txt_motivo.value} (P{idx + 1})",
-                            items, docs, proc.obtener_rango_fechas(),
-                            sheet_name=sheet_n,
-                        )
-                        df_h = self._update_inventory_balances(df_h, items)
-                        
-                        if not self.page.web and os.name == 'nt':
-                            os.startfile(str(out_path))
-                    except PermissionError:
-                        logger.error(f"Acceso denegado a archivo en Lote {idx + 1}.")
-                        self.status.value = f"❌ Error: Archivo abierto o bloqueado en Lote {idx + 1}."
-                        self.status.color = "red"
-                        self.page.update()
-                        continue
-                    except Exception as ex:
-                        logger.error(f"No se pudo completar la escritura del reporte: {ex}")
-                        self.status.value = f"❌ Error: ¿Archivo abierto en Excel? ({ex})"
-                        self.status.color = "red"
-                        self.page.update()
-                        continue
+                    logger.info(f"Generando reporte Excel para Lote {idx + 1}")
+                    ExcelGenerator().generar_reporte(
+                        str(out_path), self.txt_cliente.value, f"{self.txt_motivo.value} (P{idx + 1})",
+                        items, docs, proc.obtener_rango_fechas(),
+                        sheet_name=final_ref_doc,
+                        factura_referencia=final_ref_doc
+                    )
+                    df_h = self._update_inventory_balances(df_h, items)
+                    
+                    if not self.page.web and os.name == 'nt':
+                        os.startfile(str(out_path))
+                except PermissionError:
+                    logger.error(f"Acceso denegado a archivo en Lote {idx + 1}.")
+                    self.status.value = f"❌ Error: Archivo abierto o bloqueado en Lote {idx + 1}."
+                    self.status.color = "red"
+                    self.page.update()
+                    continue
+                except Exception as ex:
+                    logger.error(f"No se pudo completar la escritura del reporte: {ex}")
+                    self.status.value = f"❌ Error: ¿Archivo abierto en Excel? ({ex})"
+                    self.status.color = "red"
+                    self.page.update()
+                    continue
 
-                self.status.value = "🎯 Proceso Completado"
-                self.status.color = self.G360_ACCENT
-                logger.info("Flujo de generación de reportes completado exitosamente.")
-            except Exception as ex:
-                logger.exception("Error crítico durante el flujo de generación de reportes:")
-                self.status.value = f"❌ Error: {str(ex)}"
-                self.status.color = "red"
-            finally:
-                self.progress.visible = False
-                self.btn_generar.disabled = False
-                self.page.update()
-
-        threading.Thread(target=task, daemon=True).start()
+            self.status.value = "🎯 Proceso Completado"
+            self.status.color = self.G360_ACCENT
+            logger.info("Flujo de generación de reportes completado exitosamente.")
+        except Exception as ex:
+            logger.exception("Error crítico durante el flujo de generación de reportes:")
+            self.status.value = f"❌ Error: {str(ex)}"
+            self.status.color = "red"
+        finally:
+            self.progress.visible = False
+            self.btn_generar.disabled = False
+            self.page.update()
 
     def _build_ui(self):
         sidebar = ft.Container(

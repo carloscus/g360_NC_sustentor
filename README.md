@@ -7,7 +7,9 @@
 ## ✨ Funcionalidades Destacadas
 
 ### 🧠 Inteligencia de Procesamiento
-- **Motor FIFO Inverso Mejorado:** Algoritmo optimizado que vincula requerimientos con las facturas de compra más recientes, garantizando que el sustento cumpla con los criterios contables. Rastrea cantidad por documento para evitar repeticiones entre reportes múltiples.
+- **Selección Inteligente de Referencia:** El sistema elige automáticamente la factura más representativa (mayor frecuencia de ítems y peso económico) como documento maestro para el encabezado y nombre de pestaña.
+- **Precisión de 4 Decimales:** Manejo riguroso de precios unitarios (`SOLES / CANTIDAD`) para garantizar que el Subtotal en Excel coincida exactamente con la facturación original.
+- **Validación de Techo Financiero:** Alerta roja si el monto solicitado de Nota de Crédito excede el valor disponible en los documentos de soporte.
 - **Gestión Multi-Reporte:** Sistema inteligente de descuento de inventario que asegura que cada factura se use solo una vez entre múltiples reportes. Descuenta automáticamente todas las facturas utilizadas por artículo, evitando el doble conteo.
 - **Normalización de Documentos:** Limpieza automática de prefijos duplicados (F204-F204-51999 → F204-51999) para garantizar formato correcto en reportes.
 - **Estrategias de Ordenamiento:** Permite elegir entre sustentar por "Más Recientes" (orden cronológico) o por "Mayor Volumen" (priorizando facturas con más cantidad comprada).
@@ -69,6 +71,13 @@ El proyecto sigue una arquitectura modular y escalable:
 - Sistema de rastreo por documento: cada artículo ahora registra cuánto se toma de cada factura (DOCUMENTOS_CANTIDAD).
 - Descuento inteligente: _update_inventory_balances itera por cada documento utilizado, no solo el más reciente.
 - Sincronización completa entre versión principal y portable.
+
+### Cambios en v2.0.2 (Mejoras Recientes)
+- **Corrección crítica de Fechas (str vs float):** Se forzó la limpieza y conversión obligatoria de fechas del historial a formato serial, previniendo cuelgues al analizar métricas y asegurando un ordenamiento FIFO inverso preciso.
+- **Ruta de Descarga Dinámica:** El sistema ahora detecta automáticamente si el usuario respalda su Escritorio en OneDrive (`Path.home() / "OneDrive" / "Desktop"`), previniendo que los reportes se guarden en ubicaciones invisibles.
+- **Limpieza de Interfaz en Excel:** Se eliminó la columna redundante "DOC. REFERENCIA" de la tabla de resultados. El dato maestro de referencia ahora habita exclusivamente en el cuadro superior derecho de totales.
+- **Auto-Apertura y Manejo de Errores:** Solucionado el bug de firmas de funciones (`takes 4 arguments but 5 were given`) que bloqueaba el guardado y la auto-apertura del Excel al finalizar.
+- **Sincronización Total:** Código 100% espejado entre `g360-nc-sustentor` y `g360-nc-sustentor-portable`.
 
 ---
 

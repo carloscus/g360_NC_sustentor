@@ -1,0 +1,88 @@
+# VERIFICACION Y SINCRONIZACION DE VERSIONES
+## G360 NC-Sustentor Pro
+
+**Fecha de Verificacion:** 20 Abril 2026
+**Estado:** OK - SINCRONIZADO Y FUNCIONAL
+
+---
+
+## RESUMEN EJECUTIVO
+
+Ambas versiones (Desarrollo y Portable) han sido verificadas y sincronizadas correctamente. 
+Todas las pruebas de importacion y funcionalidad pasan exitosamente.
+
+---
+
+## CAMBIOS REALIZADOS
+
+### 1. Sincronizacion de Estructura de Datos
+- Archivo: src/core/processor.py (version portable)
+- Cambio: Agregado campo FACTURA_REF a la clase ProcessedItem
+- Impacto: Ahora ambas versiones tienen la misma estructura de datos para procesamiento
+
+### 2. Eliminacion de Archivo Duplicado
+- Archivo: g360-nc-sustentor-portable/src/excel/processor.py
+- Razon: Archivo duplicado que no debia existir en src/excel/
+- Impacto: Estructura de carpetas ahora es identica en ambas versiones
+
+### 3. Creacion de Archivos __init__.py
+- Archivos creados:
+  - src/__init__.py
+  - src/core/__init__.py
+  - src/excel/__init__.py
+  - src/ui/__init__.py
+- Versiones: Tanto Desarrollo como Portable
+- Impacto: Mejora compatibilidad de imports y standarizacion de paquetes Python
+
+---
+
+## VERIFICACIONES DE FUNCIONAMIENTO
+
+Versions de DESARROLLO
+[OK] NCProcessor importado correctamente
+[OK] ExcelGenerator importado correctamente
+[OK] FACTURA_REF presente en ProcessedItem
+
+Version PORTABLE
+[OK] NCProcessor importado correctamente
+[OK] ExcelGenerator importado correctamente
+[OK] FACTURA_REF presente en ProcessedItem
+
+Configuracion de Dependencias
+[OK] pyproject.toml: IDENTICO en ambas versiones
+[OK] requirements.txt: IDENTICO en ambas versiones
+[OK] run.bat: IDENTICO en ambas versiones
+[OK] Python 3.12 requerido (disponible: 3.14.4)
+
+---
+
+## COMO EJECUTAR ESTA VERSION PORTABLE
+
+1. Descomprime esta carpeta en cualquier lugar de tu PC
+2. Doble CLICK en el archivo: run.bat
+3. Listo!
+
+FUNCIONAMIENTO AUTOMATICO:
+- La primera vez crea automaticamente el acceso directo en tu Escritorio
+- El CMD se cierra automaticamente
+- Solo se abre la aplicacion
+- Cuando cierras la aplicacion todo se cierra completamente
+
+---
+
+## REQUISITOS
+
+- Windows 10 / 11
+- Solo necesita conexion a internet la PRIMERA vez que se ejecuta
+- Python 3.10 o superior (se instala automaticamente si no lo tienes)
+
+---
+
+## SOPORTE
+
+Version 2.0.1 - G360 Ecosystem
+Ultima actualizacion: 20 Abril 2026
+
+---
+
+Estado Final: OK - LISTO PARA PRODUCCION Y DISTRIBUCION

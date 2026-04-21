@@ -51,7 +51,7 @@ class ExcelGenerator:
         if texto is None: return ""
         return "".join(c for c in str(texto) if c.isprintable()).strip()
 
-    def _escribir_encabezado_y_totales(self, cliente: str, motivo: str, fila_fin_datos: int):
+    def _escribir_encabezado_y_totales(self, cliente: str, motivo: str, fila_fin_datos: int, factura_ref: str = ""):
         """
         Construye la sección superior del reporte. 
         Utiliza referencias de celdas ($fila_fin_datos) para crear fórmulas de SUMA
@@ -82,7 +82,7 @@ class ExcelGenerator:
         f_igv = f"=ROUND(I1*0.18, 2)"  # I1 es el Subtotal
         f_tot = f"=ROUND(I1+I2, 2)"    # I1 + I2 es el Total con IGV
 
-        labels = [("Subtotal (Sin IGV):", f_sub), ("IGV (18.00%):", f_igv), ("TOTAL NC FINAL:", f_tot)]
+        labels = [("Subtotal (Sin IGV):", f_sub), ("IGV (18.00%):", f_igv), ("TOTAL NC FINAL:", f_tot), ("FACTURA REF:", factura_ref)]
         
         for i, (lab, form) in enumerate(labels, 1):
             # Etiqueta (Columna H)
@@ -98,6 +98,8 @@ class ExcelGenerator:
             c_v.fill = self.styles.total_fill
             if "TOTAL" in lab:
                 c_v.font = Font(bold=True, size=12)
+            if "FACTURA" in lab:
+                c_v.font = Font(bold=True, color="0000FF")
 
     def _escribir_cabeceras(self, fila: int):
         """Define los nombres de las columnas de la tabla de datos y aplica estilo G360."""
@@ -144,18 +146,18 @@ class ExcelGenerator:
         c_perc.number_format = self.fmt_pct
         c_perc.alignment = self.styles.center_align
 
-        # Monto del descuento unitario (P.U * %)
+        # Monto del descuento unitario (P.U * %) - Ahora en columna 7
         c_du = self.ws.cell(row=fila, column=7, value=f"=ROUND(D{fila}*F{fila}, 4)")
         c_du.border = self.styles.border
         c_du.fill = self.styles.critical_fill
         c_du.number_format = self.fmt_num_4
 
-        # Precio Neto (P.U - Descuento Unitario)
+        # Precio Neto (P.U - Descuento Unitario) - Ahora en columna 8
         c_neto = self.ws.cell(row=fila, column=8, value=f"=D{fila}-G{fila}")
         c_neto.border = self.styles.border
         c_neto.number_format = self.fmt_num_4
 
-        # Subtotal NC (Cantidad * Descuento Unitario)
+        # Subtotal NC (Cantidad * Descuento Unitario) - Ahora en columna 9
         c_sub = self.ws.cell(row=fila, column=9, value=f"=ROUND(C{fila}*G{fila}, 2)")
         c_sub.border = self.styles.border
         c_sub.number_format = self.fmt_num
@@ -167,8 +169,8 @@ class ExcelGenerator:
         status = self._limpiar(item.STATUS)        
         # Aplicar Zebra Striping a toda la fila si corresponde
         if bg_fill:
-            for col_idx in range(1, 12): # Columnas A hasta K (incluyendo Alerta)
-                if col_idx != 7: # No sobreescribir el color crítico de la columna G
+            for col_idx in range(1, 12): # Columnas A hasta K
+                if col_idx != 7: # No sobreescribir el color crítico de la columna G (DESC. UNIT)
                     self.ws.cell(row=fila, column=col_idx).fill = bg_fill
                 if col_idx == 7:
                     self.ws.cell(row=fila, column=col_idx).fill = self.styles.critical_fill
@@ -188,7 +190,7 @@ class ExcelGenerator:
             c_alert.fill = self.styles.info_fill
             c_alert.font = self.styles.info_font
 
-    def generar_reporte(self, ruta_salida, cliente, motivo, items_procesados, documentos_unicos, rango_fechas, sheet_name=None):
+    def generar_reporte(self, ruta_salida, cliente, motivo, items_procesados, documentos_unicos, rango_fechas, sheet_name=None, factura_referencia=""):
         """
         Genera un reporte de Notas de Crédito en formato Excel.
         
@@ -201,7 +203,7 @@ class ExcelGenerator:
             rango_fechas (Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]): Rango de fechas del historial.
             sheet_name (Optional[str]): Nombre opcional para la hoja de Excel.
         """
-        # SOLUCION 100% COMPATIBLE CON TODAS LAS VERSIONES DE OPENPYXL
+        # ✅ SOLUCION 100% COMPATIBLE CON TODAS LAS VERSIONES DE OPENPYXL
         os.makedirs(os.path.dirname(os.path.abspath(ruta_salida)), exist_ok=True)
 
         # 1. Calcular fila final real
@@ -215,7 +217,7 @@ class ExcelGenerator:
                 self.ws.title = clean_name
 
         # 2. Escribir Encabezado y Totales Superiores
-        self._escribir_encabezado_y_totales(cliente, motivo, fila_fin_datos)
+        self._escribir_encabezado_y_totales(cliente, motivo, fila_fin_datos, factura_referencia)
 
         self.ws.freeze_panes = "C7" # Congelar ID y Nombre, y filas de encabezado
 
@@ -253,4 +255,89 @@ class ExcelGenerator:
             
         self.wb.save(str(ruta_salida))
 
+    def generar_plantilla_vacia(self, ruta_salida):
+        """
+        Genera la plantilla oficial de Requerimientos lista para usar,
+        con formato, ejemplos, validaciones e instrucciones.
+        """
+        # ✅ SOLUCION 100% COMPATIBLE CON TODAS LAS VERSIONES DE OPENPYXL
+        os.makedirs(os.path.dirname(os.path.abspath(ruta_salida)), exist_ok=True)
 
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "REQUERIMIENTOS"
+
+        note_fill = PatternFill(start_color="FFFBE6", end_color="FFFBE6", fill_type="solid")
+
+        # Cabeceras oficiales
+        columnas = [
+            ("CODIGO", "Código del Artículo / SKU"),
+            ("NOM_ARTICULO", "Nombre del Artículo (opcional)"),
+            ("CANTIDAD_NC", "Cantidad de unidades a procesar"),
+            ("PORCENTAJE_DESC", "Descuento a aplicar (%)")
+        ]
+
+        # Forzar formatos de celda
+        for r in range(2, 501):
+            ws.cell(row=r, column=1).number_format = '@'       # CODIGO
+            ws.cell(row=r, column=3).number_format = '0'       # CANTIDAD
+            ws.cell(row=r, column=4).number_format = '0.00%'   # PORCENTAJE
+
+        # Escribir cabeceras con estilo
+        for col, (nombre, descripcion) in enumerate(columnas, 1):
+            celda = ws.cell(row=1, column=col, value=nombre)
+            celda.fill = self.styles.header_fill
+            celda.font = self.styles.header_font
+            celda.alignment = self.styles.center_align
+            celda.comment = f"\n{descripcion}\n"
+            celda.border = self.styles.border
+
+        # Ejemplos de uso (con los datos solicitados)
+        ejemplos = [
+            ["123456", "PRODUCTO EJEMPLO 1", 5, "10%"],
+            ["789012", "PRODUCTO EJEMPLO 2", 12, 3.5],
+            ["345678", "", 2, 0.05],
+            ["02182", "PRODUCTO EJEMPLO 1", 423, 0.05],
+            ["123456", "PRODUCTO EJEMPLO 2", 12, 0.10],
+        ]
+
+        for fila, datos in enumerate(ejemplos, 2):
+            for col, valor in enumerate(datos, 1):
+                celda = ws.cell(row=fila, column=col, value=valor)
+                celda.fill = self.styles.zebra_fill
+                celda.border = self.styles.border
+
+        # Filas de instrucciones
+        fila_nota = 6
+        ws.merge_cells(start_row=fila_nota, start_column=1, end_row=fila_nota, end_column=4)
+        celda_nota = ws.cell(row=fila_nota, column=1, value="📋 INSTRUCCIONES:")
+        celda_nota.font = Font(bold=True, size=11)
+        celda_nota.fill = note_fill
+
+        instrucciones = [
+            "1. Eliminar las filas de ejemplo (2,3,4) antes de cargar tus datos",
+            "2. Solo las columnas CODIGO, CANTIDAD_NC y PORCENTAJE_DESC son obligatorias",
+            "3. El descuento se acepta en formato: 10%, 10, 0.1, 10.5",
+            "4. No dejar filas vacías entre registros",
+            "5. No modificar el nombre ni orden de las columnas",
+            "6. Guardar el archivo antes de importar al sistema"
+        ]
+
+        for i, texto in enumerate(instrucciones, 7):
+            ws.merge_cells(start_row=i, start_column=1, end_row=i, end_column=4)
+            celda = ws.cell(row=i, column=1, value=texto)
+            celda.font = Font(size=10, color="444444")
+
+        # Ajustar anchos de columna
+        ws.column_dimensions['A'].width = 18
+        ws.column_dimensions['B'].width = 50
+        ws.column_dimensions['C'].width = 22
+        ws.column_dimensions['D'].width = 25
+
+        # Congelar primera fila
+        ws.freeze_panes = "A2"
+
+        # Agregar filtros automáticos
+        ws.auto_filter.ref = "A1:D1"
+
+        wb.save(str(ruta_salida))

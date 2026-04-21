@@ -51,7 +51,7 @@ class ExcelGenerator:
         if texto is None: return ""
         return "".join(c for c in str(texto) if c.isprintable()).strip()
 
-    def _escribir_encabezado_y_totales(self, cliente: str, motivo: str, fila_fin_datos: int):
+    def _escribir_encabezado_y_totales(self, cliente: str, motivo: str, fila_fin_datos: int, factura_ref: str = ""):
         """
         Construye la sección superior del reporte. 
         Utiliza referencias de celdas ($fila_fin_datos) para crear fórmulas de SUMA
@@ -82,7 +82,7 @@ class ExcelGenerator:
         f_igv = f"=ROUND(I1*0.18, 2)"  # I1 es el Subtotal
         f_tot = f"=ROUND(I1+I2, 2)"    # I1 + I2 es el Total con IGV
 
-        labels = [("Subtotal (Sin IGV):", f_sub), ("IGV (18.00%):", f_igv), ("TOTAL NC FINAL:", f_tot)]
+        labels = [("Subtotal (Sin IGV):", f_sub), ("IGV (18.00%):", f_igv), ("TOTAL NC FINAL:", f_tot), ("FACTURA REF:", factura_ref)]
         
         for i, (lab, form) in enumerate(labels, 1):
             # Etiqueta (Columna H)
@@ -98,6 +98,8 @@ class ExcelGenerator:
             c_v.fill = self.styles.total_fill
             if "TOTAL" in lab:
                 c_v.font = Font(bold=True, size=12)
+            if "FACTURA" in lab:
+                c_v.font = Font(bold=True, color="0000FF")
 
     def _escribir_cabeceras(self, fila: int):
         """Define los nombres de las columnas de la tabla de datos y aplica estilo G360."""
@@ -144,18 +146,18 @@ class ExcelGenerator:
         c_perc.number_format = self.fmt_pct
         c_perc.alignment = self.styles.center_align
 
-        # Monto del descuento unitario (P.U * %)
+        # Monto del descuento unitario (P.U * %) - Ahora en columna 7
         c_du = self.ws.cell(row=fila, column=7, value=f"=ROUND(D{fila}*F{fila}, 4)")
         c_du.border = self.styles.border
         c_du.fill = self.styles.critical_fill
         c_du.number_format = self.fmt_num_4
 
-        # Precio Neto (P.U - Descuento Unitario)
+        # Precio Neto (P.U - Descuento Unitario) - Ahora en columna 8
         c_neto = self.ws.cell(row=fila, column=8, value=f"=D{fila}-G{fila}")
         c_neto.border = self.styles.border
         c_neto.number_format = self.fmt_num_4
 
-        # Subtotal NC (Cantidad * Descuento Unitario)
+        # Subtotal NC (Cantidad * Descuento Unitario) - Ahora en columna 9
         c_sub = self.ws.cell(row=fila, column=9, value=f"=ROUND(C{fila}*G{fila}, 2)")
         c_sub.border = self.styles.border
         c_sub.number_format = self.fmt_num
@@ -167,8 +169,8 @@ class ExcelGenerator:
         status = self._limpiar(item.STATUS)        
         # Aplicar Zebra Striping a toda la fila si corresponde
         if bg_fill:
-            for col_idx in range(1, 12): # Columnas A hasta K (incluyendo Alerta)
-                if col_idx != 7: # No sobreescribir el color crítico de la columna G
+            for col_idx in range(1, 12): # Columnas A hasta K
+                if col_idx != 7: # No sobreescribir el color crítico de la columna G (DESC. UNIT)
                     self.ws.cell(row=fila, column=col_idx).fill = bg_fill
                 if col_idx == 7:
                     self.ws.cell(row=fila, column=col_idx).fill = self.styles.critical_fill
@@ -188,7 +190,7 @@ class ExcelGenerator:
             c_alert.fill = self.styles.info_fill
             c_alert.font = self.styles.info_font
 
-    def generar_reporte(self, ruta_salida, cliente, motivo, items_procesados, documentos_unicos, rango_fechas, sheet_name=None):
+    def generar_reporte(self, ruta_salida, cliente, motivo, items_procesados, documentos_unicos, rango_fechas, sheet_name=None, factura_referencia=""):
         """
         Genera un reporte de Notas de Crédito en formato Excel.
         
@@ -215,7 +217,7 @@ class ExcelGenerator:
                 self.ws.title = clean_name
 
         # 2. Escribir Encabezado y Totales Superiores
-        self._escribir_encabezado_y_totales(cliente, motivo, fila_fin_datos)
+        self._escribir_encabezado_y_totales(cliente, motivo, fila_fin_datos, factura_referencia)
 
         self.ws.freeze_panes = "C7" # Congelar ID y Nombre, y filas de encabezado
 

@@ -26,6 +26,7 @@ class ProcessedItem:
     STATUS: str
     NRO_DOC: str = ""
     SERIE_DOC: str = ""
+    FACTURA_REF: str = "" # Documento principal de referencia
     DOCUMENTOS_CANTIDAD: Dict[str, float] = field(default_factory=dict)  # Mapeo de doc => cantidad tomada
 
 
@@ -77,9 +78,12 @@ class NCProcessor:
 
         # Evitar re-procesamiento si las columnas críticas ya están normalizadas (Idempotencia)
         cols_criticas_set = {"ANHO", "ID_ARTICULO", "CANTIDAD", "FECHA_ORIG", "SOLES", "NRO_DOC"}
-        if cols_criticas_set.issubset(df.columns):
+        es_primera_vez = not cols_criticas_set.issubset(df.columns)
+        
+        if not es_primera_vez:
             logger.info("El historial ya presenta columnas normalizadas. Ejecutando limpieza de tipos de datos de todas formas.")
         else:
+            # Si no está normalizado, es la primera carga: realizamos limpieza completa y ordenamiento inicial
             # 1. Identificar y limpiar cabeceras
             df = self._identify_and_clean_headers(df)
             logger.debug(f"Cabeceras identificadas. Columnas actuales: {df.columns.tolist()}")
@@ -90,8 +94,9 @@ class NCProcessor:
         # 3. Copia profunda y limpieza de tipos de datos
         df = self._clean_data_types(df.copy())
 
-        # 4. Procesar fechas y ordenar
+        # 4. Procesar fechas y ordenar siempre (es fundamental para la lógica FIFO y evitar errores de tipos)
         df = self._parse_dates_and_sort(df)
+        
         logger.info(f"Historial preparado con éxito: {len(df)} registros válidos.")
         
         return df
@@ -156,7 +161,10 @@ class NCProcessor:
                     errors='coerce'
                 ).fillna(0)
 
-        df["PRECIO_UNID"] = (df["SOLES"] / df["CANTIDAD"]).replace([float("inf"), -float("inf")], 0).fillna(0).round(2)
+        # Protección contra re-cálculo en multi-reportes
+        if "PRECIO_UNID" not in df.columns or df["PRECIO_UNID"].sum() == 0:
+            df["PRECIO_UNID"] = (df["SOLES"] / df["CANTIDAD"]).replace([float("inf"), -float("inf")], 0).fillna(0).round(4)
+            
         return df
 
     def _parse_dates_and_sort(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -245,7 +253,7 @@ class NCProcessor:
         Detecta si un artículo proviene de múltiples precios/facturas.
         Retorna también el mapeo de cantidad por documento para auditoría posterior.
         """
-        res = {"docs": [], "doc_cantidad": {}, "precios": set(), "asignado": 0, "restante": cantidad_nc}
+        res = {"docs": [], "doc_cantidad": {}, "precios": set(), "asignado": 0, "restante": cantidad_nc, "valor_soporte_total": 0.0, "doc_montos": {}}
         for _, fila in articulo_historial.iterrows():
             if res["restante"] <= 0:
                 break
@@ -275,8 +283,13 @@ class NCProcessor:
             if doc_full not in res["docs"]:
                 res["docs"].append(doc_full)
                 res["doc_cantidad"][doc_full] = 0
+                res["doc_montos"][doc_full] = 0
+            
+            monto_proporcional = tomar * float(fila['PRECIO_UNID'])
             res["doc_cantidad"][doc_full] += tomar
-            res["precios"].add(round(fila['PRECIO_UNID'], 2))
+            res["doc_montos"][doc_full] += monto_proporcional
+            res["valor_soporte_total"] += monto_proporcional
+            res["precios"].add(round(float(fila['PRECIO_UNID']), 2))
             res["asignado"] += tomar
             res["restante"] -= tomar
         return res
@@ -286,21 +299,27 @@ class NCProcessor:
         Calcula los montos financieros finales (Descuento Unitario, Neto y Subtotal)
         y determina el mensaje de estado basado en el éxito de la asignación FIFO.
         """
-        precio_ref = round(float(reciente['PRECIO_UNID']), 2)
+        precio_ref = round(float(reciente['PRECIO_UNID']), 4)
         status = "OK"
         if asig["restante"] > 0:
             status = f"PENDIENTE SUSTENTO: Sustentado: {int(asig['asignado'])} | Faltan: {int(asig['restante'])}."
         elif len(asig["precios"]) > 1:
-            status = f"INFO: Precios variables. Se usó el más reciente: {precio_ref:.4f}"
+            p_min = min(asig["precios"])
+            p_max = max(asig["precios"])
+            status = f"INFO: Precios variables (Rango: {p_min:.2f}-{p_max:.2f}). Se usó el más reciente: {precio_ref:.4f}"
 
         m_desc_u = round(precio_ref * porc, 4)
         cant_f = cant_nc if forzar else asig["asignado"]
+
+        doc_ref = asig["docs"][0] if asig["docs"] else ""
+
         return ProcessedItem(
             ID_ARTICULO=cod, NOM_ARTICULO=nom, CANTIDAD_SOLICITADA=cant_nc,
             CANTIDAD_REAL_ENCONTRADA=cant_f, PRECIO_UNITARIO=precio_ref,
             MONTO_DESCUENTO_UNITARIO=m_desc_u, PRECIO_NETO_FINAL=round(precio_ref - m_desc_u, 4),
             SUBTOTAL_DESCUENTO=round(m_desc_u * cant_f, 2), PORCENTAJE_APLICADO=porc,
             DOCUMENTOS=asig["docs"], STATUS=status, NRO_DOC=str(reciente['NRO_DOC']), SERIE_DOC=str(reciente['SERIE_DOC']),
+            FACTURA_REF=doc_ref,
             DOCUMENTOS_CANTIDAD=asig.get("doc_cantidad", {})
         )
 
@@ -405,6 +424,10 @@ class NCProcessor:
                 warning_prefix = "INFO: Cantidad vacía o cero. "
             elif porcentaje_val <= 0:
                 warning_prefix = "INFO: Descuento vacío o cero. "
+            elif porcentaje_val > 1.0:
+                warning_prefix = "INFO: Descuento excede 100%. "
+            elif porcentaje_val > 1.0:
+                warning_prefix = "INFO: Descuento excede 100%. "
             
             item = self.procesar_articulo(
                 codigo=codigo_raw,
