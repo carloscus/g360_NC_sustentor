@@ -171,16 +171,22 @@ class NCProcessor:
         """
         Convierte fechas manejando seriales de Excel y formatos mixtos.
         Registra las filas omitidas para auditoría.
+        SOLUCION: Error 'not supported between instances of Str and float'
         """
+        # ✅ PRIMERO: Limpieza universal, eliminamos cadenas vacias y nan antes de cualquier procesamiento
+        df['FECHA_ORIG'] = df['FECHA_ORIG'].astype(str).str.strip().replace(['', 'nan', 'NaN', 'None'], pd.NA)
+
         # 1. Manejo de fechas seriales de Excel (números que representan días desde 1900)
         def convert_excel_date(x):
+            if pd.isna(x):
+                return pd.NA
             try:
                 # Intentamos convertir a float para capturar "45292.0" o 45292
                 f_val = float(x)
                 # Rango de seguridad: fechas entre 1900 (1) y 2100 (73050 aprox)
                 if 1 <= f_val <= 100000:
                     return pd.to_datetime(int(f_val), unit='D', origin='1899-12-30')
-            except:
+            except (ValueError, TypeError):
                 pass
             return x
 
