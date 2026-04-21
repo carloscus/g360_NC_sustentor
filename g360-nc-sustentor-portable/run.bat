@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 title G360 NC-Sustentor
 cd /d "%~dp0"
 
-REM Primera ejecucion
+REM ✅ FIX COMPLETO: Eliminar UV y usar pip estandar que funciona siempre
 if not exist ".venv\Scripts\python.exe" (
     echo.
     echo =========================================
@@ -11,17 +11,13 @@ if not exist ".venv\Scripts\python.exe" (
     echo =========================================
     echo.
     
-    echo Instalando UV...
-    where uv >nul 2>&1
-    if errorlevel 1 powershell -NoProfile -Command "irm https://astral.sh/uv/install.ps1 | iex" 2>nul
-    
     echo Creando entorno virtual...
-    uv venv .venv --python 3.12 >nul 2>&1
-    if errorlevel 1 uv venv .venv >nul 2>&1
+    python -m venv .venv
     
     echo Instalando paquetes...
     call .venv\Scripts\activate.bat
-    uv pip install -r requirements.txt >nul 2>&1
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
     
     echo.
     REM Crear acceso directo
@@ -34,6 +30,16 @@ if not exist ".venv\Scripts\python.exe" (
 
 echo Iniciando aplicacion...
 call .venv\Scripts\activate.bat
-powershell -WindowStyle Minimized -Command "python main.py"
+
+REM ✅ FIX: No minimizar ventana, mostrar salida de errores y mantener abierto si falla
+python main.py
+
+REM Si hay error, mantener ventana abierta para ver el mensaje
+if errorlevel 1 (
+    echo.
+    echo ERROR: La aplicacion se cerro inesperadamente.
+    echo Presione cualquier tecla para salir...
+    pause >nul
+)
 
 exit /b
