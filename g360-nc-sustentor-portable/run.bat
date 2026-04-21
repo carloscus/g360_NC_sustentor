@@ -3,43 +3,55 @@ setlocal enabledelayedexpansion
 title G360 NC-Sustentor
 cd /d "%~dp0"
 
-REM ✅ FIX COMPLETO: Eliminar UV y usar pip estandar que funciona siempre
+REM Verificar si es primera ejecucion
 if not exist ".venv\Scripts\python.exe" (
+    cls
     echo.
     echo =========================================
-    echo   PRIMERA EJECUCION - PREPARANDO
+    echo   PRIMERA EJECUCION - CONFIGURANDO
     echo =========================================
     echo.
     
-    echo Creando entorno virtual...
-    python -m venv .venv
-    
-    echo Instalando paquetes...
-    call .venv\Scripts\activate.bat
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
-    
-    echo.
-    REM Crear acceso directo
-    if not exist "%USERPROFILE%\Desktop\G360 NC-Sustentor.lnk" (
-        echo Creando acceso directo en escritorio...
-        cscript //nologo "%~dp0create_shortcut.vbs" 2>nul
+    echo 🔹 Instalando gestor de paquetes UV...
+    where uv >nul 2>&1
+    if errorlevel 1 (
+        powershell -NoProfile -Command "irm https://astral.sh/uv/install.ps1 | iex" >nul 2>&1
+        REM Actualizar PATH actual para que UV este disponible inmediatamente
+        for /f "tokens=2*" %%a in ('reg query "HKCU\Environment" /v Path') do set "PATH=%%b;!PATH!"
     )
+    
+    echo 🔹 Creando entorno virtual...
+    uv venv .venv --python 3.12 >nul 2>&1
+    if errorlevel 1 uv venv .venv >nul 2>&1
+    
+    echo 🔹 Instalando dependencias...
+    call .venv\Scripts\activate.bat
+    uv pip install -r requirements.txt >nul 2>&1
+    
+    echo 🔹 Creando acceso directo personalizado...
+    if exist "%~dp0create_shortcut.vbs" (
+        cscript //nologo "%~dp0create_shortcut.vbs" >nul 2>&1
+    )
+    
     echo.
+    echo ✅ CONFIGURACION COMPLETADA CORRECTAMENTE
+    echo.
+    echo ℹ️  Se ha creado un acceso directo en tu Escritorio
+    echo ℹ️  Proximas veces abre directamente desde el icono del escritorio
+    echo.
+    timeout /t 3 /nobreak >nul
+    cls
 )
 
-echo Iniciando aplicacion...
+REM Iniciar aplicacion minimizada
+echo 🚀 Iniciando G360 NC-Sustentor...
 call .venv\Scripts\activate.bat
 
-REM ✅ FIX: No minimizar ventana, mostrar salida de errores y mantener abierto si falla
-python main.py
+REM Minimizar esta ventana CMD automaticamente
+powershell -WindowStyle Minimized -Command "" >nul
 
-REM Si hay error, mantener ventana abierta para ver el mensaje
-if errorlevel 1 (
-    echo.
-    echo ERROR: La aplicacion se cerro inesperadamente.
-    echo Presione cualquier tecla para salir...
-    pause >nul
-)
+REM Ejecutar aplicacion
+start /wait /min pythonw.exe main.py
 
-exit /b
+REM Cerrar CMD inmediatamente cuando termine la aplicacion
+exit

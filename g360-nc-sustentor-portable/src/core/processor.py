@@ -294,4 +294,143 @@ class NCProcessor:
             monto_proporcional = tomar * float(fila['PRECIO_UNID'])
             res["doc_cantidad"][doc_full] += tomar
             res["doc_montos"][doc_full] += monto_proporcional
-            res["valor_soporte
+            res["valor_soporte_total"] += monto_proporcional
+            res["precios"].add(round(float(fila['PRECIO_UNID']), 2))
+            res["asignado"] += tomar
+            res["restante"] -= tomar
+        return res
+
+    def _finalizar_item(self, cod, nom, cant_nc, porc, asig, reciente, forzar) -> ProcessedItem:
+        """
+        Calcula los montos financieros finales (Descuento Unitario, Neto y Subtotal)
+        y determina el mensaje de estado basado en el éxito de la asignación FIFO.
+        """
+        precio_ref = round(float(reciente['PRECIO_UNID']), 4)
+        status = "OK"
+        if asig["restante"] > 0:
+            status = f"PENDIENTE SUSTENTO: Sustentado: {int(asig['asignado'])} | Faltan: {int(asig['restante'])}."
+        elif len(asig["precios"]) > 1:
+            p_min = min(asig["precios"])
+            p_max = max(asig["precios"])
+            status = f"INFO: Precios variables (Rango: {p_min:.2f}-{p_max:.2f}). Se usó el más reciente: {precio_ref:.4f}"
+
+        m_desc_u = round(precio_ref * porc, 4)
+        cant_f = cant_nc if forzar else asig["asignado"]
+
+        doc_ref = asig["docs"][0] if asig["docs"] else ""
+
+        return ProcessedItem(
+            ID_ARTICULO=cod, NOM_ARTICULO=nom, CANTIDAD_SOLICITADA=cant_nc,
+            CANTIDAD_REAL_ENCONTRADA=cant_f, PRECIO_UNITARIO=precio_ref,
+            MONTO_DESCUENTO_UNITARIO=m_desc_u, PRECIO_NETO_FINAL=round(precio_ref - m_desc_u, 4),
+            SUBTOTAL_DESCUENTO=round(m_desc_u * cant_f, 2), PORCENTAJE_APLICADO=porc,
+            DOCUMENTOS=asig["docs"], STATUS=status, NRO_DOC=str(reciente['NRO_DOC']), SERIE_DOC=str(reciente['SERIE_DOC']),
+            FACTURA_REF=doc_ref,
+            DOCUMENTOS_CANTIDAD=asig.get("doc_cantidad", {})
+        )
+
+    def _crear_item_error(self, cod, cant, porc) -> ProcessedItem:
+        return ProcessedItem(
+            cod, "NO ENCONTRADO", cant, 0, 0, 0, 0, 0, porc, [], "ERROR: No en historial"
+        )
+
+    def _construir_item_vacio(self, cod, nom, porc, rec) -> ProcessedItem:
+        p_ref = round(float(rec['PRECIO_UNID']), 2)
+        return ProcessedItem(
+            cod, nom, 0, 0, p_ref, 0, p_ref, 0, porc, [], "INFO: Cantidad vacía", str(rec['NRO_DOC']), str(rec['SERIE_DOC'])
+        )
+
+    def _convertir_porcentaje(self, p) -> float:
+        """
+        Convierte un valor de porcentaje (ej. '3%', '1.25', '0.03') a un float decimal.
+        """
+        if pd.isna(p) or str(p).strip() == "": return 0.0
+        s = str(p).replace('%', '').strip()
+        try:
+            val = float(s)
+            if val >= 0.5:
+                return val / 100
+            return val
+        except (ValueError, TypeError):
+            logger.warning(f"No se pudo convertir el porcentaje: '{p}'. Se usará 0.0")
+            return 0.0
+
+    def procesar_lote(
+        self,
+        requerimientos: pd.DataFrame,
+        forzar_cantidad_solicitada: bool = True
+    ) -> Tuple[List[ProcessedItem], List[str]]:
+        logger.info(f"Procesando lote de {len(requerimientos)} requerimientos.")
+
+        requerimientos.columns = [self._limpiar_col_universal(c) for c in requerimientos.columns]
+        
+        if not requerimientos.empty:
+            if requerimientos.iloc[-1].astype(str).str.contains(r'TOTAL|TOTALES', case=False, na=False).any():
+                requerimientos = requerimientos.iloc[:-1].reset_index(drop=True)
+
+        cols_req = ['CODIGO', 'CANTIDAD_NC', 'PORCENTAJE_DESC']
+        faltantes = [c for c in cols_req if c not in requerimientos.columns]
+        if faltantes:
+            raise ValueError(f"Archivo de Requerimientos incompleto. Faltan columnas: {', '.join(faltantes)}")
+
+        resultados = []
+        todos_documentos = set()
+
+        for _, fila in requerimientos.iterrows():
+            codigo_raw = str(fila.get('CODIGO', '')).strip()
+            if codigo_raw == "" or codigo_raw.lower() == "nan":
+                resultados.append(ProcessedItem(
+                    ID_ARTICULO="N/A", NOM_ARTICULO="FILA SIN CÓDIGO", CANTIDAD_SOLICITADA=0,
+                    CANTIDAD_REAL_ENCONTRADA=0, PRECIO_UNITARIO=0, MONTO_DESCUENTO_UNITARIO=0,
+                    PRECIO_NETO_FINAL=0, SUBTOTAL_DESCUENTO=0, PORCENTAJE_APLICADO=0,
+                    DOCUMENTOS=[], STATUS="ERROR: Fila vacía o sin código de artículo"
+                ))
+                continue
+
+            raw_cant = str(fila['CANTIDAD_NC']).upper().replace('O', '0').strip()
+            try:
+                cant_val = int(float(pd.to_numeric(raw_cant, errors='coerce') or 0))
+            except (ValueError, TypeError):
+                cant_val = 0
+
+            porcentaje_val = self._convertir_porcentaje(fila['PORCENTAJE_DESC'])
+
+            warning_prefix = ""
+            if cant_val <= 0:
+                warning_prefix = "INFO: Cantidad vacía o cero. "
+            elif porcentaje_val <= 0:
+                warning_prefix = "INFO: Descuento vacío o cero. "
+            
+            item = self.procesar_articulo(
+                codigo=codigo_raw, cantidad_nc=cant_val, porcentaje_desc=porcentaje_val,
+                forzar_cantidad_solicitada=forzar_cantidad_solicitada
+            )
+
+            if warning_prefix and "ERROR" not in item.STATUS:
+                item.STATUS = f"{warning_prefix}{item.STATUS}"
+
+            resultados.append(item)
+            for doc in item.DOCUMENTOS:
+                todos_documentos.add(doc)
+
+        logger.info(f"Lote finalizado. Items procesados: {len(resultados)}. Documentos hallados: {len(todos_documentos)}")
+        return resultados, sorted(list(todos_documentos))
+
+    def obtener_rango_fechas(self) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+        if self.historial.empty:
+            return None, None
+        fecha_reciente = self.historial['FECHA_ORIG'].max()
+        fecha_antigua = self.historial['FECHA_ORIG'].min()
+        return fecha_antigua, fecha_reciente
+
+    def obtener_resumen_lineas(self) -> List[Dict]:
+        if self.historial.empty or "NOM_LINEA" not in self.historial.columns:
+            return []
+        resumen = self.historial.groupby("NOM_LINEA")["SOLES"].sum().reset_index()
+        total_general = resumen["SOLES"].sum()
+        if total_general == 0: return []
+        max_val = resumen["SOLES"].abs().max()
+        resumen["ESCALA_VISUAL"] = (resumen["SOLES"].abs() ** 0.55) / (max_val ** 0.55)
+        resumen["ES_NEGATIVO"] = resumen["SOLES"] < 0
+        resumen["PORCENTAJE"] = (resumen["SOLES"] / total_general).abs()
+        return resumen.sort_values("SOLES", ascending=False).head(16).to_dict("records")
