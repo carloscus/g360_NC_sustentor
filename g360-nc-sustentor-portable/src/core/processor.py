@@ -78,9 +78,7 @@ class NCProcessor:
 
         # Evitar re-procesamiento si las columnas críticas ya están normalizadas (Idempotencia)
         cols_criticas_set = {"ANHO", "ID_ARTICULO", "CANTIDAD", "FECHA_ORIG", "SOLES", "NRO_DOC"}
-        es_primera_vez = not cols_criticas_set.issubset(df.columns)
-        
-        if not es_primera_vez:
+        if cols_criticas_set.issubset(df.columns):
             logger.info("El historial ya presenta columnas normalizadas. Ejecutando limpieza de tipos de datos de todas formas.")
         else:
             # Si no está normalizado, es la primera carga: realizamos limpieza completa y ordenamiento inicial
@@ -94,9 +92,9 @@ class NCProcessor:
         # 3. Copia profunda y limpieza de tipos de datos
         df = self._clean_data_types(df.copy())
 
-        # 4. Procesar fechas y ordenar siempre (es fundamental para la lógica FIFO y evitar errores de tipos)
-        df = self._parse_dates_and_sort(df)
-        
+        # 4. Procesar fechas y ordenar solo si es la primera vez (para no romper el orden elegido en la UI)
+        if not cols_criticas_set.issubset(df.columns):
+            df = self._parse_dates_and_sort(df)
         logger.info(f"Historial preparado con éxito: {len(df)} registros válidos.")
         
         return df
@@ -161,10 +159,11 @@ class NCProcessor:
                     errors='coerce'
                 ).fillna(0)
 
+        # Aumentamos precisión a 4 decimales para evitar inconsistencias en el cálculo Total = Cant * P.U.
+        df["PRECIO_UNID"] = (df["SOLES"] / df["CANTIDAD"]).replace([float("inf"), -float("inf")], 0).fillna(0).round(4)
         # Protección contra re-cálculo en multi-reportes
         if "PRECIO_UNID" not in df.columns or df["PRECIO_UNID"].sum() == 0:
             df["PRECIO_UNID"] = (df["SOLES"] / df["CANTIDAD"]).replace([float("inf"), -float("inf")], 0).fillna(0).round(4)
-            
         return df
 
     def _parse_dates_and_sort(self, df: pd.DataFrame) -> pd.DataFrame:
