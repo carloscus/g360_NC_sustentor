@@ -43,7 +43,8 @@ class NCProcessor:
         """
         self.filas_omitidas_detalle: List[Dict] = []
         self.historial = self._preparar_historial(historial_compras)
-        self._cache_articulos: Dict[str, pd.DataFrame] = {}
+        # Optimización: Pre-agrupar historial por artículo para evitar filtrados O(N) repetitivos
+        self._cache_articulos = {str(k): v for k, v in self.historial.groupby('ID_ARTICULO')}
 
     def _limpiar_col_universal(self, col_name) -> str:
         """
@@ -214,9 +215,7 @@ class NCProcessor:
         Obtiene el sub-dataframe de un SKU. Utiliza caché para evitar
         operaciones de filtrado costosas en reportes grandes.
         """
-        if codigo not in self._cache_articulos:
-            self._cache_articulos[codigo] = self.historial[self.historial['ID_ARTICULO'] == codigo].copy()
-        return self._cache_articulos[codigo]
+        return self._cache_articulos.get(codigo, pd.DataFrame())
 
     def procesar_articulo(
         self,
@@ -307,15 +306,27 @@ class NCProcessor:
         """
         precio_ref = round(float(reciente['PRECIO_UNID']), 4)
         status = "OK"
+        
         if asig["restante"] > 0:
-            status = f"PENDIENTE SUSTENTO: Sustentado: {int(asig['asignado'])} | Faltan: {int(asig['restante'])}."
+            if asig["asignado"] == 0:
+                # Caso sin ninguna unidad encontrada
+                if forzar:
+                    status = f"✅ SE USARON {cant_nc} UNIDADES: Sin sustento disponible"
+                else:
+                    status = f"⚠️ SE USARON 0 UNIDADES: Sin sustento disponible"
+            else:
+                # Caso parcial
+                if forzar:
+                    status = f"✅ SE USARON {cant_nc} UNIDADES: Sustentadas {int(asig['asignado'])}, pendientes {int(asig['restante'])}"
+                else:
+                    status = f"⚠️ SE USARON {int(asig['asignado'])} UNIDADES: Encontradas {int(asig['asignado'])}, pendientes {int(asig['restante'])}"
         elif len(asig["precios"]) > 1:
             p_min = min(asig["precios"])
             p_max = max(asig["precios"])
             status = f"INFO: Precios variables (Rango: {p_min:.2f}-{p_max:.2f}). Se usó el más reciente: {precio_ref:.4f}"
 
         m_desc_u = round(precio_ref * porc, 4)
-        cant_f = cant_nc if forzar else asig["asignado"]
+        cant_f = int(cant_nc if forzar else asig["asignado"])
 
         doc_ref = asig["docs"][0] if asig["docs"] else ""
 
@@ -430,8 +441,6 @@ class NCProcessor:
                 warning_prefix = "INFO: Cantidad vacía o cero. "
             elif porcentaje_val <= 0:
                 warning_prefix = "INFO: Descuento vacío o cero. "
-            elif porcentaje_val > 1.0:
-                warning_prefix = "INFO: Descuento excede 100%. "
             elif porcentaje_val > 1.0:
                 warning_prefix = "INFO: Descuento excede 100%. "
             

@@ -43,7 +43,8 @@ class NCProcessor:
         """
         self.filas_omitidas_detalle: List[Dict] = []
         self.historial = self._preparar_historial(historial_compras)
-        self._cache_articulos: Dict[str, pd.DataFrame] = {}
+        # Optimización: Pre-agrupar historial por artículo para evitar filtrados O(N) repetitivos
+        self._cache_articulos = {str(k): v for k, v in self.historial.groupby('ID_ARTICULO')}
 
     def _limpiar_col_universal(self, col_name) -> str:
         """
@@ -214,9 +215,7 @@ class NCProcessor:
         Obtiene el sub-dataframe de un SKU. Utiliza caché para evitar
         operaciones de filtrado costosas en reportes grandes.
         """
-        if codigo not in self._cache_articulos:
-            self._cache_articulos[codigo] = self.historial[self.historial['ID_ARTICULO'] == codigo].copy()
-        return self._cache_articulos[codigo]
+        return self._cache_articulos.get(codigo, pd.DataFrame())
 
     def procesar_articulo(
         self,
@@ -307,15 +306,27 @@ class NCProcessor:
         """
         precio_ref = round(float(reciente['PRECIO_UNID']), 4)
         status = "OK"
+        
         if asig["restante"] > 0:
-            status = f"PENDIENTE SUSTENTO: Sustentado: {int(asig['asignado'])} | Faltan: {int(asig['restante'])}."
+            if asig["asignado"] == 0:
+                # Caso sin ninguna unidad encontrada
+                if forzar:
+                    status = f"✅ SE USARON {cant_nc} UNIDADES: Sin sustento disponible"
+                else:
+                    status = f"⚠️ SE USARON 0 UNIDADES: Sin sustento disponible"
+            else:
+                # Caso parcial
+                if forzar:
+                    status = f"✅ SE USARON {cant_nc} UNIDADES: Sustentadas {int(asig['asignado'])}, pendientes {int(asig['restante'])}"
+                else:
+                    status = f"⚠️ SE USARON {int(asig['asignado'])} UNIDADES: Encontradas {int(asig['asignado'])}, pendientes {int(asig['restante'])}"
         elif len(asig["precios"]) > 1:
             p_min = min(asig["precios"])
             p_max = max(asig["precios"])
             status = f"INFO: Precios variables (Rango: {p_min:.2f}-{p_max:.2f}). Se usó el más reciente: {precio_ref:.4f}"
 
         m_desc_u = round(precio_ref * porc, 4)
-        cant_f = cant_nc if forzar else asig["asignado"]
+        cant_f = int(cant_nc if forzar else asig["asignado"])
 
         doc_ref = asig["docs"][0] if asig["docs"] else ""
 
@@ -348,8 +359,10 @@ class NCProcessor:
         s = str(p).replace('%', '').strip()
         try:
             val = float(s)
+            # Si el usuario pone 1.25 o 3 (>= 0.5), es el entero del porcentaje
             if val >= 0.5:
                 return val / 100
+            # Si pone 0.0125 o 0.03 (< 0.5), ya es el decimal
             return val
         except (ValueError, TypeError):
             logger.warning(f"No se pudo convertir el porcentaje: '{p}'. Se usará 0.0")
@@ -360,14 +373,31 @@ class NCProcessor:
         requerimientos: pd.DataFrame,
         forzar_cantidad_solicitada: bool = True
     ) -> Tuple[List[ProcessedItem], List[str]]:
+        """
+        Procesa un lote completo de requerimientos de Notas de Crédito.
+        
+        Args:
+            requerimientos: DataFrame con los ítems a procesar (CODIGO, CANTIDAD_NC, PORCENTAJE_DESC).
+            forzar_cantidad_solicitada: Si es True, la cantidad en el reporte será la solicitada,
+                                        incluso si no hay suficiente stock en el historial.
+                                        Si es False, la cantidad será la máxima encontrada.
+        
+        Returns:
+            Una tupla que contiene:
+            - Lista de objetos ProcessedItem con los resultados del procesamiento de cada ítem.
+            - Lista ordenada de strings con los números de documento únicos utilizados.
+        """
         logger.info(f"Procesando lote de {len(requerimientos)} requerimientos.")
 
+        # Limpiar columnas de requerimientos
         requerimientos.columns = [self._limpiar_col_universal(c) for c in requerimientos.columns]
         
+        # Eliminar fila de totales en requerimientos si existe por error al final
         if not requerimientos.empty:
             if requerimientos.iloc[-1].astype(str).str.contains(r'TOTAL|TOTALES', case=False, na=False).any():
                 requerimientos = requerimientos.iloc[:-1].reset_index(drop=True)
 
+        # Validar columnas de requerimientos (en uppercase)
         cols_req = ['CODIGO', 'CANTIDAD_NC', 'PORCENTAJE_DESC']
         faltantes = [c for c in cols_req if c not in requerimientos.columns]
         if faltantes:
@@ -377,39 +407,57 @@ class NCProcessor:
         todos_documentos = set()
 
         for _, fila in requerimientos.iterrows():
+            # Validar si la fila tiene datos mínimos
             codigo_raw = str(fila.get('CODIGO', '')).strip()
             if codigo_raw == "" or codigo_raw.lower() == "nan":
                 resultados.append(ProcessedItem(
-                    ID_ARTICULO="N/A", NOM_ARTICULO="FILA SIN CÓDIGO", CANTIDAD_SOLICITADA=0,
-                    CANTIDAD_REAL_ENCONTRADA=0, PRECIO_UNITARIO=0, MONTO_DESCUENTO_UNITARIO=0,
-                    PRECIO_NETO_FINAL=0, SUBTOTAL_DESCUENTO=0, PORCENTAJE_APLICADO=0,
-                    DOCUMENTOS=[], STATUS="ERROR: Fila vacía o sin código de artículo"
+                    ID_ARTICULO="N/A",
+                    NOM_ARTICULO="FILA SIN CÓDIGO",
+                    CANTIDAD_SOLICITADA=0,
+                    CANTIDAD_REAL_ENCONTRADA=0,
+                    PRECIO_UNITARIO=0,
+                    MONTO_DESCUENTO_UNITARIO=0,
+                    PRECIO_NETO_FINAL=0,
+                    SUBTOTAL_DESCUENTO=0,
+                    PORCENTAJE_APLICADO=0,
+                    DOCUMENTOS=[],
+                    STATUS="ERROR: Fila vacía o sin código de artículo"
                 ))
                 continue
 
+            # Limpieza segura de CANTIDAD_NC en requerimientos
             raw_cant = str(fila['CANTIDAD_NC']).upper().replace('O', '0').strip()
             try:
                 cant_val = int(float(pd.to_numeric(raw_cant, errors='coerce') or 0))
             except (ValueError, TypeError):
                 cant_val = 0
+                logger.warning(f"Cantidad inválida para SKU {codigo_raw}: '{raw_cant}'")
 
             porcentaje_val = self._convertir_porcentaje(fila['PORCENTAJE_DESC'])
 
+            # Alerta informativa por valores en cero, pero permitimos el procesamiento
             warning_prefix = ""
             if cant_val <= 0:
                 warning_prefix = "INFO: Cantidad vacía o cero. "
             elif porcentaje_val <= 0:
                 warning_prefix = "INFO: Descuento vacío o cero. "
+            elif porcentaje_val > 1.0:
+                warning_prefix = "INFO: Descuento excede 100%. "
             
             item = self.procesar_articulo(
-                codigo=codigo_raw, cantidad_nc=cant_val, porcentaje_desc=porcentaje_val,
+                codigo=codigo_raw,
+                cantidad_nc=cant_val,
+                porcentaje_desc=porcentaje_val,
                 forzar_cantidad_solicitada=forzar_cantidad_solicitada
             )
 
+            # Si el artículo se encontró pero tiene valores en 0, inyectamos la alerta azul
             if warning_prefix and "ERROR" not in item.STATUS:
                 item.STATUS = f"{warning_prefix}{item.STATUS}"
 
             resultados.append(item)
+            
+            # Agregar documentos al set global
             for doc in item.DOCUMENTOS:
                 todos_documentos.add(doc)
 
@@ -417,20 +465,48 @@ class NCProcessor:
         return resultados, sorted(list(todos_documentos))
 
     def obtener_rango_fechas(self) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+        """
+        Obtiene el rango de fechas (más antigua y más reciente) del historial procesado.
+        
+        Returns:
+            Una tupla con la fecha más antigua y la fecha más reciente (pd.Timestamp), o (None, None) si el historial está vacío.
+        """
         if self.historial.empty:
             return None, None
+        
         fecha_reciente = self.historial['FECHA_ORIG'].max()
         fecha_antigua = self.historial['FECHA_ORIG'].min()
+        
         return fecha_antigua, fecha_reciente
 
     def obtener_resumen_lineas(self) -> List[Dict]:
+        """
+        Genera un resumen estadístico de los montos totales por línea de producto (NOM_LINEA).
+        Retorna el Top 5 de líneas con sus montos y porcentajes sobre el total.
+        
+        Returns:
+            Una lista de diccionarios, cada uno representando una línea con 'NOM_LINEA', 'SOLES' y 'PORCENTAJE'.
+        """
         if self.historial.empty or "NOM_LINEA" not in self.historial.columns:
             return []
+        
+        # Agrupar por línea y sumar montos
         resumen = self.historial.groupby("NOM_LINEA")["SOLES"].sum().reset_index()
         total_general = resumen["SOLES"].sum()
+        
         if total_general == 0: return []
+        
+        # ✅ Escala Raiz Cuadrada (mejor balance)
+        # Aumenta valores pequeños pero no exagera demasiado
         max_val = resumen["SOLES"].abs().max()
+        
+        # Escala Raiz Cubica, la mas balanceada y natural
         resumen["ESCALA_VISUAL"] = (resumen["SOLES"].abs() ** 0.55) / (max_val ** 0.55)
+        
+        # ✅ Deteccion de valores negativos
         resumen["ES_NEGATIVO"] = resumen["SOLES"] < 0
+        
+        # Mantener el porcentaje real para mostrar
         resumen["PORCENTAJE"] = (resumen["SOLES"] / total_general).abs()
+        
         return resumen.sort_values("SOLES", ascending=False).head(16).to_dict("records")

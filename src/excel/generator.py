@@ -129,7 +129,7 @@ class ExcelGenerator:
         c_nom = self.ws.cell(row=fila, column=2, value=self._limpiar(item.NOM_ARTICULO))
         c_nom.border = self.styles.border
         
-        c_cant = self.ws.cell(row=fila, column=3, value=item.CANTIDAD_SOLICITADA)
+        c_cant = self.ws.cell(row=fila, column=3, value=item.CANTIDAD_REAL_ENCONTRADA)
         c_cant.border = self.styles.border
         c_cant.alignment = self.styles.center_align
 

@@ -711,10 +711,9 @@ class G360App:
                     
                     # Normalizar y buscar el documento en el historial
                     mask_match = False
-                    for idx, row in df_h.iterrows():
-                        if row["ID_ARTICULO"] != item.ID_ARTICULO:
-                            continue
-                        
+                    indices_art = df_h.index[df_h["ID_ARTICULO"] == item.ID_ARTICULO]
+                    for idx in indices_art:
+                        row = df_h.loc[idx]
                         # Normalizar SERIE_DOC
                         serie_h = str(row['SERIE_DOC']).strip()
                         while serie_h.upper().startswith(tipo_target.upper()):
