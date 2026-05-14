@@ -1,0 +1,48 @@
+{
+  "projectTypes": [
+    {
+      "id": "web-pwa",
+      "name": "Web PWA",
+      "description": "Progressive Web App with offline support",
+      "framework": "vanilla",
+      "features": ["pwa", "offline", "service-worker"]
+    },
+    {
+      "id": "web-svelte",
+      "name": "Web Svelte",
+      "description": "Svelte web application",
+      "framework": "svelte",
+      "features": ["routing", "stores", "ssr"]
+    },
+    {
+      "id": "python-cli",
+      "name": "Python CLI",
+      "description": "Python command-line tool",
+      "framework": "python",
+      "features": ["cli", "argparse", "rich"]
+    },
+    {
+      "id": "python-flet",
+      "name": "Python Flet Desktop",
+      "description": "Python desktop app with Flet framework",
+      "framework": "flet",
+      "features": ["desktop", "gui", "cross-platform", "portable"],
+      "portable": true
+    },
+    {
+      "id": "python-flet-migrate",
+      "name": "Python Flet Migration",
+      "description": "Migrate tkinter/ctkinter app to Flet",
+      "framework": "flet",
+      "features": ["migration", "desktop", "gui", "portable"],
+      "portable": true
+    },
+    {
+      "id": "vba-excel",
+      "name": "VBA Excel",
+      "description": "Excel VBA macros",
+      "framework": "vba",
+      "features": ["excel", "macros", "forms"]
+    }
+  ]
+}

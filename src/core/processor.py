@@ -3,6 +3,8 @@ import re
 import logging
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, field
+from src.core.utils import format_id_name, format_doc_id, _clean_value
+from src.core.validation import validar_historial_completo
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,8 @@ class ProcessedItem:
     STATUS: str
     NRO_DOC: str = ""
     SERIE_DOC: str = ""
+    ID_LINEA: str = ""
+    NOM_LINEA: str = ""
     FACTURA_REF: str = "" # Documento principal de referencia
     DOCUMENTOS_CANTIDAD: Dict[str, float] = field(default_factory=dict)  # Mapeo de doc => cantidad tomada
 
@@ -36,13 +40,35 @@ class NCProcessor:
     Orden: Facturas más recientes primero, asignación hacia atrás
     """
 
-    def __init__(self, historial_compras: pd.DataFrame):
+    def __init__(self, historial_compras: pd.DataFrame, sort_mode: str = "fecha_desc"):
         """
         Inicializa el procesador preparando la base de datos de historial.
         Utiliza un diccionario de caché para optimizar búsquedas repetitivas de SKUs.
+        
+        Args:
+            historial_compras: DataFrame con el historial de compras
+            sort_mode: Modo de ordenamiento ("fecha_desc", "fecha_asc", "cantidad_desc", "cantidad_asc")
         """
         self.filas_omitidas_detalle: List[Dict] = []
+        self.sort_mode = sort_mode
         self.historial = self._preparar_historial(historial_compras)
+        
+        # Validar historial completo
+        logger.info("Validando historial de compras...")
+        validacion = validar_historial_completo(self.historial)
+        
+        if not validacion['valid']:
+            logger.warning(f"Validación del historial encontró {len(validacion['errores'])} errores:")
+            for error in validacion['errores'][:5]:  # Loguear solo los primeros 5
+                logger.warning(f"  - {error}")
+            if len(validacion['errores']) > 5:
+                logger.warning(f"  ... y {len(validacion['errores']) - 5} errores más")
+        else:
+            logger.info("Validación del historial exitosa")
+        
+        # Guardar resultado de validación para referencia
+        self.validacion_historial = validacion
+        
         # Optimización: Pre-agrupar historial por artículo para evitar filtrados O(N) repetitivos
         self._cache_articulos = {str(k): v for k, v in self.historial.groupby('ID_ARTICULO')}
 
@@ -149,9 +175,14 @@ class NCProcessor:
         Asegura la integridad de los datos: convierte IDs a string (evita notación científica),
         limpia errores comunes de digitación ('O' por '0') y recalcula precios reales.
         """
-        cols_a_string = ["ID_ARTICULO", "NRO_DOC", "ID_CLIENTE", "DOC_CLIENTE", "TPO_DOC", "SERIE_DOC"]
+        cols_a_string = [
+            "ID_ARTICULO", "NRO_DOC", "ID_CLIENTE", "DOC_CLIENTE", 
+            "TPO_DOC", "SERIE_DOC", "ID_LINEA", "ID_GRUPO", 
+            "ID_TIPO", "ID_FAMILIA", "ID_VENDEDOR", "COD_SUCURSAL"
+        ]
         for col in cols_a_string:
             if col in df.columns:
+                # Preservar ceros a la izquierda y evitar .0 al final
                 df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().replace('nan', '')
 
         # Limpieza numérica optimizada
@@ -162,9 +193,13 @@ class NCProcessor:
                     errors='coerce'
                 ).fillna(0)
 
-        # Protección contra re-cálculo en multi-reportes
+        soles = pd.to_numeric(df['SOLES'], errors='coerce').fillna(0)
+        cantidad = pd.to_numeric(df['CANTIDAD'], errors='coerce').fillna(0)
+        
         if "PRECIO_UNID" not in df.columns or df["PRECIO_UNID"].sum() == 0:
-            df["PRECIO_UNID"] = (df["SOLES"] / df["CANTIDAD"]).replace([float("inf"), -float("inf")], 0).fillna(0).round(4)
+            df["PRECIO_UNID"] = soles / cantidad
+            df.loc[cantidad == 0, "PRECIO_UNID"] = 0
+            df["PRECIO_UNID"] = df["PRECIO_UNID"].replace([float("inf"), -float("inf")], 0).fillna(0).round(4)
             
         return df
 
@@ -205,9 +240,27 @@ class NCProcessor:
             for d in detalles[:5]: # Loguear solo las primeras 5 como muestra
                 logger.debug(f"Fila inválida: Doc {d.get('NRO_DOC')} - SKU {d.get('ID_ARTICULO')}")
 
-        # 3. Limpiar y ordenar
+        # 3. Limpiar y ordenar según sort_mode
         df = df.dropna(subset=['FECHA_ORIG']).reset_index(drop=True)
-        df = df.sort_values(by=['ID_ARTICULO', 'FECHA_ORIG'], ascending=[True, False]).reset_index(drop=True)
+        
+        # Determinar columnas y orden de clasificación según sort_mode
+        if self.sort_mode == "fecha_desc":
+            df = df.sort_values(by=['ID_ARTICULO', 'FECHA_ORIG'], ascending=[True, False]).reset_index(drop=True)
+            logger.debug("Historial ordenado por fecha (más recientes primero)")
+        elif self.sort_mode == "fecha_asc":
+            df = df.sort_values(by=['ID_ARTICULO', 'FECHA_ORIG'], ascending=[True, True]).reset_index(drop=True)
+            logger.debug("Historial ordenado por fecha (más antiguo primero)")
+        elif self.sort_mode == "cantidad_desc":
+            df = df.sort_values(by=['ID_ARTICULO', 'CANTIDAD'], ascending=[True, False]).reset_index(drop=True)
+            logger.debug("Historial ordenado por cantidad (mayor volumen primero)")
+        elif self.sort_mode == "cantidad_asc":
+            df = df.sort_values(by=['ID_ARTICULO', 'CANTIDAD'], ascending=[True, True]).reset_index(drop=True)
+            logger.debug("Historial ordenado por cantidad (menor cantidad primero)")
+        else:
+            # Default: fecha_desc (más recientes primero)
+            df = df.sort_values(by=['ID_ARTICULO', 'FECHA_ORIG'], ascending=[True, False]).reset_index(drop=True)
+            logger.debug(f"Modo de ordenamiento desconocido '{self.sort_mode}', usando default (fecha_desc)")
+        
         return df
 
     def _get_articulo_historial(self, codigo: str) -> pd.DataFrame:
@@ -311,13 +364,13 @@ class NCProcessor:
             if asig["asignado"] == 0:
                 # Caso sin ninguna unidad encontrada
                 if forzar:
-                    status = f"✅ SE USARON {cant_nc} UNIDADES: Sin sustento disponible"
+                    status = f"⚠️ SE USARON {cant_nc} UNIDADES: Sin sustento disponible"
                 else:
                     status = f"⚠️ SE USARON 0 UNIDADES: Sin sustento disponible"
             else:
                 # Caso parcial
                 if forzar:
-                    status = f"✅ SE USARON {cant_nc} UNIDADES: Sustentadas {int(asig['asignado'])}, pendientes {int(asig['restante'])}"
+                    status = f"⚠️ SE USARON {cant_nc} UNIDADES: Sustentadas {int(asig['asignado'])}, pendientes {int(asig['restante'])}"
                 else:
                     status = f"⚠️ SE USARON {int(asig['asignado'])} UNIDADES: Encontradas {int(asig['asignado'])}, pendientes {int(asig['restante'])}"
         elif len(asig["precios"]) > 1:
@@ -336,6 +389,7 @@ class NCProcessor:
             MONTO_DESCUENTO_UNITARIO=m_desc_u, PRECIO_NETO_FINAL=round(precio_ref - m_desc_u, 4),
             SUBTOTAL_DESCUENTO=round(m_desc_u * cant_f, 2), PORCENTAJE_APLICADO=porc,
             DOCUMENTOS=asig["docs"], STATUS=status, NRO_DOC=str(reciente['NRO_DOC']), SERIE_DOC=str(reciente['SERIE_DOC']),
+            ID_LINEA=str(reciente.get('ID_LINEA', '')), NOM_LINEA=str(reciente.get('NOM_LINEA', '')),
             FACTURA_REF=doc_ref,
             DOCUMENTOS_CANTIDAD=asig.get("doc_cantidad", {})
         )
@@ -343,12 +397,14 @@ class NCProcessor:
     def _crear_item_error(self, cod, cant, porc) -> ProcessedItem:
         return ProcessedItem(
             cod, "NO ENCONTRADO", cant, 0, 0, 0, 0, 0, porc, [], "ERROR: No en historial"
+            , ID_LINEA="", NOM_LINEA="" # Add default values for new fields
         )
 
     def _construir_item_vacio(self, cod, nom, porc, rec) -> ProcessedItem:
         p_ref = round(float(rec['PRECIO_UNID']), 2)
         return ProcessedItem(
             cod, nom, 0, 0, p_ref, 0, p_ref, 0, porc, [], "INFO: Cantidad vacía", str(rec['NRO_DOC']), str(rec['SERIE_DOC'])
+            , ID_LINEA=str(rec['ID_LINEA']), NOM_LINEA=str(rec['NOM_LINEA']) # Add new fields
         )
 
     def _convertir_porcentaje(self, p) -> float:
@@ -464,6 +520,67 @@ class NCProcessor:
         logger.info(f"Lote finalizado. Items procesados: {len(resultados)}. Documentos hallados: {len(todos_documentos)}")
         return resultados, sorted(list(todos_documentos))
 
+    def identificar_mejor_referencia(self, df_r: pd.DataFrame) -> str:
+        """
+        Analiza el requerimiento y el historial para encontrar la 'Factura de Referencia' ideal.
+        Lógica:
+        1. Calcula el Monto Total requerido (Soles sin IGV).
+        2. Busca facturas que contengan la mayor cantidad de SKUs del requerimiento.
+        3. Prioriza facturas cuyo Monto Total sea mayor o igual al Monto del Requerimiento.
+        4. Si hay empate, elige la más reciente.
+        """
+        if df_r.empty or self.historial.empty:
+            return ""
+
+        # 1. Preparar datos del requerimiento
+        df_r.columns = [self._limpiar_col_universal(c) for c in df_r.columns]
+        skus_req = set(df_r['CODIGO'].astype(str).str.strip().unique())
+        
+        # Calcular monto estimado del requerimiento (basado en precios del historial)
+        monto_req_total = 0
+        for _, row in df_r.iterrows():
+            sku = str(row['CODIGO']).strip()
+            cant = float(pd.to_numeric(row['CANTIDAD_NC'], errors='coerce') or 0)
+            porc = self._convertir_porcentaje(row['PORCENTAJE_DESC'])
+            
+            # Buscar precio de referencia en historial
+            hist_art = self._get_articulo_historial(sku)
+            if not hist_art.empty:
+                p_unit = float(hist_art.iloc[0]['PRECIO_UNID'])
+                monto_req_total += (cant * p_unit * porc)
+
+        # 2. Agrupar historial por Documento para evaluar "Cuerpo" y "Monto"
+        # Usamos format_doc_id para tener el ID único comparable
+        h = self.historial.copy()
+        h['DOC_ID_UNI'] = h.apply(lambda x: format_doc_id(x['TPO_DOC'], x['SERIE_DOC'], x['NRO_DOC']), axis=1)
+        
+        docs_stats = h.groupby('DOC_ID_UNI').agg({
+            'SOLES': 'sum',
+            'ID_ARTICULO': lambda x: set(x.astype(str).str.strip()),
+            'FECHA_ORIG': 'max'
+        }).reset_index()
+
+        # 3. Calcular "Score de Coincidencia" (Cuántos SKUs del requerimiento tiene la factura)
+        docs_stats['COINCIDENCIAS'] = docs_stats['ID_ARTICULO'].apply(lambda x: len(x.intersection(skus_req)))
+        
+        # 4. Aplicar Ranking
+        # Filtro A: Facturas que cubren el monto total de la NC
+        docs_solventes = docs_stats[docs_stats['SOLES'] >= monto_req_total].copy()
+        
+        if not docs_solventes.empty:
+            # Ordenar por Coincidencias (Desc) y luego por Fecha (Desc)
+            mejor = docs_solventes.sort_values(by=['COINCIDENCIAS', 'FECHA_ORIG'], ascending=[False, False]).iloc[0]
+            logger.info(f"Referencia ideal hallada (Solvente): {mejor['DOC_ID_UNI']} con {mejor['COINCIDENCIAS']} items.")
+            return str(mejor['DOC_ID_UNI'])
+        
+        # Fallback: Si ninguna cubre el monto, elegimos la que tenga más items
+        if not docs_stats.empty:
+            mejor = docs_stats.sort_values(by=['COINCIDENCIAS', 'FECHA_ORIG'], ascending=[False, False]).iloc[0]
+            logger.info(f"Referencia ideal hallada (Insolvente pero con más items): {mejor['DOC_ID_UNI']}.")
+            return str(mejor['DOC_ID_UNI'])
+
+        return ""
+
     def obtener_rango_fechas(self) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
         """
         Obtiene el rango de fechas (más antigua y más reciente) del historial procesado.
@@ -481,29 +598,33 @@ class NCProcessor:
 
     def obtener_resumen_lineas(self) -> List[Dict]:
         """
-        Genera un resumen estadístico de los montos totales por línea de producto (NOM_LINEA).
-        Retorna el Top 5 de líneas con sus montos y porcentajes sobre el total.
-        
-        Returns:
-            Una lista de diccionarios, cada uno representando una línea con 'NOM_LINEA', 'SOLES' y 'PORCENTAJE'.
+        Genera un resumen estadístico de los montos totales por línea de producto.
+        Retorna el Top 16 de líneas con sus montos, porcentajes y nombres formateados.
         """
         if self.historial.empty or "NOM_LINEA" not in self.historial.columns:
             return []
         
-        # Agrupar por línea y sumar montos
-        resumen = self.historial.groupby("NOM_LINEA")["SOLES"].sum().reset_index()
+        # Agrupar por ID y Nombre para consistencia
+        group_cols = ["ID_LINEA", "NOM_LINEA"] if "ID_LINEA" in self.historial.columns else ["NOM_LINEA"]
+        
+        resumen = self.historial.groupby(group_cols)["SOLES"].sum().reset_index()
         total_general = resumen["SOLES"].sum()
         
         if total_general == 0: return []
         
-        # ✅ Escala Raiz Cuadrada (mejor balance)
-        # Aumenta valores pequeños pero no exagera demasiado
-        max_val = resumen["SOLES"].abs().max()
+        # Crear nombre formateado "ID - NOMBRE"
+        if "ID_LINEA" in resumen.columns:
+            resumen["NOM_LINEA_FMT"] = resumen.apply(
+                lambda x: format_id_name(x["ID_LINEA"], x["NOM_LINEA"]), axis=1
+            )
+        else:
+            resumen["NOM_LINEA_FMT"] = resumen["NOM_LINEA"]
         
         # Escala Raiz Cubica, la mas balanceada y natural
+        max_val = resumen["SOLES"].abs().max()
         resumen["ESCALA_VISUAL"] = (resumen["SOLES"].abs() ** 0.55) / (max_val ** 0.55)
         
-        # ✅ Deteccion de valores negativos
+        # Deteccion de valores negativos
         resumen["ES_NEGATIVO"] = resumen["SOLES"] < 0
         
         # Mantener el porcentaje real para mostrar

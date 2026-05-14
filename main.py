@@ -21,6 +21,7 @@ from pathlib import Path
 
 from src.core.processor import NCProcessor
 from src.excel.generator import ExcelGenerator
+from src.ui.consolidated_view import ConsolidatedReportsModule
 
 # Importaciones Oficiales G360 Ecosystem
 if getattr(sys, 'frozen', False):
@@ -39,7 +40,7 @@ try:
 except ImportError:
     # Fallback si el componente compartido no se encuentra (para desarrollo local sin el ecosistema completo)
     G360Signature = None
-    print(f"⚠️ Aviso: No se encontró el componente G360Signature en {BASE_DIR}")
+    print("Advertencia: No se encontro el componente G360Signature en", BASE_DIR)
 
 # Paleta de colores para el Pie Chart (G360 Themed)
 PIE_CHART_COLORS = [
@@ -73,9 +74,13 @@ class G360App:
         # 1. Configuración de Colores y Estilos (Constantes de la App)
         self.G360_BLUE = "#00d084"
         self.G360_SUCCESS = "#22c55e"
+        self.G360_WARNING = "#fbbf24"  # Amber 400
+        self.G360_ERROR = "#f87171"    # Red 400
         self.G360_ACCENT = "#00d084"
-        self.G360_SURFACE = "#151e2e"
+        self.G360_SURFACE = "#1a2333"  # Ligeramente más claro para elevación
         self.G360_BG_DARK = "#0b1220"
+        self.G360_BORDER = "white12"
+        self.G360_TEXT_MUTED = "white38"
 
         # Rutas de Plantillas Oficiales
         self.TEMPLATES_DIR = BASE_DIR / "assets" / "templates"
@@ -93,10 +98,10 @@ class G360App:
         self.historial_path = None
         self.requerimientos_paths = []
         self.df_historial_preview = None
+        self.current_processor = None  # Para módulos de reportes consolidados
 
         self.dialog_event = threading.Event()
         self.user_choice = None
-
         # 4. Inicialización de componentes de UI y construcción del layout
         self._init_components()
         self._build_ui()
@@ -106,7 +111,7 @@ class G360App:
         """Configura los parámetros visuales globales de la ventana."""
         self.page.title = "G360 NC Sustentor"
         self.page.window_width = 1100
-        self.page.window_height = 900
+        self.page.window_height = 810
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor = "#0b1220"
         self.page.padding = 0
@@ -142,12 +147,14 @@ class G360App:
         self.rg_tipo_orden = ft.RadioGroup(
             content=ft.Row(
                 [
-                    ft.Radio(value="fecha", label="Más Recientes"),
-                    ft.Radio(value="cantidad", label="Mayor Volumen"),
+                    ft.Radio(value="fecha_desc", label="Más Recientes"),
+                    ft.Radio(value="fecha_asc", label="Más Antiguo"),
+                    ft.Radio(value="cantidad_desc", label="Mayor Volumen"),
+                    ft.Radio(value="cantidad_asc", label="Menor Cantidad"),
                 ],
-                spacing=30,
+                spacing=20,
             ),
-            value="fecha",
+            value="fecha_desc",
         )
         self.card_historial = self.file_status_card(
             "1. HISTORIAL (BASE)", ft.icons.HISTORY_EDU
@@ -223,7 +230,7 @@ class G360App:
 
         # Vista Previa Historial en Layout Principal
         self.preview_data_table = ft.DataTable(
-            columns=[],
+            columns=[ft.DataColumn(ft.Text("Cargando..."))],  # Placeholder para evitar error
             rows=[],
             column_spacing=20,
             heading_row_height=35,
@@ -286,33 +293,56 @@ class G360App:
         return ft.Container(
             content=ft.Column(
                 [
-                    ft.Icon(icon, size=30, color=ft.colors.GREY_400),
-                    ft.Text(title, size=12, weight="bold"),
+                    ft.Icon(icon, size=32, color=ft.colors.GREY_400),
+                    ft.Text(title, size=13, weight="bold", color="white"),
                     ft.Text(
-                        "Pendiente", size=11, italic=True, color=ft.colors.GREY_500
+                        "Click para seleccionar", size=11, color=self.G360_TEXT_MUTED
                     ),
                 ],
                 horizontal_alignment="center",
-                spacing=5,
+                spacing=8,
             ),
-            padding=15,
+            padding=20,
             bgcolor=self.G360_SURFACE,
-            border_radius=15,
+            border_radius=18,
             expand=True,
-            border=ft.border.all(1, "#333333"),
+            border=ft.border.all(1, self.G360_BORDER),
+            animate=ft.Animation(300, ft.AnimationCurve.DECELERATE),
+            shadow=ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=15,
+                color=ft.colors.with_opacity(0.02, ft.colors.BLACK),
+                blur_style=ft.ShadowBlurStyle.OUTER,
+            ),
         )
 
     def verificar_boton_generar(self):
-        is_ready = all(
-            [
-                self.historial_path,
-                self.requerimientos_paths,
-                self.txt_cliente.value,
-                self.txt_motivo.value,
-            ]
-        )
+        """Valida requisitos y habilita/deshabilita el botón de acción con feedback visual."""
+        cli = str(self.txt_cliente.value or "").strip()
+        mot = str(self.txt_motivo.value or "").strip()
+        
+        faltantes = []
+        if not self.historial_path: faltantes.append("Historial")
+        if not self.requerimientos_paths: faltantes.append("Requerimientos")
+        if not cli: faltantes.append("Nombre Cliente")
+        if not mot: faltantes.append("Motivo")
+        
+        is_ready = len(faltantes) == 0
         self.btn_generar.disabled = not is_ready
-        self.btn_generar.update()
+        
+        if not is_ready:
+            # Solo mostrar mensaje de "Falta..." si ya se intentó cargar algo
+            if self.historial_path or self.requerimientos_paths:
+                self.status.value = f"⏳ Pendiente: Falta {', '.join(faltantes)}"
+                self.status.color = "orange"
+        elif self.status.value and "Pendiente:" in self.status.value:
+            self.status.value = "✅ Todo listo para procesar"
+            self.status.color = self.G360_SUCCESS
+            
+        if getattr(self.btn_generar, 'page', None):
+            self.btn_generar.update()
+        if getattr(self.status, 'page', None):
+            self.status.update()
 
     def seleccionar_historial(self, e: ft.FilePickerResultEvent):
         if not e.files:
@@ -331,7 +361,7 @@ class G360App:
             try:
                 path = e.files[0].path
                 df_full = pd.read_excel(path, dtype=str)
-                proc = NCProcessor(df_full)
+                proc = NCProcessor(df_full, sort_mode=self.rg_tipo_orden.value)
 
                 if proc.historial.empty:
                     self.historial_path = None
@@ -340,6 +370,8 @@ class G360App:
                 else:
                     self.historial_path = path
                     self.df_historial_preview = proc.historial.head(10)
+                    self.current_processor = proc  # Guardar para módulos de reportes consolidados
+                    self._update_consolidated_button()  # Habilitar botón de consolidados
                     
                     # Auto-llenado de cliente
                     col_nom = next((c for c in proc.historial.columns if "NOM_CLIENTE" in str(c).upper()), None)
@@ -469,6 +501,16 @@ class G360App:
         self.dashboard_card.visible = not proc.historial.empty
         self.dashboard_card.opacity = 1
         self.dashboard_card.scale = 1
+        
+        # Auto-expandir si hay datos
+        # Buscamos el ExpansionTile del dashboard en main_view
+        try:
+            # main_view.content.controls[5] es el ExpansionTile del dashboard
+            self.main_view.content.controls[5].initially_expanded = True
+            self.main_view.content.controls[5].update()
+        except:
+            pass
+            
         self.page.update()
 
     def _crear_badge(self, text, is_new=False):
@@ -521,14 +563,20 @@ class G360App:
 
     def _actualizar_card_ui(self, card, success, text=""):
         if success:
-            card.border = ft.border.all(1, self.G360_ACCENT)
+            card.border = ft.border.all(2, self.G360_ACCENT)
+            card.bgcolor = ft.colors.with_opacity(0.05, self.G360_ACCENT)
+            card.content.controls[0].color = self.G360_ACCENT
             card.content.controls[2].value = text
             card.content.controls[2].color = self.G360_ACCENT
+            card.content.controls[2].weight = "bold"
         else:
-            card.border = ft.border.all(1, "#333333")
+            card.border = ft.border.all(1, self.G360_BORDER)
+            card.bgcolor = self.G360_SURFACE
+            card.content.controls[0].color = ft.colors.GREY_400
             logger.debug(f"Actualizando tarjeta '{card.content.controls[1].value}' a estado: {text if text else 'Pendiente'}")
-            card.content.controls[2].value = text if text else "Pendiente"
-            card.content.controls[2].color = ft.colors.GREY_500
+            card.content.controls[2].value = text if text else "Click para seleccionar"
+            card.content.controls[2].color = self.G360_TEXT_MUTED
+            card.content.controls[2].weight = "normal"
 
     def _show_preview(self):
         self.preview_data_table.columns.clear()
@@ -540,18 +588,19 @@ class G360App:
         ):
             # Seleccionar columnas clave para no saturar la vista
             cols = self.df_historial_preview.columns.tolist()[:6]
-            for col in cols:
-                self.preview_data_table.columns.append(
-                    ft.DataColumn(ft.Text(col.upper(), size=10, weight="bold"))
-                )
-            for _, fila in self.df_historial_preview.head(7).iterrows():
-                celdas = [
-                    ft.DataCell(
-                        ft.Text(str(fila[c])[:22], size=9, color=ft.colors.GREY_300)
+            if cols:
+                for col in cols:
+                    self.preview_data_table.columns.append(
+                        ft.DataColumn(ft.Text(col.upper(), size=10, weight="bold"))
                     )
-                    for c in cols
-                ]
-                self.preview_data_table.rows.append(ft.DataRow(cells=celdas))
+                for _, fila in self.df_historial_preview.head(7).iterrows():
+                    celdas = [
+                        ft.DataCell(
+                            ft.Text(str(fila[c])[:22], size=9, color=ft.colors.GREY_300)
+                        )
+                        for c in cols
+                    ]
+                    self.preview_data_table.rows.append(ft.DataRow(cells=celdas))
             self.preview_container.visible = True
             self.preview_container.opacity = 1
         else:
@@ -564,6 +613,7 @@ class G360App:
         # Limpiar estado interno y memoria
         self.historial_path = None
         self.requerimientos_paths = []
+        self.current_processor = None  # Liberar el procesador anterior
         self.date_badges_container.controls.clear()
         self.left_lines_column.controls.clear()  # Limpiar también las columnas individuales
         self.right_lines_column.controls.clear()
@@ -660,14 +710,22 @@ class G360App:
 
     def _sort_historial(self, df: pd.DataFrame) -> pd.DataFrame:
         """Aplica el ordenamiento seleccionado por el usuario al historial."""
-        if self.rg_tipo_orden.value == "fecha" and "FECHA_ORIG" in df.columns:
+        if self.rg_tipo_orden.value == "fecha_desc" and "FECHA_ORIG" in df.columns:
             df["FECHA_DT"] = pd.to_datetime(df["FECHA_ORIG"], dayfirst=True, errors="coerce", format="mixed")
             logger.debug("Historial ordenado por fecha (más recientes primero).")
             return df.sort_values(by="FECHA_DT", ascending=False).drop(columns=["FECHA_DT"])
-        elif self.rg_tipo_orden.value == "cantidad" and "CANTIDAD" in df.columns:
+        elif self.rg_tipo_orden.value == "fecha_asc" and "FECHA_ORIG" in df.columns:
+            df["FECHA_DT"] = pd.to_datetime(df["FECHA_ORIG"], dayfirst=True, errors="coerce", format="mixed")
+            logger.debug("Historial ordenado por fecha (más antiguo primero).")
+            return df.sort_values(by="FECHA_DT", ascending=True).drop(columns=["FECHA_DT"])
+        elif self.rg_tipo_orden.value == "cantidad_desc" and "CANTIDAD" in df.columns:
             df["CANT_NUM"] = pd.to_numeric(df["CANTIDAD"], errors="coerce").fillna(0)
             logger.debug("Historial ordenado por cantidad (mayor volumen primero).")
             return df.sort_values(by="CANT_NUM", ascending=False).drop(columns=["CANT_NUM"])
+        elif self.rg_tipo_orden.value == "cantidad_asc" and "CANTIDAD" in df.columns:
+            df["CANT_NUM"] = pd.to_numeric(df["CANTIDAD"], errors="coerce").fillna(0)
+            logger.debug("Historial ordenado por cantidad (menor cantidad primero).")
+            return df.sort_values(by="CANT_NUM", ascending=True).drop(columns=["CANT_NUM"])
         return df
 
     def _get_desktop_path(self) -> Path:
@@ -770,196 +828,390 @@ class G360App:
         return df_h[pd.to_numeric(df_h["CANTIDAD"], errors="coerce").fillna(0) > 0].reset_index(drop=True)
 
     def generar_flow(self):
-        logger.info("Iniciando flujo de generación de reportes.")
-        self.progress.visible = True
-        self.btn_generar.disabled = True
-        self.page.update()
-        try:
-            cli_clean = re.sub(r'[\\/*?:"<>|]', "", self.txt_cliente.value).strip().replace(" ", "_")
-            base_fname = f"NC_{cli_clean}_{datetime.now().strftime('%d%m%Y')}.xlsx"
-            logger.debug(f"Nombre base del archivo de salida: {base_fname}")
-            
-            # Carga y ordenamiento inicial
-            df_h_original = pd.read_excel(self.historial_path, dtype=str)
-            logger.info(f"Historial base cargado: {len(df_h_original)} filas.")
-            proc_hist_initial = NCProcessor(df_h_original) # Para limpiar el historial una vez
-            df_h = self._sort_historial(proc_hist_initial.historial.copy()) # Usar el historial limpio y luego ordenar
-            logger.info(f"Historial normalizado y ordenado por {self.rg_tipo_orden.value}: {len(df_h)} registros válidos.")
-
-            for idx, req_path in enumerate(self.requerimientos_paths):
-                logger.info(f"Procesando archivo de requerimientos {idx + 1}/{len(self.requerimientos_paths)}: {Path(req_path).name}")
-                self.status.value = f"⏳ Procesando {idx + 1}/{len(self.requerimientos_paths)}..."
-                try:
-                    self.page.update()
-                    df_r = pd.read_excel(req_path, dtype=str)
-                    logger.debug(f"Requerimiento leído: {len(df_r)} filas.")
-                    proc = NCProcessor(df_h)
-                    # df_h ya viene limpio del paso inicial, proc lo reutiliza de forma eficiente.
-                    
-                    items, docs = proc.procesar_lote(df_r, forzar_cantidad_solicitada=self.sw_forzar_cant.value)
-
-                    logger.debug(f"Lote procesado. {len(items)} ítems y {len(docs)} documentos únicos.")
-                    # LÓGICA INTELIGENTE DE SELECCIÓN DE FACTURA DE REFERENCIA
-                    doc_stats = {} # {doc: {'frecuencia': 0, 'monto_nc': 0.0}}
-                    for it in items:
-                        # Estimamos cuánto del subtotal de la NC pertenece a cada factura basándonos en la proporción de cantidad
-                        for doc, cant_en_doc in it.DOCUMENTOS_CANTIDAD.items():
-                            if doc not in doc_stats: doc_stats[doc] = {'frecuencia': 0, 'monto_nc': 0.0}
-                            doc_stats[doc]['frecuencia'] += 1
-                            # Proporción: (Cant tomada del doc / Cant total encontrada) * Subtotal NC
-                            prop = cant_en_doc / it.CANTIDAD_REAL_ENCONTRADA if it.CANTIDAD_REAL_ENCONTRADA > 0 else 0
-                            doc_stats[doc]['monto_nc'] += it.SUBTOTAL_DESCUENTO * prop
-
-                    # Ordenar facturas por frecuencia (desc) y luego por monto (desc)
-                    ranking_docs = sorted(
-                        doc_stats.keys(), 
-                        key=lambda d: (doc_stats[d]['frecuencia'], doc_stats[d]['monto_nc']), 
-                        reverse=True
-                    )
-                    
-                    # Si la más frecuente tiene un monto muy bajo (ej. < 5% del total NC), 
-                    # evaluamos si la segunda tiene mucha más relevancia económica.
-                    final_ref_doc = ranking_docs[0] if ranking_docs else "Sustento"
-                    if len(ranking_docs) > 1:
-                        monto_total_nc = sum(d['monto_nc'] for d in doc_stats.values())
-                        if doc_stats[ranking_docs[0]]['monto_nc'] < (monto_total_nc * 0.05) and doc_stats[ranking_docs[1]]['monto_nc'] > doc_stats[ranking_docs[0]]['monto_nc']:
-                            final_ref_doc = ranking_docs[1]
-                    
-                    # Verificación de duplicados con opción de "Guardar como"
-                    out_path = self._get_unique_out_path(f"PARTE_{idx + 1}_{base_fname}")
-                    logger.debug(f"Ruta de salida para el reporte: {out_path}")
-                    if not out_path: continue
-
-                    logger.info(f"Generando reporte Excel para Lote {idx + 1}")
-                    ExcelGenerator().generar_reporte(
-                        str(out_path), self.txt_cliente.value, f"{self.txt_motivo.value} (P{idx + 1})",
-                        items, docs, proc.obtener_rango_fechas(),
-                        sheet_name=final_ref_doc,
-                        factura_referencia=final_ref_doc
-                    )
-                    df_h = self._update_inventory_balances(df_h, items)
-                    
-                    if not self.page.web and os.name == 'nt':
-                        os.startfile(str(out_path))
-                except PermissionError:
-                    logger.error(f"Acceso denegado a archivo en Lote {idx + 1}.")
-                    self.status.value = f"❌ Error: Archivo abierto o bloqueado en Lote {idx + 1}."
-                    self.status.color = "red"
-                    self.page.update()
-                    continue
-                except Exception as ex:
-                    logger.error(f"No se pudo completar la escritura del reporte: {ex}")
-                    self.status.value = f"❌ Error: ¿Archivo abierto en Excel? ({ex})"
-                    self.status.color = "red"
-                    self.page.update()
-                    continue
-
-            self.status.value = "🎯 Proceso Completado"
-            self.status.color = self.G360_ACCENT
-            logger.info("Flujo de generación de reportes completado exitosamente.")
-        except Exception as ex:
-            logger.exception("Error crítico durante el flujo de generación de reportes:")
-            self.status.value = f"❌ Error: {str(ex)}"
-            self.status.color = "red"
-        finally:
-            self.progress.visible = False
-            self.btn_generar.disabled = False
+        def task():
+            logger.info("Iniciando flujo de generación de reportes en hilo secundario.")
+            self.progress.visible = True
+            self.btn_generar.disabled = True
             self.page.update()
+            try:
+                cli_clean = re.sub(r'[\\/*?:"<>|]', "", self.txt_cliente.value).strip().replace(" ", "_")
+                base_fname = f"NC_{cli_clean}_{datetime.now().strftime('%d%m%Y')}.xlsx"
+                
+                # OPTIMIZACIÓN: Usar el historial ya procesado y cargado en memoria si existe
+                if self.current_processor and self.current_processor.historial is not None:
+                    df_h = self.current_processor.historial.copy()
+                    logger.info(f"Usando historial ya cargado en memoria: {len(df_h)} registros.")
+                else:
+                    df_h_original = pd.read_excel(self.historial_path, dtype=str)
+                    proc_hist_initial = NCProcessor(df_h_original, sort_mode=self.rg_tipo_orden.value)
+                    df_h = proc_hist_initial.historial.copy()
+                    logger.info(f"Historial cargado desde disco: {len(df_h)} registros.")
+
+                for idx, req_path in enumerate(self.requerimientos_paths):
+                    logger.info(f"Procesando archivo {idx + 1}/{len(self.requerimientos_paths)}: {Path(req_path).name}")
+                    self.status.value = f"⏳ Procesando {idx + 1}/{len(self.requerimientos_paths)}..."
+                    self.page.update()
+                    
+                    try:
+                        df_r = pd.read_excel(req_path, dtype=str)
+                        proc = NCProcessor(df_h, sort_mode=self.rg_tipo_orden.value)
+                        
+                        # NUEVA LÓGICA: Identificar mejor factura de referencia (cobertura + solvencia)
+                        best_ref = proc.identificar_mejor_referencia(df_r)
+                        final_ref_doc = best_ref if best_ref else "Sustento"
+                        
+                        items, docs = proc.procesar_lote(df_r, forzar_cantidad_solicitada=self.sw_forzar_cant.value)
+
+                        if not items:
+                            logger.warning(f"No se encontraron coincidencias para el requerimiento {idx + 1}.")
+                            continue
+
+                        out_path = self._get_unique_out_path(f"PARTE_{idx + 1}_{base_fname}")
+                        if not out_path: continue
+
+                        logger.info(f"Escribiendo Excel con referencia: {final_ref_doc}")
+                        # Obtener ID_CLIENTE para el reporte
+                        cliente_id = ""
+                        df_cli = df_h[df_h['NOM_CLIENTE'] == self.txt_cliente.value]
+                        if not df_cli.empty:
+                            cliente_id = str(df_cli['ID_CLIENTE'].iloc[0])
+                        
+                        ExcelGenerator().generar_reporte(
+                            str(out_path), self.txt_cliente.value, cliente_id, f"{self.txt_motivo.value} (P{idx + 1})",
+                            items, docs, proc.obtener_rango_fechas(),
+                            sheet_name=final_ref_doc,
+                            factura_referencia=final_ref_doc
+                        )
+                        df_h = self._update_inventory_balances(df_h, items)
+                        
+                        if not self.page.web and os.name == 'nt':
+                            os.startfile(str(out_path))
+
+                    except PermissionError:
+                        self.status.value = f"❌ Error Permisos en Lote {idx + 1}"
+                        self.status.color = "red"
+                        self.page.update()
+                        continue
+                    except Exception as ex:
+                        logger.error(f"Error en Lote {idx + 1}: {ex}")
+                        self.status.value = f"❌ Error en Lote {idx + 1}"
+                        self.status.color = "red"
+                        self.page.update()
+                        continue
+
+                self.status.value = "🎯 Proceso Completado"
+                self.status.color = self.G360_ACCENT
+                logger.info("Flujo de generación completado exitosamente.")
+            except Exception as ex:
+                logger.exception("Error crítico en generar_flow:")
+                self.status.value = f"❌ Error Crítico: {str(ex)}"
+                self.status.color = "red"
+            finally:
+                self.progress.visible = False
+                self.btn_generar.disabled = False
+                self.page.update()
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _build_sidebar(self) -> ft.Container:
+        """Construye sidebar con indicador de sección activa y mejor organización."""
+        self.sidebar_nc_indicator = ft.Container(width=4, height=24, bgcolor=self.G360_ACCENT, border_radius=2, visible=True)
+        self.sidebar_consolidated_indicator = ft.Container(width=4, height=24, bgcolor=self.G360_ACCENT, border_radius=2, visible=False)
+        
+        def sidebar_item(icon, text, on_click, indicator, tooltip, disabled=False):
+            return ft.Container(
+                content=ft.Row([
+                    indicator,
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(icon, size=20, color=ft.colors.GREY_400),
+                            ft.Text(text, size=13, color=ft.colors.GREY_400, weight=ft.FontWeight.W_500),
+                        ], spacing=12),
+                        padding=ft.padding.symmetric(horizontal=12, vertical=10),
+                        border_radius=10,
+                        on_click=on_click,
+                        disabled=disabled,
+                        on_hover=lambda e: self._on_sidebar_hover(e),
+                        expand=True,
+                    ),
+                ], spacing=0),
+                tooltip=tooltip,
+            )
+
+        self.sidebar_btn_consol_icon = ft.Icon(ft.icons.ANALYTICS_OUTLINED, size=20, color=ft.colors.GREY_400)
+        
+        return ft.Container(
+            width=200,
+            padding=ft.padding.only(top=40, bottom=20, left=10, right=10),
+            bgcolor=self.G360_SURFACE,
+            content=ft.Column([
+                # Logo + nombre
+                ft.Container(
+                    content=ft.Row([
+                        ft.Image(src="/images/logo-g360.svg", width=42, height=42), # Solo el logo
+                    ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
+                    margin=ft.margin.only(bottom=40),
+                ),
+                
+                # Módulos
+                ft.Text("   MÓDULOS", size=10, weight=ft.FontWeight.BOLD, color=self.G360_TEXT_MUTED),
+                ft.Divider(height=10, color="transparent"),
+                
+                sidebar_item(ft.icons.DESCRIPTION_OUTLINED, "NC Sustentor", lambda _: self._switch_to_nc(), 
+                             self.sidebar_nc_indicator, "Generación de Notas de Crédito"),
+                
+                ft.Container(
+                    content=ft.Row([
+                        self.sidebar_consolidated_indicator,
+                        ft.Container(
+                            content=ft.Row([
+                                self.sidebar_btn_consol_icon,
+                                ft.Text("Consolidados", size=13, color=ft.colors.GREY_400, weight=ft.FontWeight.W_500),
+                            ], spacing=12),
+                            padding=ft.padding.symmetric(horizontal=12, vertical=10),
+                            border_radius=10,
+                            on_click=self._switch_to_consolidated,
+                            on_hover=lambda e: self._on_sidebar_hover(e),
+                            expand=True,
+                            ref=ft.Ref(), # Placeholder for disabled state logic if needed
+                        ),
+                    ], spacing=0),
+                    tooltip="Análisis y Reportes Consolidados",
+                ),
+                
+                ft.Divider(height=30, color=self.G360_BORDER),
+                
+                # Herramientas
+                ft.Text("   HERRAMIENTAS", size=10, weight=ft.FontWeight.BOLD, color=self.G360_TEXT_MUTED),
+                ft.Divider(height=10, color="transparent"),
+                
+                ft.Container(
+                    content=ft.Row([
+                        ft.Container(width=4), # Spacer for alignment with modules
+                        ft.TextButton(
+                            content=ft.Row([
+                                ft.Icon(ft.icons.DOWNLOAD_FOR_OFFLINE, size=20, color=ft.colors.GREY_400),
+                                ft.Text("Plantillas", size=13, color=ft.colors.GREY_400, weight=ft.FontWeight.W_500),
+                            ], spacing=12),
+                            on_click=self.crear_plantillas,
+                            style=ft.ButtonStyle(padding=ft.padding.all(12)),
+                        ),
+                    ]),
+                ),
+                
+                ft.Container(
+                    content=ft.Row([
+                        ft.Container(width=4),
+                        ft.TextButton(
+                            content=ft.Row([
+                                ft.Icon(ft.icons.REFRESH, size=20, color=ft.colors.GREY_400),
+                                ft.Text("Limpiar", size=13, color=ft.colors.GREY_400, weight=ft.FontWeight.W_500),
+                            ], spacing=12),
+                            on_click=self.reset_app,
+                            style=ft.ButtonStyle(padding=ft.padding.all(12)),
+                        ),
+                    ]),
+                ),
+                
+                ft.Container(expand=True),
+                
+                # Footer Signature
+                ft.Container(
+                    content=ft.Column([
+                        ft.Divider(height=20, color=self.G360_BORDER),
+                        G360Signature(mode="powered", version="2.0") if G360Signature else ft.Text("powered G360 v2.0", color=self.G360_BLUE, size=9),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=ft.padding.only(bottom=10),
+                ),
+            ], horizontal_alignment=ft.CrossAxisAlignment.START, spacing=5),
+        )
+
+    def _on_sidebar_hover(self, e):
+        e.control.bgcolor = ft.colors.with_opacity(0.05, ft.colors.WHITE) if e.data == "true" else None
+        e.control.update()
+
+    def _build_main_view(self) -> ft.Container:
+        """Construye la vista principal de NC Sustentor con layout mejorado."""
+        self.card_historial = self.file_status_card("1. HISTORIAL (BASE)", ft.icons.HISTORY_EDU)
+        self.card_requerimientos = self.file_status_card("2. REQUERIMIENTOS", ft.icons.FACT_CHECK_OUTLINED)
+        self.txt_resumen = ft.Text("", size=12, color=self.G360_TEXT_MUTED, visible=False)
+
+        self.btn_generar = ft.ElevatedButton(
+            content=ft.Row([
+                ft.Icon(ft.icons.ROCKET_LAUNCH_ROUNDED, size=24),
+                ft.Text("PROCESAR SUSTENTO NC", size=16, weight=ft.FontWeight.BOLD),
+            ], alignment=ft.MainAxisAlignment.CENTER, spacing=15),
+            style=ft.ButtonStyle(
+                color="white",
+                bgcolor={"": self.G360_ACCENT, "disabled": "white10"},
+                shape=ft.RoundedRectangleBorder(radius=15),
+                elevation={"hovered": 10, "": 2},
+                animation_duration=300,
+            ),
+            height=65,
+            width=450,
+            disabled=True,
+            on_click=lambda _: self.generar_flow(),
+        )
+
+        self.btn_container = ft.Container(
+            content=self.btn_generar,
+            shadow=ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=20,
+                color=ft.colors.with_opacity(0.15, self.G360_ACCENT),
+                blur_style=ft.ShadowBlurStyle.OUTER,
+            ),
+            animate_opacity=300,
+        )
+
+        return ft.Container(
+            expand=True,
+            padding=ft.padding.only(top=30, bottom=40, left=50, right=50),
+            content=ft.Column([
+                ft.Row([
+                    ft.Column([
+                        ft.Text("NC SUSTENTOR", size=36, weight=ft.FontWeight.W_900),
+                        ft.Text("Procesamiento inteligente de Notas de Crédito", size=14, color=self.G360_TEXT_MUTED),
+                    ], spacing=2),
+                    ft.Container(expand=True),
+                    self.txt_resumen,
+                ], alignment=ft.MainAxisAlignment.START),
+                
+                ft.Divider(height=20, color="transparent"),
+                
+                ft.Row([
+                    ft.Container(content=self.txt_cliente, expand=True),
+                    ft.Container(content=self.txt_motivo, expand=True),
+                ], spacing=20),
+                
+                ft.Row([
+                    ft.Icon(ft.icons.INFO_OUTLINE, size=14, color=self.G360_TEXT_MUTED),
+                    ft.Text("Sustentar cantidad total aunque falte stock", size=12, color=self.G360_TEXT_MUTED),
+                    self.sw_forzar_cant,
+                ], alignment=ft.MainAxisAlignment.END, spacing=10),
+                
+                ft.Container(
+                    padding=15, bgcolor=ft.colors.with_opacity(0.03, ft.colors.WHITE), border_radius=18,
+                    border=ft.border.all(1, self.G360_BORDER),
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Icon(ft.icons.SORT, size=16, color=self.G360_ACCENT),
+                            ft.Text("CRITERIO DE SELECCIÓN (FIFO/LIFO)", size=11, weight=ft.FontWeight.BOLD, color=self.G360_TEXT_MUTED),
+                        ], spacing=8),
+                        self.rg_tipo_orden,
+                    ], spacing=10),
+                ),
+                
+                ft.Row([
+                    ft.GestureDetector(
+                        content=self.card_historial, 
+                        on_tap=lambda _: self.fp_h.pick_files(allowed_extensions=["xlsx", "xls"]),
+                        mouse_cursor=ft.MouseCursor.CLICK,
+                    ),
+                    ft.GestureDetector(
+                        content=self.card_requerimientos, 
+                        on_tap=lambda _: self.fp_r.pick_files(allowed_extensions=["xlsx", "xls"]),
+                        mouse_cursor=ft.MouseCursor.CLICK,
+                    ),
+                ], spacing=20),
+                
+                ft.ExpansionTile(
+                    title=ft.Row([
+                        ft.Icon(ft.icons.ANALYTICS_OUTLINED, color=self.G360_ACCENT, size=20), 
+                        ft.Text("DASHBOARD DE LÍNEAS", size=14, weight=ft.FontWeight.BOLD, color="white")
+                    ], spacing=12),
+                    subtitle=ft.Text("Resumen comparativo del historial cargado", size=11, color=self.G360_TEXT_MUTED),
+                    initially_expanded=False,
+                    controls=[self.dashboard_card],
+                    bgcolor="transparent",
+                    collapsed_bgcolor="transparent",
+                    shape=ft.RoundedRectangleBorder(radius=18),
+                    text_color=self.G360_ACCENT,
+                    icon_color=self.G360_ACCENT,
+                ),
+                
+                ft.ExpansionTile(
+                    title=ft.Row([
+                        ft.Icon(ft.icons.TABLE_CHART_OUTLINED, color=self.G360_ACCENT, size=20), 
+                        ft.Text("VISTA PREVIA DE DATOS", size=14, weight=ft.FontWeight.BOLD, color="white")
+                    ], spacing=12),
+                    subtitle=ft.Text("Primeros 10 registros para validación rápida", size=11, color=self.G360_TEXT_MUTED),
+                    initially_expanded=False,
+                    controls=[self.preview_container],
+                    bgcolor="transparent",
+                    collapsed_bgcolor="transparent",
+                    shape=ft.RoundedRectangleBorder(radius=18),
+                    text_color=self.G360_ACCENT,
+                    icon_color=self.G360_ACCENT,
+                ),
+                
+                ft.Container(
+                    content=ft.Column([
+                        ft.Row([self.status], alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Row([self.progress], alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Row([self.btn_container], alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Row([
+                            ft.Icon(ft.icons.INFO_OUTLINE, size=12, color=self.G360_TEXT_MUTED),
+                            ft.Text("Los cálculos se realizan sobre montos sin IGV.", size=11, italic=True, color=self.G360_TEXT_MUTED),
+                        ], alignment=ft.MainAxisAlignment.CENTER, spacing=5),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=15),
+                    padding=ft.padding.only(top=20),
+                ),
+            ], scroll=ft.ScrollMode.AUTO, spacing=15),
+        )
 
     def _build_ui(self):
-        sidebar = ft.Container(
-            width=160,
-            padding=ft.padding.only(top=40, bottom=40, left=10, right=10),
-            bgcolor=self.G360_SURFACE,
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Image(src="/images/logo-g360.svg", width=50, height=50),
-                        ],
-                        alignment=ft.MainAxisAlignment.CENTER,
-                    ),
-                    ft.Divider(height=30, color="transparent"),
-                    ft.Text(
-                        "ACCIONES",
-                        size=12,
-                        weight=ft.FontWeight.BOLD,
-                        color=ft.colors.GREY_500,
-                    ),
-                    ft.Divider(height=10, color="transparent"),
-                    ft.Container(
-                        content=ft.TextButton(
-                            "Plantillas",
-                            icon=ft.icons.DOWNLOAD_FOR_OFFLINE,
-                            on_click=self.crear_plantillas,
-                        ),
-                        padding=ft.padding.symmetric(vertical=10),
-                    ),
-                    ft.Container(
-                        content=ft.TextButton(
-                            "Limpiar", icon=ft.icons.REFRESH, on_click=self.reset_app
-                        ),
-                        padding=ft.padding.symmetric(vertical=10),
-                    ),
-                    ft.Container(expand=True),
-                    G360Signature(mode="powered", version="2.0")
-                    if G360Signature
-                    else ft.Text("powered G360", color=self.G360_BLUE, size=10),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-        )
-        body = ft.Container(
-            expand=True,
-            padding=ft.padding.only(top=18, bottom=80, left=40, right=40),
-            content=ft.Column(
-                [
-                    ft.Text(
-                        "XLSX CALCULOS NC", size=30, weight=ft.FontWeight.W_900
-                    ),
-                    ft.Row([self.txt_cliente, self.txt_motivo], spacing=15),
-                    ft.Row([self.sw_forzar_cant], alignment="end"),
-                    self.rg_tipo_orden,
-                    ft.Row(
-                        [
-                            ft.GestureDetector(
-                                content=self.card_historial,
-                                on_tap=lambda _: self.fp_h.pick_files(
-                                    allowed_extensions=["xlsx", "xls"]
-                                ),
-                            ),
-                            ft.GestureDetector(
-                                content=self.card_requerimientos,
-                                on_tap=lambda _: self.fp_r.pick_files(
-                                    allowed_extensions=["xlsx", "xls"]
-                                ),
-                            ),
-                        ],
-                        spacing=15,
-                    ),
-                    self.dashboard_card,
-                    self.preview_container,
-                    ft.Column(
-                        [
-                            self.status,
-                            self.progress,
-                            self.btn_generar,
-                            ft.Text(
-                                "(i) Todos los cálculos de descuento y subtotales se realizan sin IGV.",
-                                size=11,
-                                italic=True,
-                                color="grey",
-                            ),
-                        ],
-                        horizontal_alignment="center",
-                        spacing=15,
-                    ),
-                ],
-                scroll="auto",
-                spacing=25,
-            ),
-        )
-        self.page.add(ft.Row([sidebar, ft.VerticalDivider(width=1), body], expand=True))
+        sidebar = self._build_sidebar()
+        self.main_view = self._build_main_view()
+        self.body = ft.Container(expand=True, content=self.main_view)
+        self.consolidated_module = ConsolidatedReportsModule(self)
+        self.page.add(ft.Row([sidebar, ft.VerticalDivider(width=1), self.body], expand=True))
+
+    def _switch_to_nc(self):
+        """Vuelve a la vista principal de NC."""
+        self.sidebar_nc_indicator.visible = True
+        self.sidebar_consolidated_indicator.visible = False
+        self.body.content = self.main_view
+        self.body.update()
+        if hasattr(self, 'page'): 
+            self.page.update()
+
+    def _update_consolidated_button(self):
+        """Habilita/deshabilita el botón de consolidados según exista historial."""
+        if hasattr(self, 'sidebar_btn_consol_icon'):
+            self.sidebar_btn_consol_icon.disabled = self.current_processor is None
+            if hasattr(self, 'page'):
+                self.sidebar_btn_consol_icon.update()
+
+    def _switch_to_consolidated(self, e):
+        """Cambia a la vista de reportes consolidados."""
+        if not self.current_processor:
+            self.status.value = "Cargue un historial primero"
+            self.status.color = "orange"
+            self.page.update()
+            return
+        
+        # Actualizar indicadores del sidebar
+        self.sidebar_nc_indicator.visible = False
+        self.sidebar_consolidated_indicator.visible = True
+        
+        try:
+            self.consolidated_module.update_data(self.current_processor)
+            consolidado_view = self.consolidated_module.build()
+            self.body.content = consolidado_view
+            self.consolidated_module._update_dashboard()
+            self.consolidated_module._update_filtros_activos()
+            self.body.update()
+            self.status.value = "Reportes Consolidados"
+            self.status.color = self.G360_BLUE
+            self.page.update()
+        except Exception as ex:
+            import traceback
+            traceback.print_exc()
+            self.status.value = f"Error al abrir consolidados: {str(ex)}"
+            self.status.color = "red"
+            self.page.update()
 
 
 def main(page: ft.Page):
@@ -972,7 +1224,7 @@ if __name__ == "__main__":
     ft.app(
         target=main, 
         view=ft.AppView.FLET_APP, 
-        assets_dir="assets", 
+        assets_dir="assets",
         host="127.0.0.1",
-        port=8888  # Puerto fuera del rango reservado de Windows
+        port=0
     )

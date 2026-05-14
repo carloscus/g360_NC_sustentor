@@ -1,0 +1,224 @@
+{
+  "skills": [
+    {
+      "name": "corporativo",
+      "description": "Proyectos para clientes - estilo corporativo conservador",
+      "device": "pc",
+      "colors": {
+        "bg": "#0b1220",
+        "surface": "#151e2e",
+        "accent": "#00796B",
+        "text": "#f0f4f8",
+        "muted": "#94a3b8"
+      },
+      "effects": {
+        "glassmorphism": true,
+        "blur": "16px",
+        "rounded": "16px"
+      },
+      "signature": {
+        "mode": "powered",
+        "text": "powered by G360"
+      }
+    },
+    {
+      "name": "corporativo-movil",
+      "description": "Proyectos para clientes - estilo corporativo - enfoque móvil",
+      "device": "movil",
+      "colors": {
+        "bg": "#0b1220",
+        "surface": "#151e2e",
+        "accent": "#00796B",
+        "text": "#f0f4f8",
+        "muted": "#94a3b8"
+      },
+      "effects": {
+        "glassmorphism": true,
+        "blur": "16px",
+        "rounded": "16px"
+      },
+      "signature": {
+        "mode": "powered",
+        "text": "powered by G360"
+      }
+    },
+    {
+      "name": "corporativo-g360",
+      "description": "Proyectos para clientes con colores G360 vibrantes",
+      "device": "pc",
+      "colors": {
+        "bg": "#0b1220",
+        "surface": "#151e2e",
+        "accent": "#00d084",
+        "text": "#f0f4f8",
+        "muted": "#94a3b8"
+      },
+      "effects": {
+        "glassmorphism": true,
+        "blur": "16px",
+        "rounded": "16px"
+      },
+      "signature": {
+        "mode": "powered",
+        "text": "powered by G360"
+      }
+    },
+    {
+      "name": "corporativo-g360-movil",
+      "description": "Proyectos para clientes con colores G360 - enfoque móvil",
+      "device": "movil",
+      "colors": {
+        "bg": "#0b1220",
+        "surface": "#151e2e",
+        "accent": "#00d084",
+        "text": "#f0f4f8",
+        "muted": "#94a3b8"
+      },
+      "effects": {
+        "glassmorphism": true,
+        "blur": "16px",
+        "rounded": "16px"
+      },
+      "signature": {
+        "mode": "powered",
+        "text": "powered by G360"
+      }
+    },
+    {
+      "name": "moderno",
+      "description": "Herramientas propias G360 - estilo innovador PC",
+      "device": "pc",
+      "colors": {
+        "bg": "#0b1220",
+        "surface": "#151e2e",
+        "accent": "#00d084",
+        "text": "#f0f4f8",
+        "muted": "#94a3b8"
+      },
+      "effects": {
+        "glassmorphism": true,
+        "blur": "16px",
+        "rounded": "16px"
+      },
+      "signature": {
+        "mode": "own",
+        "text": "G360 by ccusi"
+      }
+    },
+    {
+      "name": "moderno-movil",
+      "description": "Herramientas propias G360 - estilo innovador móvil",
+      "device": "movil",
+      "colors": {
+        "bg": "#0b1220",
+        "surface": "#151e2e",
+        "accent": "#00d084",
+        "text": "#f0f4f8",
+        "muted": "#94a3b8"
+      },
+      "effects": {
+        "glassmorphism": true,
+        "blur": "16px",
+        "rounded": "16px"
+      },
+      "signature": {
+        "mode": "own",
+        "text": "G360 by ccusi"
+      }
+    },
+    {
+      "name": "minimalista",
+      "description": "Proyectos minimalistas - scripts, CLI, Python",
+      "device": "both",
+      "colors": {
+        "bg": "#ffffff",
+        "surface": "#f5f5f5",
+        "accent": "#2563eb",
+        "text": "#1f2937",
+        "muted": "#6b7280"
+      },
+      "effects": {
+        "glassmorphism": false,
+        "blur": "0px",
+        "rounded": "8px"
+      },
+      "signature": {
+        "mode": "optional",
+        "text": "by @carloscus"
+      }
+    },
+    {
+      "name": "custom",
+      "description": "Configuración personalizada - colores ajustables",
+      "device": "both",
+      "colors": {
+        "bg": "#0b1220",
+        "surface": "#151e2e",
+        "accent": "#00d084",
+        "text": "#f0f4f8",
+        "muted": "#94a3b8"
+      },
+      "effects": {
+        "glassmorphism": false,
+        "blur": "0px",
+        "rounded": "8px"
+      },
+      "signature": {
+        "mode": "custom",
+        "text": "custom"
+      }
+    },
+    {
+      "name": "flet-desktop",
+      "description": "Aplicaciones de escritorio Flet - estilo G360",
+      "device": "pc",
+      "colors": {
+        "bg": "#0b1220",
+        "surface": "#1a2332",
+        "accent": "#00d084",
+        "text": "#f0f4f8",
+        "muted": "#94a3b8",
+        "success": "#22c55e",
+        "warning": "#f59e0b",
+        "error": "#ef4444"
+      },
+      "effects": {
+        "glassmorphism": true,
+        "blur": "12px",
+        "rounded": "12px"
+      },
+      "signature": {
+        "mode": "own",
+        "text": "G360 Desktop"
+      },
+      "framework": "flet",
+      "portable": true
+    },
+    {
+      "name": "flet-desktop-corporativo",
+      "description": "Aplicaciones Flet para clientes - estilo corporativo",
+      "device": "pc",
+      "colors": {
+        "bg": "#ffffff",
+        "surface": "#f8fafc",
+        "accent": "#00796B",
+        "text": "#1e293b",
+        "muted": "#64748b",
+        "success": "#10b981",
+        "warning": "#f59e0b",
+        "error": "#dc2626"
+      },
+      "effects": {
+        "glassmorphism": false,
+        "blur": "0px",
+        "rounded": "8px"
+      },
+      "signature": {
+        "mode": "powered",
+        "text": "powered by G360"
+      },
+      "framework": "flet",
+      "portable": true
+    }
+  ]
+}

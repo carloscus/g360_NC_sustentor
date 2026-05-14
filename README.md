@@ -1,119 +1,451 @@
 # G360 NC-Sustentor Pro 🚀
 
-**G360 NC-Sustentor Pro** es una herramienta avanzada diseñada para automatizar la generación de cuadros de sustento para Notas de Crédito (NC). Utiliza un motor de asignación **FIFO Inverso** para vincular devoluciones con las facturas de compra más recientes, garantizando precisión contable y cumplimiento con los estándares de auditoría de G360.
+> Microherramienta avanzada del ecosistema G360 para la automatización de cuadros de sustento de Notas de Crédito (NC) y análisis de ventas CRM.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Repo: GitHub](https://img.shields.io/badge/Repository-GitHub-blue.svg)](https://github.com/carloscus/g360_NC_sustentor.git)
+[![Python: 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
+## 📋 Tabla de Contenidos
+
+- [Características](#características)
+- [Instalación](#instalación)
+- [Uso Básico](#uso-básico)
+- [Reportes Disponibles](#reportes-disponibles)
+- [Diccionario de Datos](#diccionario-de-datos)
+- [Decisiones de Diseño Importantes](#decisiones-de-diseño-importantes)
+- [Estructura del Proyecto](#estructura-del-proyecto)
+- [Desarrollo](#desarrollo)
 
 ---
 
-## ✨ Funcionalidades Destacadas
+## 🚀 Características
 
 ### 🧠 Inteligencia de Procesamiento
-- **Selección Inteligente de Referencia:** El sistema elige automáticamente la factura más representativa (mayor frecuencia de ítems y peso económico) como documento maestro para el encabezado y nombre de pestaña.
-- **Precisión de 4 Decimales:** Manejo riguroso de precios unitarios (`SOLES / CANTIDAD`) para garantizar que el Subtotal en Excel coincida exactamente con la facturación original.
-- **Validación de Techo Financiero:** Alerta roja si el monto solicitado de Nota de Crédito excede el valor disponible en los documentos de soporte.
-- **Gestión Multi-Reporte:** Sistema inteligente de descuento de inventario que asegura que cada factura se use solo una vez entre múltiples reportes. Descuenta automáticamente todas las facturas utilizadas por artículo, evitando el doble conteo.
-- **Normalización de Documentos:** Limpieza automática de prefijos duplicados (F204-F204-51999 → F204-51999) para garantizar formato correcto en reportes.
-- **Estrategias de Ordenamiento:** Permite elegir entre sustentar por "Más Recientes" (orden cronológico) o por "Mayor Volumen" (priorizando facturas con más cantidad comprada).
-- **Limpieza de Datos Robusta:** Corrección automática de errores comunes de digitación (ej: 'O' por '0'), eliminación de caracteres invisibles (BOM UTF-8), y normalización de IDs de artículos para evitar duplicados por formato.
+- **Lógica FIFO Inversa (Sincronizada):** Asignación automática de facturas más recientes con descuento inteligente de inventario entre múltiples reportes.
+- **Selección de Referencia Maestra:** Identifica automáticamente la factura más representativa para el encabezado del reporte.
+- **Precisión Financiera:** Cálculos con 4 decimales para garantizar que el Subtotal en Excel coincida exactamente con el ERP.
+- **Validación de Techo Financiero:** Alerta visual si el monto solicitado excede el disponible en el historial.
 
-### 📊 Visualización y Dashboard
-- **Analytics de Historial:** Dashboard integrado que muestra un gráfico de barras comparativo ("Butterfly Chart") del Top 16 de líneas de producto por monto en soles.
-- **Rango de Auditoría:** Identificación visual rápida de las fechas de inicio y fin del historial cargado mediante badges dinámicos.
-- **Vista Previa en Tiempo Real:** Tabla de datos interactiva para inspeccionar el historial antes de iniciar el procesamiento.
+### 📊 Visualización & Analytics
+- **Dashboard "Butterfly Chart":** Comparativa visual del Top 16 de líneas de producto por monto.
+- **Vista Previa Interactiva:** Inspección rápida del historial cargado antes del procesamiento.
+- **Módulo de Reportes Consolidados:**
+    - **Por SKU**: Análisis detallado por artículo.
+- **Por Línea**: Análisis de ventas por línea de producto
+- **Por Cliente**: Análisis de ventas por cliente
+- **Por Mes**: Análisis de ventas por período
+- **Por Factura**: Análisis detallado por documento
+- **Pareto Cliente**: Análisis 80/20 de clientes por vendedor
+- **Comparativo**: Comparación mes a mes con tendencias
 
-### 📑 Generación de Reportes Pro
-- **Fórmulas Vivas en Excel:** El reporte generado incluye fórmulas de Excel (ROUND, SUM, multiplicaciones). Si el usuario edita una celda, el reporte se actualiza automáticamente.
-- **Jerarquía de Totales:** Resumen financiero (Subtotal, IGV, Total) ubicado en la parte superior derecha para una lectura ejecutiva inmediata.
-- **Gestión de Archivos Inteligente:** Sistema de resolución de conflictos que pregunta al usuario si desea Sobrescribir, Crear una Copia versionada o Saltar un archivo en caso de duplicados en el Escritorio.
-
----
-
-## 📉 Sistema de Alertas (Auditoría Visual)
-
-El reporte Excel utiliza un sistema de semáforos para facilitar la revisión:
-- 🔴 **Rojo (Error):** Stock insuficiente en historial, artículo no encontrado o errores críticos de datos.
-- 🟡 **Amarillo (Advertencia):** Precios de facturación variables detectados entre los documentos utilizados para el sustento.
-- 🔵 **Azul (Información):** Ítems procesados con cantidad o porcentaje en cero en el requerimiento original (para completado manual).
+### Validación de Datos
+- **Validación de campos críticos**: ID_ARTICULO, NOM_ARTICULO, FECHA_ORIG, CANTIDAD, SOLES, TPO_DOC, SERIE_DOC, NRO_DOC
+- **Validación de campos compuestos**: SKU, LÍNEA, CLIENTE, VENDEDOR
+- **Validación de fechas**: Consistencia entre ANHO/MES y FECHA_ORIG
+- **Validación de montos y cantidades**: Consistencia entre SOLES, CANTIDAD y PRECIO_UNID
+- **Validación de documentos**: Detección de documentos duplicados
 
 ---
 
-## 📂 Estructura de Datos Requerida
+## 📦 Instalación
 
-Para asegurar el correcto funcionamiento, el sistema requiere dos archivos Excel (puedes usar el botón "Descargar Plantillas" en la app):
+### Requisitos
+- Python 3.8+
+- pip install -r requirements.txt
 
-### 1. Historial de Compras (Base Total)
-Archivo exportado del ERP que contiene todas las ventas al cliente. El procesador busca automáticamente las cabeceras basándose en palabras clave.
-- `ID_ARTICULO`: Código del producto.
-- `NOM_ARTICULO`: Nombre o descripción.
-- `CANTIDAD`: Unidades compradas.
-- `PRECIO_UNID`: Precio unitario facturado.
-- `FECHA_ORIG`: Fecha de la factura (Formato DD/MM/YYYY).
-- `TPO_DOC`, `SERIE_DOC`, `NRO_DOC`: Datos para la trazabilidad exacta.
+### Instalación
+```bash
+# Recomendado: Usar UV para gestión rápida de dependencias
+uv pip install -r requirements.txt
 
-### 2. Tabla de Requerimientos (Input Usuario)
-Archivo con los productos que el cliente desea devolver:
-- `CODIGO`: SKU del producto.
-- `CANTIDAD_NC`: Unidades a sustentar.
-- `PORCENTAJE_DESC`: Descuento a aplicar (ej: 3%, 1.25 o 0.03). Mínimo recomendado: 0.5%.
+# Ejecución tradicional
+python main.py
+```
 
 ---
 
-## 🏗️ Arquitectura del Proyecto
+## 🎯 Uso Básico
 
-El proyecto sigue una arquitectura modular y escalable:
-- **`src/core/processor.py`**: El cerebro del sistema. Maneja la limpieza de Pandas, el motor FIFO inverso y la lógica de negocio. Incluye campo DOCUMENTOS_CANTIDAD para rastrear cantidad por documento.
-- **`src/excel/generator.py`**: Gestiona la creación de archivos openpyxl, la aplicación de estilos G360 y la inserción de fórmulas.
-- **`main.py`**: Controlador de la interfaz gráfica Flet y orquestador de los flujos asíncronos. Incluye gestión inteligente de inventario multi-reporte.
-- **`assets/`**: Recursos visuales (Logos G360).
+### 1. Cargar Historial
+1. Click en "1. HISTORIAL (BASE)"
+2. Seleccionar archivo Excel del historial de compras
+3. El sistema validará y procesará los datos
 
-### Cambios en v2.0.1
-- Eliminación de imports no utilizados (logging, pandas en generator, Path, get_column_letter).
-- Mejora en FIFO inverso: normalización de serie y número de documento para evitar prefijos duplicados.
-- Sistema de rastreo por documento: cada artículo ahora registra cuánto se toma de cada factura (DOCUMENTOS_CANTIDAD).
-- Descuento inteligente: _update_inventory_balances itera por cada documento utilizado, no solo el más reciente.
-- Sincronización completa entre versión principal y portable.
+### 2. Cargar Requerimientos
+1. Click en "2. REQUERIMIENTOS"
+2. Seleccionar archivo(s) Excel de requerimientos de NC
+3. El sistema procesará y generará las notas de crédito
 
-### Cambios en v2.0.2 (Mejoras Recientes)
-- **Corrección crítica de Fechas (str vs float):** Se forzó la limpieza y conversión obligatoria de fechas del historial a formato serial, previniendo cuelgues al analizar métricas y asegurando un ordenamiento FIFO inverso preciso.
-- **Ruta de Descarga Dinámica:** El sistema ahora detecta automáticamente si el usuario respalda su Escritorio en OneDrive (`Path.home() / "OneDrive" / "Desktop"`), previniendo que los reportes se guarden en ubicaciones invisibles.
-- **Limpieza de Interfaz en Excel:** Se eliminó la columna redundante "DOC. REFERENCIA" de la tabla de resultados. El dato maestro de referencia ahora habita exclusivamente en el cuadro superior derecho de totales.
-- **Auto-Apertura y Manejo de Errores:** Solucionado el bug de firmas de funciones (`takes 4 arguments but 5 were given`) que bloqueaba el guardado y la auto-apertura del Excel al finalizar.
-- **Sincronización Total:** Código 100% espejado entre `g360-nc-sustentor` y `g360-nc-sustentor-portable`.
+### 3. Generar Reportes Consolidados
+1. Click en "REPORTES CONSOLIDADOS"
+2. Seleccionar filtros (vendedores, clientes, líneas)
+3. Seleccionar tipo de reporte y agrupación
+4. Click en "GENERAR REPORTE EXCEL"
 
 ---
 
-## 🛠️ Estructura del Reporte (Excel)
+## 📊 Reportes Disponibles
 
-El reporte final está optimizado para una revisión ejecutiva:
-- **Encabezado Superior:** Fecha actual, Nombre del Cliente (en grande y negrita) y Motivo.
-- **Resumen de Totales (Top-Right):** Subtotal, IGV y Total Final ubicados en las primeras filas para lectura rápida.
-- **Tabla de Sustento:**
-    - `TOTAL FACTURADO`: Cantidad x P.U. Original.
-    - `DESC. UNITARIO`: Monto exacto del descuento por unidad.
-    - `SUBTOTAL NC`: El monto total a devolver por ese ítem.
-    - `FACTURAS`: Lista de documentos (correctamente formateados) que sirven de sustento.
-    - `ALERTA`: Mensajes de error o advertencia si el stock es insuficiente o los precios varían.
+### Reportes Consolidados
+
+| Tipo | Descripción | Agrupación |
+|------|-------------|------------|
+| **Por SKU** | Análisis de ventas por artículo | SKU → LÍNEA → CLIENTE |
+| **Por Línea** | Análisis de ventas por línea de producto | LÍNEA → SKU → CLIENTE |
+| **Por Cliente** | Análisis de ventas por cliente | CLIENTE → LÍNEA → SKU |
+| **Por Mes** | Análisis de ventas por período | PERIODO → SKU → LÍNEA → CLIENTE |
+| **Por Factura** | Análisis detallado por documento | FACTURA → SKU |
+| **Pareto Cliente** | Análisis 80/20 de clientes | CLIENTE (columnas por LÍNEA) |
+| **Comparativo** | Comparación mes a mes con tendencias | SKU/LÍNEA/CLIENTE (columnas por MES) |
+
+### Campos en Reportes
+
+#### Comunes a Todos
+- `N°`: Número de fila
+- `CANTIDAD`: Cantidad total
+- `MONTO`: Monto total en soles
+- `FECHA ULT.`: Fecha más reciente
+- `FACTURAS`: Lista de documentos
+- `PRECIOS`: Lista de precios
+
+#### Específicos
+- **Por SKU**: SKU, LÍNEA, CLIENTE
+- **Por Línea**: LÍNEA, SKU, CLIENTE
+- **Por Cliente**: CLIENTE, LÍNEA, SKU
+- **Por Mes**: PERIODO, SKU, LÍNEA, CLIENTE
+- **Por Factura**: FACTURA, FECHA, CLIENTE, LÍNEA, SKU, CANTIDAD, PRECIO, MONTO
+- **Pareto Cliente**: CLIENTE, TOTAL, %, CAT, [L01-CANT, L01-MONTO, L01-%], [L02-CANT, L02-MONTO, L02-%], ...
+- **Comparativo**: [AGRUPACIÓN], [MES1-CANT, MES1-MONTO, MES1-FACT], [MES2-CANT, MES2-MONTO, MES2-FACT], FECHA ULT., DIF_SOLES, DIF_PCT, TENDENCIA
 
 ---
 
-## 🚀 Puesta en Marcha
+## 📚 Diccionario de Datos
 
-1. **Requisitos:** Python 3.10 o superior (Recomendado 3.12+).
-2. **Automatización:** Se incluye un archivo `run.bat` que gestiona automáticamente:
-   - Creación del entorno virtual (.venv).
-   - Instalación de dependencias actualizadas.
-   - Lanzamiento de la aplicación.
-3. **Ejecución:**
-   - Haz doble clic en `run.bat`.
+### Campos Compuestos
+
+| Campo | ID | Nombre | Formato | Uso |
+|-------|----|-------|---------|-----|
+| **SKU** | `ID_ARTICULO` | `NOM_ARTICULO` | "ID - NOMBRE" |
+| **LÍNEA** | `ID_LINEA` | `NOM_LINEA` | "ID - NOMBRE" |
+| **CLIENTE** | `ID_CLIENTE` | `NOM_CLIENTE` | "ID - NOMBRE" |
+| **VENDEDOR** | `ID_VENDEDOR` | `NOM_VENDEDOR` | "ID - NOMBRE" |
+| **SUCURSAL** | `COD_SUCURSAL` | `NOM_SUCURSAL` | "ID - NOMBRE" |
+
+### Campos de Documento
+
+| Campo | Formato | Ejemplo |
+|-------|---------|---------|
+| **FACTURA** | "TIPO + SERIE - NUMERO" | "F012-0457996" |
+| **PEDIDO** | "ID_PEDIDO" | "12345" |
+
+### Campos de Lista
+
+| Campo | Singular | Descripción |
+|-------|----------|-------------|
+| **CLIENTES** | CLIENTE | Lista de clientes |
+| **FACTURAS** | FACTURA | Lista de facturas |
+
+### Valores a Filtrar
+
+Los siguientes valores son filtrados automáticamente:
+- `SIN ASIGNAR`
+- `''` (vacío)
+- `nan`
+- `None`
 
 ---
 
-## 📦 Dependencias Técnicas
+## ⚠️ Decisiones de Diseño Importantes
 
-- `flet`: UI Framework multiplataforma.
-- `pandas`: Análisis y manipulación de datos de alto rendimiento.
-- `openpyxl`: Motor de lectura/escritura de archivos XLSX.
+### 1. Pareto - Uso de Solo ID de Líneas como Encabezados
+
+**Diseño Actual:**
+- Los encabezados de columnas de líneas usan **solo el ID** (ej: 0101, 0156)
+- No incluyen el nombre de la línea (ej: "0101 - ARCHIVO")
+
+**Justificación:**
+- ✅ **Ahorro de espacio**: Los nombres de líneas pueden ser muy largos (ej: "BEBIDAS GASEOSAS - LATA 1L")
+- ✅ **Legibilidad**: IDs cortos (4-6 caracteres) son fáciles de leer
+- ✅ **Identificación**: El ID es suficiente para identificar la línea
+- ✅ **Experiencia de usuario**: Los usuarios conocen los IDs de sus líneas
+
+**⚠️ Advertencia:**
+- Este diseño es **intencional** y **no debe cambiarse**
+- Los usuarios deben conocer los IDs de sus líneas
+- El nombre completo está disponible en el diccionario de datos maestros
+- Cambiar esto haría el reporte muy ancho y difícil de leer
+
+**Ubicación:** `src/excel/generator.py:683`
+
+**Estructura del Reporte:**
+```
+CLIENTE | TOTAL | % | CAT | [0101-CANT | 0101-MONTO | 0101-%] | [0156-CANT | 0156-MONTO | 0156-%] | ...
+```
 
 ---
 
-**Desarrollado para el Ecosistema G360.**
-*Precisión, Velocidad y Auditoría.*
+### 2. NC - Uso de Columna SKU Adicional (ID Puro + Formato Completo)
+
+**Diseño Actual:**
+- Columna **"SKU (ID Puro)"**: Solo el ID del artículo (ej: "12345")
+- Columna **"SKU - ARTICULO"**: Formato completo "ID - NOMBRE" (ej: "12345 - Producto A")
+
+**Justificación:**
+- ✅ **Filtrado manual en Excel**: Permite filtrar rápidamente por SKU usando el ID puro
+- ✅ **Ordenamiento alfabético**: El ID puro es más fácil de ordenar que el formato completo
+- ✅ **Validación con sistemas externos**: Muchos sistemas usan solo el ID del SKU
+- ✅ **Manejo de errores**: Si hay error en el nombre, el ID puro sigue siendo correcto
+
+**⚠️ Advertencia:**
+- Este diseño es **intencional** y **no debe cambiarse**
+- La columna "SKU (ID Puro)" es para filtrado, ordenamiento y validación manual
+- La columna "SKU - ARTICULO" es para identificación visual
+- Cambiar esto dificultaría el manejo manual en Excel
+
+**Ubicación:** `src/excel/generator.py:165-173`
+
+**Estructura del Reporte:**
+```
+N° | SKU (ID Puro) | SKU - ARTICULO | LÍNEA | CANT. SUSTENTAR | P.U. | TOT. FACT. | DESC. (%)
+```
+
+---
+
+### 3. Excepciones al Estándar del Diccionario
+
+**Estándar del Diccionario:**
+- Todos los campos compuestos usan formato "ID - NOMBRE"
+
+**Excepciones Documentadas:**
+
+| Reporte | Campo | Formato | Justificación |
+|---------|-------|---------|---------------|
+| **Pareto** | LÍNEA (encabezados) | Solo ID | Ahorro de espacio con muchas líneas |
+| **NC** | SKU (columna adicional) | ID puro | Facilita filtrado manual en Excel |
+
+**⚠️ Advertencia:**
+- Estas excepciones son **intencionales** y **no deben cambiarse**
+- Están documentadas en este README y en el diccionario de datos
+- Cambiarlas sin justificación clara causará problemas en los reportes
+
+---
+
+## 🔧 Estructura del Proyecto
+
+```
+g360-nc-sustentor/
+├── src/
+│   ├── core/
+│   │   ├── processor.py          # NCProcessor (lógica FIFO Inversa)
+│   │   ├── data_dictionary.py    # Diccionario centralizado de campos
+│   ├── excel/
+│   │   └── generator.py          # Generación de Excel (OpenPyXL)
+│   └── ui/
+│       └── consolidated_view.py  # Módulo de Reportes Consolidados
+├── assets/
+│   └── templates/               # Plantillas de Excel
+├── g360-nc-sustentor-portable/   # Versión para distribución (En desarrollo)
+├── main.py                        # Aplicación principal
+├── requirements.txt               # Dependencias de Python (pip)
+└── pyproject.toml                 # Configuración del proyecto (uv)
+```
+
+---
+
+## 🛠️ Desarrollo
+
+### Ejecutar Tests
+```bash
+python -m pytest tests/
+```
+
+### Validar Historial
+```python
+from src.core.validation import validar_historial_completo, DiccionarioDatosMaestros
+
+# Validar historial completo
+validacion = validar_historial_completo(df_historial)
+
+if not validacion['valid']:
+    print("Errores encontrados:")
+    for error in validacion['errores']:
+        print(f"  - {error}")
+else:
+    print("Validación exitosa!")
+
+# Validar consistencia de datos maestros
+datos_maestros = DiccionarioDatosMaestros()
+datos_maestros.cargar_desde_historial(df_historial)
+validacion_maestros = datos_maestros.validar_consistencia(df_historial)
+```
+
+### Usar el Diccionario de Datos
+```python
+from src.core.data_dictionary import DataDictionary
+
+# Formatear campos compuestos
+sku = DataDictionary.format_composite_field('SKU', '12345', 'Producto A')
+# Resultado: '12345 - Producto A'
+
+linea = DataDictionary.format_composite_field('LÍNEA', '0101', 'ARCHIVO')
+# Resultado: '0101 - ARCHIVO'
+
+cliente = DataDictionary.format_composite_field('CLIENTE', 'C001', 'Cliente X')
+# Resultado: 'C001 - Cliente X'
+
+# Filtrar DataFrames
+df_filtrado = DataDictionary.filter_dataframe(df, 'NOM_CLIENTE')
+df_filtrado = DataDictionary.filter_dataframe(df, 'NOM_VENDEDOR')
+
+# Validar campos
+result = DataDictionary.validate_composite_field('SKU', '12345', 'Producto A')
+if not result['valid']:
+    print("Errores:", result['errores'])
+```
+
+---
+
+## 📝 Documentación Adicional
+
+### Análisis Detallados
+
+- **[ANALISIS_HISTORIAL_FUENTE_VERDAD.md](ANALISIS_HISTORIAL_FUENTE_VERDAD.md)** - Análisis del historial como fuente de verdad
+- **[ANALISIS_INCONSISTENCIAS.md](ANALISIS_INCONSISTENCIAS.md)** - Análisis de inconsistencias en la interfaz
+- **[ANALISIS_ID_PURO_PARETO_NC.md](ANALISIS_ID_PURO_PARETO_NC.md)** - Análisis de uso de ID puro en Pareto y NC
+- **[VISTA_RAPIDA_REPORTES.md](VISTA_RAPIDA_REPORTES.md)** - Vista rápida de valores calculados y ordenamiento
+- **[RESUMEN_ACCIONES.md](RESUMEN_ACCIONES.md)** - Resumen de acciones realizadas
+- **[RESUMEN_FINAL_HISTORIAL.md](RESUMEN_FINAL_HISTORIAL.md)** - Resumen final del análisis del historial
+
+---
+
+## 🤝 Contribución
+
+### Reglas de Código
+
+1. **Mantener consistencia** en el uso de campos compuestos
+2. **No cambiar** los diseños de Pareto y NC sin justificación clara
+3. **Documentar** cualquier cambio en el diccionario de datos
+4. **Validar** el historial antes de procesar
+5. **Usar** el diccionario de datos para formatear campos compuestos
+
+### Proceso de Cambios
+
+1. **Analizar** el impacto del cambio propuesto
+2. **Documentar** la justificación del cambio
+3. **Actualizar** el diccionario de datos si es necesario
+4. **Actualizar** el código para usar el nuevo formato
+5. **Validar** que todos los reportes usen el formato correcto
+6. **Probar** que los reportes se generen correctamente
+
+### Pull Requests
+
+Antes de enviar un PR, asegúrate de:
+1. Actualizar la documentación relevante
+2. Validar que los cambios no rompan la compatibilidad
+3. Probar que todos los reportes funcionan correctamente
+4. Actualizar las pruebas si es necesario
+
+---
+
+## 📞 Soporte
+
+### Problemas Comunes
+
+**Error: "No se hallaron datos válidos en el archivo"**
+- Verifique que el archivo tenga las columnas críticas: ID_ARTICULO, NOM_ARTICULO, FECHA_ORIG, CANTIDAD, SOLES, TPO_DOC, SERIE_DOC, NRO_DOC
+
+**Error: "No hay datos para Pareto"**
+- Verifique que haya clientes en el historial
+- Verifique que haya líneas en el historial
+- Verifique que los filtros no estén excluyendo todos los datos
+
+**Error: "El sistema no puede encontrar el archivo especificado"**
+- Verifique que la ruta del archivo sea correcta
+- Verifique que tenga permisos para escribir en el directorio de destino
+
+---
+
+## 📄 Licencia
+
+Este proyecto es parte del ecosistema G360. Consulte la licencia del ecosistema para más detalles.
+
+---
+
+## 🎯 Objetivo del Proyecto
+
+G360 NC Sustentor es una herramienta de **análisis y generación de notas de crédito** con las siguientes características:
+
+1. **Automatización**: Procesa automáticamente requerimientos de NC y asigna facturas de sustento
+2. **Validación**: Verifica la consistencia de datos antes de procesar
+3. **Análisis**: Proporciona reportes consolidados para análisis de ventas
+4. **Pareto**: Genera análisis 80/20 de clientes por vendedor
+5. **Comparativo**: Permite comparación mes a mes con tendencias
+6. **Calidad de Datos**: Valida y mejora la calidad de los datos del historial
+
+---
+
+## 🔄 Versionado
+
+### Versión Actual: 1.0.0
+
+**Cambios Recientes:**
+- ✅ Agregado diccionario centralizado de datos (`src/core/data_dictionary.py`)
+- ✅ Agregado módulo de validación del historial (`src/core/validation.py`)
+- ✅ Corregida inconsistencia de tilde en `g360-nc-sustentor-portable/src/reports/consolidated.py`
+- ✅ Documentadas decisiones de diseño importantes en README
+- ✅ Actualizada función `format_id_name()` para aceptar parámetro opcional `field_name`
+
+**Próximos Pasos:**
+- Integrar validación en NCProcessor
+- Actualizar reportes consolidados para usar el diccionario
+- Crear reporte de calidad de datos
+- Mejorar documentación de campos
+
+---
+
+## 📞 Contacto
+
+Para reportar problemas o sugerencias, abra un issue en el repositorio del proyecto.
+
+---
+
+## 🎓 Notas Importantes
+
+### ⚠️ Advertencias
+
+1. **No cambiar** el diseño de Pareto (solo ID de líneas como encabezados) sin justificación clara
+2. **No cambiar** el diseño de NC (columna SKU adicional) sin justificación clara
+3. **No modificar** el diccionario de datos sin actualizar la documentación
+4. **No eliminar** las funciones de validación del historial
+5. **No cambiar** el formato de campos compuestos sin actualizar todos los reportes
+
+### ✅ Buenas Prácticas
+
+1. **Validar** siempre el historial antes de procesar
+2. **Usar** el diccionario de datos para formatear campos compuestos
+3. **Documentar** cualquier cambio en el código
+4. **Probar** que los reportes se generan correctamente
+5. **Mantener** la consistencia en el uso de campos compuestos
+
+### 📚 Recursos de Aprendizaje
+
+- **[ANALISIS_HISTORIAL_FUENTE_VERDAD.md](ANALISIS_HISTORIAL_FUENTE_VERDAD.md)** - Aprenda sobre la estructura del historial
+- **[ANALISIS_INCONSISTENCIAS.md](ANALISIS_INCONSISTENCIAS.md)** - Aprenda sobre las inconsistencias identificadas
+- **[ANALISIS_ID_PURO_PARETO_NC.md](ANALISIS_ID_PURO_PARETO_NC.md)** - Aprenda sobre el uso de ID puro en Pareto y NC
+- **[VISTA_RAPIDA_REPORTES.md](VISTA_RAPA_REPORTES.md)** - Aprenda sobre cómo se calculan y ordenan los valores en reportes
+
+---
+
+## 🎯 Conclusión
+
+G360 NC Sustentor es una herramienta robusta para **generación de notas de crédito con sustento** y **análisis de ventas consolidados**. El sistema incluye:
+
+- ✅ **Validación automática** de datos del historial
+- ✅ **Diccionario centralizado** de campos y formatos
+- ✅ **Reportes consolidados** con múltiples agrupaciones
+- ✅ **Reporte Pareto** con análisis 80/20
+- ✅ **Reporte Comparativo** con tendencias
+- ✅ **Documentación completa** de decisiones de diseño importantes
+
+Las decisiones de diseño documentadas en este README son **intencionales** y **no deben cambiarse** sin justificación clara. El sistema está diseñado para ser **robusto**, **consistente** y **fácil de usar**.

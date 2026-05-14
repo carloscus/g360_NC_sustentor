@@ -1,0 +1,6 @@
+"""
+G360 Python Skill Configuration
+"""
+SKILL_NAME = "python-cli-template"
+SKILL_VERSION = "1.0.0"
+G360_BRAND = "G360 Ecosystem"

@@ -1,0 +1,66 @@
+{
+  "skills": [
+    {
+      "name": "code-audit",
+      "description": "Audit code quality and G360 compliance",
+      "files": ["g360-skill-audit.mjs"]
+    },
+    {
+      "name": "meta-audit",
+      "description": "Audit meta tags for SEO",
+      "files": ["g360-skill-meta-evaluator.mjs"]
+    },
+    {
+      "name": "structure-audit",
+      "description": "Audit project structure",
+      "files": []
+    },
+    {
+      "name": "frontend",
+      "description": "Frontend development agent",
+      "files": []
+    },
+    {
+      "name": "backend",
+      "description": "Backend development agent",
+      "files": []
+    },
+    {
+      "name": "python-desktop",
+      "description": "Python Flet desktop development agent",
+      "files": [],
+      "capabilities": ["flet", "gui", "desktop", "portable", "migrate-tkinter", "migrate-ctkinter"]
+    },
+    {
+      "name": "python-calculations",
+      "description": "Python calculations and data processing agent",
+      "files": [],
+      "capabilities": ["python", "math", "data-processing", "statistics", "flet-ui"]
+    },
+    {
+      "name": "calculations",
+      "description": "Calculations and data processing",
+      "files": []
+    },
+    {
+      "name": "data",
+      "description": "Data management agent",
+      "files": []
+    },
+    {
+      "name": "export",
+      "description": "Export and reporting agent",
+      "files": []
+    },
+    {
+      "name": "security",
+      "description": "Security audit agent",
+      "files": []
+    },
+    {
+      "name": "repo-presenter",
+      "description": "Repository presentation and documentation",
+      "files": []
+    }
+  ]
+}

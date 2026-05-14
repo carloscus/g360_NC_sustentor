@@ -1,0 +1,7 @@
+{
+  "name": "python-cli-template",
+  "version": "1.0.0",
+  "description": "G360 Python CLI Template",
+  "main": "src/main.py",
+  "requirements": []
+}

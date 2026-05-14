@@ -3,6 +3,8 @@ import re
 import logging
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, field
+from src.core.utils import format_id_name, format_doc_id
+from src.core.validation import validar_historial_completo
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,8 @@ class ProcessedItem:
     STATUS: str
     NRO_DOC: str = ""
     SERIE_DOC: str = ""
+    ID_LINEA: str = ""
+    NOM_LINEA: str = ""
     FACTURA_REF: str = "" # Documento principal de referencia
     DOCUMENTOS_CANTIDAD: Dict[str, float] = field(default_factory=dict)  # Mapeo de doc => cantidad tomada
 
@@ -36,13 +40,35 @@ class NCProcessor:
     Orden: Facturas más recientes primero, asignación hacia atrás
     """
 
-    def __init__(self, historial_compras: pd.DataFrame):
+    def __init__(self, historial_compras: pd.DataFrame, sort_mode: str = "fecha_desc"):
         """
         Inicializa el procesador preparando la base de datos de historial.
         Utiliza un diccionario de caché para optimizar búsquedas repetitivas de SKUs.
+        
+        Args:
+            historial_compras: DataFrame con el historial de compras
+            sort_mode: Modo de ordenamiento ("fecha_desc", "fecha_asc", "cantidad_desc", "cantidad_asc")
         """
         self.filas_omitidas_detalle: List[Dict] = []
+        self.sort_mode = sort_mode
         self.historial = self._preparar_historial(historial_compras)
+        
+        # Validar historial completo
+        logger.info("Validando historial de compras...")
+        validacion = validar_historial_completo(self.historial)
+        
+        if not validacion['valid']:
+            logger.warning(f"Validación del historial encontró {len(validacion['errores'])} errores:")
+            for error in validacion['errores'][:5]:  # Loguear solo los primeros 5
+                logger.warning(f"  - {error}")
+            if len(validacion['errores']) > 5:
+                logger.warning(f"  ... y {len(validacion['errores']) - 5} errores más")
+        else:
+            logger.info("Validación del historial exitosa")
+        
+        # Guardar resultado de validación para referencia
+        self.validacion_historial = validacion
+        
         # Optimización: Pre-agrupar historial por artículo para evitar filtrados O(N) repetitivos
         self._cache_articulos = {str(k): v for k, v in self.historial.groupby('ID_ARTICULO')}
 
@@ -205,9 +231,27 @@ class NCProcessor:
             for d in detalles[:5]: # Loguear solo las primeras 5 como muestra
                 logger.debug(f"Fila inválida: Doc {d.get('NRO_DOC')} - SKU {d.get('ID_ARTICULO')}")
 
-        # 3. Limpiar y ordenar
+        # 3. Limpiar y ordenar según sort_mode
         df = df.dropna(subset=['FECHA_ORIG']).reset_index(drop=True)
-        df = df.sort_values(by=['ID_ARTICULO', 'FECHA_ORIG'], ascending=[True, False]).reset_index(drop=True)
+        
+        # Determinar columnas y orden de clasificación según sort_mode
+        if self.sort_mode == "fecha_desc":
+            df = df.sort_values(by=['ID_ARTICULO', 'FECHA_ORIG'], ascending=[True, False]).reset_index(drop=True)
+            logger.debug("Historial ordenado por fecha (más recientes primero)")
+        elif self.sort_mode == "fecha_asc":
+            df = df.sort_values(by=['ID_ARTICULO', 'FECHA_ORIG'], ascending=[True, True]).reset_index(drop=True)
+            logger.debug("Historial ordenado por fecha (más antiguo primero)")
+        elif self.sort_mode == "cantidad_desc":
+            df = df.sort_values(by=['ID_ARTICULO', 'CANTIDAD'], ascending=[True, False]).reset_index(drop=True)
+            logger.debug("Historial ordenado por cantidad (mayor volumen primero)")
+        elif self.sort_mode == "cantidad_asc":
+            df = df.sort_values(by=['ID_ARTICULO', 'CANTIDAD'], ascending=[True, True]).reset_index(drop=True)
+            logger.debug("Historial ordenado por cantidad (menor cantidad primero)")
+        else:
+            # Default: fecha_desc (más recientes primero)
+            df = df.sort_values(by=['ID_ARTICULO', 'FECHA_ORIG'], ascending=[True, False]).reset_index(drop=True)
+            logger.debug(f"Modo de ordenamiento desconocido '{self.sort_mode}', usando default (fecha_desc)")
+        
         return df
 
     def _get_articulo_historial(self, codigo: str) -> pd.DataFrame:
@@ -343,12 +387,14 @@ class NCProcessor:
     def _crear_item_error(self, cod, cant, porc) -> ProcessedItem:
         return ProcessedItem(
             cod, "NO ENCONTRADO", cant, 0, 0, 0, 0, 0, porc, [], "ERROR: No en historial"
+            , ID_LINEA="", NOM_LINEA="" # Add default values for new fields
         )
 
     def _construir_item_vacio(self, cod, nom, porc, rec) -> ProcessedItem:
         p_ref = round(float(rec['PRECIO_UNID']), 2)
         return ProcessedItem(
             cod, nom, 0, 0, p_ref, 0, p_ref, 0, porc, [], "INFO: Cantidad vacía", str(rec['NRO_DOC']), str(rec['SERIE_DOC'])
+            , ID_LINEA=str(rec['ID_LINEA']), NOM_LINEA=str(rec['NOM_LINEA']) # Add new fields
         )
 
     def _convertir_porcentaje(self, p) -> float:
@@ -421,7 +467,9 @@ class NCProcessor:
                     SUBTOTAL_DESCUENTO=0,
                     PORCENTAJE_APLICADO=0,
                     DOCUMENTOS=[],
-                    STATUS="ERROR: Fila vacía o sin código de artículo"
+                    STATUS="ERROR: Fila vacía o sin código de artículo",
+                    ID_LINEA="",
+                    NOM_LINEA=""
                 ))
                 continue
 

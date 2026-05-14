@@ -1,0 +1,28 @@
+:root {
+  --g360-primary: #3B82F6;
+  --g360-secondary: #10B981;
+  --g360-accent: #8B5CF6;
+  --g360-bg: #ffffff;
+  --g360-text: #1f2937;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, sans-serif;
+  background: var(--g360-bg);
+  color: var(--g360-text);
+  line-height: 1.6;
+}
+
+.g360-header {
+  background: var(--g360-primary);
+  color: white;
+  padding: 1rem 2rem;
+}
+
+.g360-footer {
+  text-align: center;
+  padding: 1rem;
+  color: #6b7280;
+}

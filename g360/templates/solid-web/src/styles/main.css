@@ -1,0 +1,115 @@
+/* ============================================
+ * G360 Theme - Estilos principales
+ * Sistema de diseño para proyectos G360
+ * ============================================ */
+
+/* === VARIABLES G360 === */
+:root {
+  /* Colores G360 - Oscuro (Default) */
+  --g360-bg: #0b1220;
+  --g360-surface: #151e2e;
+  --g360-accent: #00d084;
+  --g360-accent-dark: #00796B;
+  --g360-text: #f0f4f8;
+  --g360-muted: #94a3b8;
+  --g360-border: rgba(255, 255, 255, 0.1);
+  
+  /* Efectos */
+  --g360-glass: rgba(21, 30, 46, 0.75);
+  --g360-blur: 16px;
+  --g360-rounded: 16px;
+  
+  /* Espaciado */
+  --g360-space-xs: 4px;
+  --g360-space-sm: 8px;
+  --g360-space-md: 16px;
+  --g360-space-lg: 24px;
+  --g360-space-xl: 32px;
+  
+  /* Tipografía */
+  --g360-font: 'Consolas', 'Monaco', 'Courier New', monospace;
+  --g360-font-size: 14px;
+}
+
+/* === ESTILOS BASE === */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--g360-font);
+  font-size: var(--g360-font-size);
+  background: var(--g360-bg);
+  color: var(--g360-text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.container {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+  min-height: 100vh;
+  background: var(--g360-bg);
+}
+
+header {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--g360-surface);
+}
+
+h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--g360-accent);
+}
+
+main {
+  padding: 24px 0;
+}
+
+/* === UTILIDADES === */
+.g360-card {
+  background: var(--g360-surface);
+  border: 1px solid var(--g360-border);
+  border-radius: var(--g360-rounded);
+  padding: var(--g360-space-md);
+}
+
+.g360-glass {
+  background: var(--g360-glass);
+  backdrop-filter: blur(var(--g360-blur));
+  -webkit-backdrop-filter: blur(var(--g360-blur));
+  border: 1px solid var(--g360-border);
+}
+
+.g360-btn {
+  background: var(--g360-accent);
+  color: var(--g360-bg);
+  border: none;
+  border-radius: var(--g360-rounded);
+  padding: var(--g360-space-sm) var(--g360-space-md);
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.g360-btn:hover {
+  background: var(--g360-accent-dark);
+}
+
+/* === MODO CLARO === */
+@media (prefers-color-scheme: light) {
+  :root {
+    --g360-bg: #ffffff;
+    --g360-surface: #f5f5f5;
+    --g360-text: #1f2937;
+    --g360-muted: #6b7280;
+    --g360-border: rgba(0, 0, 0, 0.1);
+    --g360-glass: rgba(255, 255, 255, 0.75);
+  }
+}

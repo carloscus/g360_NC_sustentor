@@ -1,0 +1,20 @@
+{
+  "name": "mi-solid-proyecto",
+  "version": "1.0.0",
+  "description": "Proyecto G360 creado con SolidJS",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "solid-js": "^1.8.0"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "vite-plugin-solid": "^2.8.0"
+  },
+  "author": "@carloscus",
+  "license": "MIT"
+}

@@ -1,0 +1,101 @@
+{
+  "snippets": [
+    {
+      "name": "cli-argparse-basic",
+      "description": "Basic argparse CLI structure",
+      "language": "python",
+      "code": "import argparse\n\nparser = argparse.ArgumentParser(description='My CLI App')\nparser.add_argument('input', help='Input file')\nparser.add_argument('-v', '--verbose', action='store_true')\nparser.add_argument('-o', '--output', default='output.txt')\nargs = parser.parse_args()"
+    },
+    {
+      "name": "cli-subcommands",
+      "description": "CLI with subcommands (git-style)",
+      "language": "python",
+      "code": "import argparse\n\nparser = argparse.ArgumentParser()\nsubparsers = parser.add_subparsers()\n\ninit_parser = subparsers.add_parser('init')\ninit_parser.add_argument('name')\n\nrun_parser = subparsers.add_parser('run')\nrun_parser.add_argument('--watch', action='store_true')"
+    },
+    {
+      "name": "cli-logging",
+      "description": "Logging setup for CLI",
+      "language": "python",
+      "code": "import logging\nimport sys\n\ndef setup_logging(verbose=False):\n    level = logging.DEBUG if verbose else logging.INFO\n    logging.basicConfig(\n        level=level,\n        format='%(asctime)s - %(levelname)s - %(message)s',\n        handlers=[logging.StreamHandler(sys.stdout)]\n    )\n    return logging.getLogger(__name__)"
+    },
+    {
+      "name": "cli-config-json",
+      "description": "Load JSON config file",
+      "language": "python",
+      "code": "import json\nfrom pathlib import Path\n\ndef load_config(config_path='config.json'):\n    path = Path(config_path)\n    if not path.exists():\n        raise FileNotFoundError(f'Config not found: {config_path}')\n    with open(path) as f:\n        return json.load(f)"
+    },
+    {
+      "name": "cli-progress-bar",
+      "description": "Progress bar with tqdm",
+      "language": "python",
+      "code": "from tqdm import tqdm\n\nfor item in tqdm(items, desc='Processing', unit='item'):\n    # process item\n    pass"
+    },
+    {
+      "name": "cli-env-config",
+      "description": "Environment-based configuration",
+      "language": "python",
+      "code": "import os\nfrom pathlib import Path\n\ndef get_config():\n    env = os.getenv('APP_ENV', 'development')\n    config_dir = Path(__file__).parent / 'config'\n    config_file = config_dir / f'{env}.json'\n    return json.loads(config_file.read_text())"
+    },
+    {
+      "name": "cli-exit-codes",
+      "description": "Exit codes constants",
+      "language": "python",
+      "code": "EXIT_OK = 0\nEXIT_ERROR = 1\nEXIT_USAGE = 2\nEXIT_DATA = 3\n\n# Usage: sys.exit(EXIT_ERROR)"
+    },
+    {
+      "name": "g360-header",
+      "description": "Standard G360 header",
+      "code": "<header class='g360-header'>...</header>"
+    },
+    {
+      "name": "g360-button",
+      "description": "G360 styled button",
+      "code": "<button class='g360-btn'>Click</button>"
+    },
+    {
+      "name": "g360-card",
+      "description": "G360 card component",
+      "code": "<div class='g360-card'>...</div>"
+    },
+    {
+      "name": "g360-badge",
+      "description": "G360 status badge",
+      "code": "<span class='g360-badge g360-badge-success'>Active</span>"
+    },
+    {
+      "name": "flet-page",
+      "description": "Flet page setup with G360 theme",
+      "code": "import flet as ft\n\ndef main(page: ft.Page):\n    page.title = 'G360 App'\n    page.theme_mode = ft.ThemeMode.DARK\n    page.bgcolor = '#0b1220'\n    page.padding = 20\n    page.add(ft.Text('G360 Desktop App', size=24, color='#00d084'))"
+    },
+    {
+      "name": "flet-card",
+      "description": "G360 styled Flet Card",
+      "code": "ft.Container(\n    content=ft.Column([...]),\n    bgcolor='#1a2332',\n    border_radius=12,\n    padding=15,\n    shadow=ft.BoxShadow(\n        spread_radius=1,\n        blur_radius=20,\n        color='#00d08420'\n    )\n)"
+    },
+    {
+      "name": "flet-button",
+      "description": "G360 styled Flet Button",
+      "code": "ft.ElevatedButton(\n    content=ft.Text('G360 Button', color='#0b1220'),\n    style=ft.ButtonStyle(\n        bgcolor='#00d084',\n        color='#0b1220',\n        shape=ft.RoundedRectangleBorder(radius=8),\n        padding=15\n    )\n)"
+    },
+    {
+      "name": "flet-nav-rail",
+      "description": "Flet navigation rail for desktop",
+      "code": "ft.NavigationRail(\n    selected_index=0,\n    label_type=ft.NavigationRailLabelType.ALL,\n    min_width=100,\n    min_extended_width=200,\n    destinations=[\n        ft.NavigationRailDestination(icon=ft.icons.HOME_OUTLINED, selected_icon=ft.icons.HOME, label='Home'),\n        ft.NavigationRailDestination(icon=ft.icons.SETTINGS_OUTLINED, selected_icon=ft.icons.SETTINGS, label='Settings'),\n    ]\n)"
+    },
+    {
+      "name": "flet-datatable",
+      "description": "Flet DataTable with G360 styling",
+      "code": "ft.DataTable(\n    heading_row_color='#00d084',\n    data_row_color='#1a2332',\n    columns=[\n        ft.DataColumn(ft.Text('SKU', color='#f0f4f8')),\n        ft.DataColumn(ft.Text('Descripción', color='#f0f4f8')),\n        ft.DataColumn(ft.Text('Cantidad', color='#f0f4f8')),\n    ],\n    rows=[]\n)"
+    },
+    {
+      "name": "flet-dialog",
+      "description": "Flet modal dialog",
+      "code": "def show_dialog(page, title, content):\n    dialog = ft.AlertDialog(\n        title=ft.Text(title, color='#00d084'),\n        content=ft.Container(content=content, padding=20),\n        actions=[\n            ft.TextButton('Cancelar', on_click=lambda _: page.close_dialog()),\n            ft.ElevatedButton('Aceptar', bgcolor='#00d084', color='#0b1220'),\n        ]\n    )\n    page.dialog = dialog\n    dialog.open = True\n    page.update()"
+    },
+    {
+      "name": "flet-chart-bar",
+      "description": "Flet bar chart for data visualization",
+      "code": "ft.BarChart(\n    bar_groups=[\n        ft.BarChartGroup(\n            x=0,\n            bar_rods=[\n                ft.BarChartRod(\n                    from_y=0,\n                    to_y=50,\n                    width=40,\n                    color='#00d084',\n                ),\n            ],\n        ),\n    ],\n    left_axis=ft.ChartAxis(labels_size=40),\n    bottom_axis=ft.ChartAxis(labels=[...]),\n)"
+    }
+  ]
+}

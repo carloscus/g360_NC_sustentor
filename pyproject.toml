@@ -1,15 +1,15 @@
 [project]
 name = "g360-nc-sustentor"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "Microherramienta avanzada para la automatización de cuadros de sustento de Notas de Crédito (NC) y análisis CRM."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "flet==0.22.0",
-    "flet-runtime==0.22.0",
+    "flet==0.23.0",
     "openpyxl==3.1.5",
     "pandas==2.2.3",
     "python-dotenv==1.2.2",
     "xlrd==2.0.1",
+    "pyarrow==17.0.0",
     "uv>=0.6.2",
 ]
