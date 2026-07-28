@@ -1,12 +1,22 @@
-# G360 NC-Sustentor Pro 🚀
+# G360 Sustento Multirreferencia 🚀
 
-> Microherramienta avanzada del ecosistema G360 para la automatización de cuadros de sustento de Notas de Crédito (NC) y análisis de ventas CRM.
+> Microherramienta avanzada del ecosistema G360 para la automatización de cuadros de sustento — Notas de Crédito (NC), Débito (NDB), Factura Directa — y análisis de ventas CRM.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Repo: GitHub](https://img.shields.io/badge/Repository-GitHub-blue.svg)](https://github.com/carloscus/g360_NC_sustentor.git)
-[![Python: 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python: 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Version: 1.3.0](https://img.shields.io/badge/version-1.3.0-green.svg)]()
 
-## 📋 Tabla de Contenidos
+```mermaid
+flowchart TD
+    A[Usuario] -->|Carga historial| B[Carga datos]
+    B --> C[Configurar reconocimiento]
+    C --> D[Ejecutar motor FIFO]
+    D --> E[Generar Excel + DOCX]
+    E --> F[Expediente comercial]
+```
+
+## Tabla de Contenidos
 
 - [Características](#características)
 - [Instalación](#instalación)
@@ -21,45 +31,39 @@
 
 ## 🚀 Características
 
-### 🧠 Inteligencia de Procesamiento
-- **Lógica FIFO Inversa (Sincronizada):** Asignación automática de facturas más recientes con descuento inteligente de inventario entre múltiples reportes.
-- **Selección de Referencia Maestra:** Identifica automáticamente la factura más representativa para el encabezado del reporte.
-- **Precisión Financiera:** Cálculos con 4 decimales para garantizar que el Subtotal en Excel coincida exactamente con el ERP.
-- **Validación de Techo Financiero:** Alerta visual si el monto solicitado excede el disponible en el historial.
+### 🧠 Tipos de Reconocimiento
+- **Diferencia de Precio**: Compara precio facturado vs. lista de precios vigente.
+- **Omisión de Descuentos**: Aplica cadena de descuentos autorizada.
+- **Bonificación 12+1**: Calcula unidades bonificadas por mecánica promocional.
+- **Rebate por Meta**: Aplica % de rebate sobre compras acumuladas en período.
+- **Anulación de Factura**: Reporte con columnas editables (P.BASE, DESC_1, DESC_2) y fórmulas vivas.
+- **Feria / Preventa**: Cruce entre solicitud y facturación real.
+- **Sustento por Factura**: Verificación de precios contra condición comercial.
+- **Descuento en Factura**: % global o por SKU con archivo de filtro.
 
-### 📊 Visualización & Analytics
-- **Dashboard "Butterfly Chart":** Comparativa visual del Top 16 de líneas de producto por monto.
-- **Vista Previa Interactiva:** Inspección rápida del historial cargado antes del procesamiento.
-- **Módulo de Reportes Consolidados:**
-    - **Por SKU**: Análisis detallado por artículo.
-- **Por Línea**: Análisis de ventas por línea de producto
-- **Por Cliente**: Análisis de ventas por cliente
-- **Por Mes**: Análisis de ventas por período
-- **Por Factura**: Análisis detallado por documento
-- **Pareto Cliente**: Análisis 80/20 de clientes por vendedor
-- **Comparativo**: Comparación mes a mes con tendencias
+### 📊 Reportes Generados
+- **Excel (NC)**: Cabecera + detalle de SKU con fórmulas, alertas y validaciones.
+- **DOCX (Informe)**: Informe de sustento comercial programático con header/footer profesional.
+- **Plantillas**: Descarga de templates para Historial, Requerimientos y SKU.
 
 ### Validación de Datos
-- **Validación de campos críticos**: ID_ARTICULO, NOM_ARTICULO, FECHA_ORIG, CANTIDAD, SOLES, TPO_DOC, SERIE_DOC, NRO_DOC
-- **Validación de campos compuestos**: SKU, LÍNEA, CLIENTE, VENDEDOR
-- **Validación de fechas**: Consistencia entre ANHO/MES y FECHA_ORIG
-- **Validación de montos y cantidades**: Consistencia entre SOLES, CANTIDAD y PRECIO_UNID
-- **Validación de documentos**: Detección de documentos duplicados
+- **Detección de NC/NDB**: Identifica notas existentes en el historial para evitar sobre-sustentar.
+- **Validación de campos críticos**: ID_ARTICULO, NOM_ARTICULO, FECHA_ORIG, CANTIDAD, SOLES, TPO_DOC, SERIE_DOC, NRO_DOC.
+- **Normalización**: Limpieza y estandarización de datos ERP.
 
 ---
 
 ## 📦 Instalación
 
 ### Requisitos
-- Python 3.8+
-- pip install -r requirements.txt
+- Python 3.11+
 
 ### Instalación
 ```bash
-# Recomendado: Usar UV para gestión rápida de dependencias
-uv pip install -r requirements.txt
+# Sincronizar dependencias con UV
+uv sync
 
-# Ejecución tradicional
+# Ejecutar
 python main.py
 ```
 
@@ -67,25 +71,66 @@ python main.py
 
 ## 🎯 Uso Básico
 
-### 1. Cargar Historial
-1. Click en "1. HISTORIAL (BASE)"
-2. Seleccionar archivo Excel del historial de compras
-3. El sistema validará y procesará los datos
+### 1. Cargar Datos
+1. Click en "ARCHIVOS" → cargar Historial (Excel)
+2. Cargar Lista de Precios y/o Requerimientos según el tipo
 
-### 2. Cargar Requerimientos
-1. Click en "2. REQUERIMIENTOS"
-2. Seleccionar archivo(s) Excel de requerimientos de NC
-3. El sistema procesará y generará las notas de crédito
+### 2. Configurar Reconocimiento
+1. Seleccionar tipo de operación en "CONFIGURACIÓN"
+2. Elegir Vendedor (opcional), Cliente y Factura
+3. Configurar parámetros específicos (% descuento, mecánica, etc.)
 
-### 3. Generar Reportes Consolidados
-1. Click en "REPORTES CONSOLIDADOS"
-2. Seleccionar filtros (vendedores, clientes, líneas)
-3. Seleccionar tipo de reporte y agrupación
-4. Click en "GENERAR REPORTE EXCEL"
+### 3. Ejecutar y Generar
+1. Click en "EJECUTAR RECONOCIMIENTO"
+2. Revisar resultados y alertas
+3. Click en "GENERAR EXPEDIENTE" para obtener Excel + DOCX
 
 ---
 
 ## 📊 Reportes Disponibles
+
+### Tipos de Reconocimiento
+
+| Tipo | Descripción | Modo | Archivos Generados |
+|------|-------------|------|-------------------|
+| **Diferencia de Precio** | Compara precio facturado vs. lista vigente | Por factura | 1 XLSX + 1 DOCX por factura |
+| **Descuento por Precio** | % global o por SKU con archivo de filtro | Consolidado | 1 XLSX + 1 DOCX |
+| **Descuento por Factura** | Descuento por línea con archivo de filtro | Consolidado | 1 XLSX + 1 DOCX |
+| **Sustento por Factura** | Verificación contra condición comercial | Consolidado | 1 XLSX + 1 DOCX |
+| **Diferencia de Stock** | Stock fakturado vs. stock actual | Consolidado | 1 XLSX + 1 DOCX |
+| **Feria / Preventa** | Cruce solicitud vs. facturación | Consolidado | 1 XLSX + 1 DOCX |
+| **Anulación de Factura** | Reporte con columnas editables | Consolidado | 1 XLSX + 1 DOCX |
+| **Bonificación 12+1** | Unidades bonificadas por mecánica | Consolidado | 1 XLSX + 1 DOCX |
+
+### Columnas por Tipo
+
+#### Diferencia de Precio (dual-table)
+
+**Tabla 1: COMO SE ATENDIÓ**
+| Columna | Fuente | Formato |
+|---------|--------|---------|
+| N° | Índice | - |
+| FACTURA | Calculado | Texto |
+| SKU | ERP | Texto |
+| ARTICULO | ERP | Texto |
+| CANTIDAD | ERP | `#,##0` |
+| PRECIO UNID. | SOLES / CANTIDAD | `#,##0.000000` |
+| TOTAL FACTURA | Fórmula | `S/ #,##0.00` |
+
+**Tabla 2: LISTA DE PRECIOS**
+| Columna | Fuente | Formato |
+|---------|--------|---------|
+| N° | Índice | - |
+| FACTURA | Calculado | Texto |
+| SKU | ERP | Texto |
+| ARTICULO | ERP | Texto |
+| CANTIDAD | ERP | `#,##0` |
+| PRECIO LISTA | Lista de precios | `#,##0.000000` |
+| PRECIO NETO | Fórmula (4 descuentos) | `#,##0.000000` |
+| DIF. UNITARIA | MAX(0, ROUND(HIST - NETO, 6)) | `#,##0.000000` |
+| MONTO NC | Fórmula (DIF × CANT) | `S/ #,##0.00` |
+| NC/NDB EXISTENTE | Detector | Texto |
+| ALERTA | Motor de alertas | Texto |
 
 ### Reportes Consolidados
 
@@ -157,6 +202,40 @@ Los siguientes valores son filtrados automáticamente:
 ---
 
 ## ⚠️ Decisiones de Diseño Importantes
+
+### 0. Precisión y Formato de Valores Monetarios
+
+**Estándar SUNAT (UBL 2.1):**
+- **Precios unitarios**: hasta 10 decimales (usamos 6)
+- **Cantidades**: hasta 10 decimales (usamos 6)
+- **Totales (Subtotal, IGV, Total)**: exactamente 2 decimales
+
+**Reglas de Redondeo:**
+
+| Campo | Decimales | Ejemplo |
+|-------|-----------|---------|
+| PRECIO LISTA | 6 | `#,##0.000000` → 21.500000 |
+| PRECIO NETO | 6 | `#,##0.000000` → 15.170400 |
+| DIF. UNITARIA | 6 | `#,##0.000000` → 0.309600 |
+| MONTO NC | 2 | `S/ #,##0.00` → S/ 3.10 |
+| Subtotal / IGV / Total | 2 | `S/ #,##0.00` → S/ 10.85 |
+
+**Filtrado de Negativos por Redondeo:**
+- DIF. UNITARIA usa `MAX(0, ROUND(PRECIO_HIST - PRECIO_NETO, 6))`
+- Esto evita diferencias negativas causadas por precisión de punto flotante
+- Ejemplo: `0.931750 - 0.931800 = -0.000050` → `MAX(0, -0.000050) = 0.000000`
+
+**Consistencia de Subtotales:**
+- El subtotal del Excel y del DOCX se calcula sumando valores redondeados por fila
+- No se redondea la suma total, sino cada fila individualmente
+- Ejemplo: `1.55 + 3.10 + 3.10 + 3.10 = 10.85` (no `round(10.836) = 10.84`)
+
+**Formato de Moneda:**
+- Subtotales en Excel: `"S/" #,##0.00` (muestra "S/ 10.85")
+- Columnas de la tabla: `#,##0.00` (sin prefijo, para legibilidad)
+- DOCX: `S/ {valor:,.2f}` (muestra "S/ 10.85")
+
+---
 
 ### 1. Pareto - Uso de Solo ID de Líneas como Encabezados
 
@@ -234,21 +313,55 @@ N° | SKU (ID Puro) | SKU - ARTICULO | LÍNEA | CANT. SUSTENTAR | P.U. | TOT. FA
 ## 🔧 Estructura del Proyecto
 
 ```
-g360-nc-sustentor/
+g360-erp-nc-sustentor/
 ├── src/
 │   ├── core/
-│   │   ├── processor.py          # NCProcessor (lógica FIFO Inversa)
 │   │   ├── data_dictionary.py    # Diccionario centralizado de campos
+│   │   ├── detector.py           # Detección de NC/NDB existentes
+│   │   ├── g360_theme.py         # Tema visual + decorador @safe_handler
+│   │   ├── inventory.py          # Lógica de inventario (pandas puro)
+│   │   ├── utils.py              # Utilidades (format_id_name, etc.)
+│   │   ├── validation.py         # Validación del historial
+│   │   ├── doc_matcher.py        # Coincidencia de documentos
+│   │   ├── erp_scanner.py        # Scanner de archivos ERP
+│   │   ├── models.py             # Modelos de datos (ProcessedItem)
+│   │   └── catalog_schema.py     # Esquema de procesos tipados
 │   ├── excel/
-│   │   └── generator.py          # Generación de Excel (OpenPyXL)
+│   │   ├── generator.py          # Generación de Excel legacy (OpenPyXL)
+│   │   └── chart_renderer.py     # Render de gráficos Pareto
+│   ├── strategies/
+│   │   ├── price_difference.py   # Diferencia de Precio
+│   │   ├── price_discount.py     # Descuento en Factura
+│   │   ├── promotion_bonus.py    # Bonificación 12+1
+│   │   ├── volume_rebate.py      # Rebate por meta
+│   │   ├── cancel_invoice.py     # Anulación de Factura
+│   │   ├── feria_preventa.py     # Feria / Preventa
+│   │   ├── sustento_factura.py   # Sustento por Factura
+│   │   ├── descuento_factura.py  # Descuento por SKU
+│   │   └── allocation/
+│   │       └── engine.py         # Motor de asignación FIFO
+│   ├── render/
+│   │   ├── excel_renderer.py     # Render de Excel (NC sustento)
+│   │   ├── docx_renderer.py      # Render de DOCX (informe)
+│   │   └── templates.py          # Generación de plantillas
+│   ├── validation/
+│   │   ├── engine.py             # Motor de validación
+│   │   └── normalization.py      # Normalización de datos ERP
+│   ├── pipeline.py               # Orquestador de pipelines
+│   ├── domain.py                 # Modelos de dominio
 │   └── ui/
-│       └── consolidated_view.py  # Módulo de Reportes Consolidados
+│       ├── reconocimiento_view.py # Vista principal de Reconocimiento
+│       └── __init__.py
+├── g360/
+│   └── ui/
+│       └── signature.py          # Widget G360Signature
 ├── assets/
-│   └── templates/               # Plantillas de Excel
-├── g360-nc-sustentor-portable/   # Versión para distribución (En desarrollo)
-├── main.py                        # Aplicación principal
-├── requirements.txt               # Dependencias de Python (pip)
-└── pyproject.toml                 # Configuración del proyecto (uv)
+│   └── templates/               # Plantillas Excel
+├── tests/                        # Tests unitarios
+├── main.py                       # Aplicación principal
+├── pyproject.toml                # Configuración del proyecto (uv)
+├── README.md
+└── AGENTS.md                     # Instrucciones para opencode
 ```
 
 ---
@@ -368,13 +481,13 @@ Antes de enviar un PR, asegúrate de:
 
 ## 📄 Licencia
 
-Este proyecto es parte del ecosistema G360. Consulte la licencia del ecosistema para más detalles.
+MIT License - ver [LICENSE](LICENSE) para mas detalles.
 
 ---
 
 ## 🎯 Objetivo del Proyecto
 
-G360 NC Sustentor es una herramienta de **análisis y generación de notas de crédito** con las siguientes características:
+G360 Sustento Multirreferencia es una herramienta de **análisis y generación de sustento comercial** con las siguientes características:
 
 1. **Automatización**: Procesa automáticamente requerimientos de NC y asigna facturas de sustento
 2. **Validación**: Verifica la consistencia de datos antes de procesar
@@ -385,22 +498,103 @@ G360 NC Sustentor es una herramienta de **análisis y generación de notas de cr
 
 ---
 
+## 🔍 Exploración de Casos de Uso
+
+Esta herramienta no se limita solo a Notas de Crédito. El motor FIFO inverso, el detector de NC/NDB, y el generador de informes pueden aplicarse a múltiples escenarios comerciales y operativos.
+
+### Cómo descubrir nuevos casos
+
+1. **Analizar el historial**: Ejecute consultas exploratorias sobre el DataFrame cargado para identificar patrones:
+   ```python
+   from src.core.processor import NCProcessor
+   proc = NCProcessor()
+   proc.cargar_historial(r"ruta\historial.xlsx")
+   df = proc.historial
+   
+   # Listar tipos de documento únicos
+   print(df["TPO_DOC"].unique())
+   
+   # Ver operaciones por tipo
+   print(df.groupby("TPO_DOC").agg(
+       docs=("NRO_DOC", "count"),
+       total=("SOLES", "sum")
+   ))
+   ```
+
+2. **Detectar NC/NDB existentes**: Use el módulo detector para facturas que ya tienen ajustes:
+   ```python
+   from src.core.detector import (
+       detectar_notas_en_historial,
+       resumen_notas_por_factura,
+       separar_inventario,
+   )
+   notas = detectar_notas_en_historial(df)
+   resumen = resumen_notas_por_factura(notas)
+   for factura, info in resumen.items():
+       print(f"{factura}: {info['total_notas']} nota(s), S/ {info['total_soles']:.2f}")
+   ```
+
+3. **Identificar situaciones atípicas**:
+   - Facturas con precio cero o negativo
+   - Documentos sin referencia (REFERENCIA vacía)
+   - SKUs con cantidad negativa (devoluciones sin NC)
+   - Períodos sin movimiento seguido de picos
+   - Clientes con alta concentración en una línea
+
+4. **Documentar el caso**: Cree un archivo `CASO_<nombre>.md` en la raíz del proyecto con:
+   - Descripción del escenario
+   - Query usada para detectarlo
+   - Columnas relevantes del historial
+   - Resultado esperado vs real
+   - Si aplica, template DOCX asociado
+
+### Casos conocidos
+
+| Caso | Módulo | Descripción |
+|------|--------|-------------|
+| **Sustento NC por Lote** | Multirreferencia | Carga masiva de SKUs de múltiples facturas, asigna documentos FIFO |
+| **Sustento por Factura** | Por Factura | Una factura específica con todos sus SKUs y descuento por línea |
+| **NC/NDB detectados** | Detector | Facturas que ya tienen Notas de Crédito o Débito aplicadas |
+| **Ajuste por campaña** | Informe | Documento Word con detalle comercial, tipo de operación y evidencias |
+| **Análisis Pareto** | Consolidados | Clientes 80/20 por vendedor, líneas, SKU |
+| **Comparativo mensual** | Consolidados | Evolución mes a mes con tendencias y variación |
+
+### Templates disponibles
+
+| Formato | Propósito | Ubicación |
+|---------|-----------|-----------|
+| `REQUERIMIENTOS.xlsx` | Carga masiva de SKUs a sustentar | `assets/templates/` |
+| `HISTORIAL.xlsx` | Formato base para historial de ventas | `assets/templates/` |
+| `INFORME_DE_SUSTENTO_COMERCIAL.docx` | Informe comercial personalizado (Word) | Definido por el usuario |
+
+---
+
 ## 🔄 Versionado
 
-### Versión Actual: 1.0.0
+### Versión Actual: 1.3.0
 
-**Cambios Recientes:**
-- ✅ Agregado diccionario centralizado de datos (`src/core/data_dictionary.py`)
-- ✅ Agregado módulo de validación del historial (`src/core/validation.py`)
-- ✅ Corregida inconsistencia de tilde en `g360-nc-sustentor-portable/src/reports/consolidated.py`
-- ✅ Documentadas decisiones de diseño importantes en README
-- ✅ Actualizada función `format_id_name()` para aceptar parámetro opcional `field_name`
+**Cambios Recientes (v1.3.0):**
+- ✅ Precisión SUNAT: 6 decimales para precios unitarios, 2 para totales
+- ✅ Filtrado de negativos por redondeo: DIF. UNITARIA usa MAX(0, ROUND(..., 6))
+- ✅ Columna DIF. TOTAL eliminada (redundante con MONTO NC)
+- ✅ Reportes individuales por factura para Diferencia de Precio (XLSX + DOCX)
+- ✅ DOCX: solo cuenta SKUs con NC real (> 0), no todos los de la factura
+- ✅ DOCX: subtotal/IGV/TOTAL coincide con la suma redondeada del Excel
+- ✅ Formato de moneda S/ en subtotales del Excel
+- ✅ MONTO_NC redondeado a 2 decimales por fila en todos los strategies
+- ✅ Evidencias con nombres genéricos reutilizables
+- ✅ Precisión de 6 decimales en strategies (stock_price_difference, sustento_factura, feria_preventa, allocation)
 
-**Próximos Pasos:**
-- Integrar validación en NCProcessor
-- Actualizar reportes consolidados para usar el diccionario
-- Crear reporte de calidad de datos
-- Mejorar documentación de campos
+**Cambios Recientes (v1.2.0):**
+- ✅ Rediseño completo de UI con Flet (reconocimiento_view.py)
+- ✅ 8 tipos de reconocimiento comercial con estrategias modulares
+- ✅ Reporte de Anulación con columnas editables y fórmulas vivas en Excel
+- ✅ Informe DOCX profesional con header/footer y 3 secciones
+- ✅ Descarga multi-template con modal de selección
+- ✅ Mecánica promocional configurable (12+1, 24+2, 48+1, Personalizado)
+- ✅ Filtro de SKU por archivo para Descuento en Factura
+- ✅ Alertas priorizadas (error > warning > info)
+- ✅ Header Excel compacto con totales a la derecha
 
 ---
 
@@ -439,7 +633,7 @@ Para reportar problemas o sugerencias, abra un issue en el repositorio del proye
 
 ## 🎯 Conclusión
 
-G360 NC Sustentor es una herramienta robusta para **generación de notas de crédito con sustento** y **análisis de ventas consolidados**. El sistema incluye:
+G360 Sustento Multirreferencia es una herramienta robusta para **generación de sustento comercial** (NC, NDB, factura directa) y **análisis de ventas consolidados**. El sistema incluye:
 
 - ✅ **Validación automática** de datos del historial
 - ✅ **Diccionario centralizado** de campos y formatos
@@ -449,3 +643,30 @@ G360 NC Sustentor es una herramienta robusta para **generación de notas de cré
 - ✅ **Documentación completa** de decisiones de diseño importantes
 
 Las decisiones de diseño documentadas en este README son **intencionales** y **no deben cambiarse** sin justificación clara. El sistema está diseñado para ser **robusto**, **consistente** y **fácil de usar**.
+
+---
+
+## Licencia
+
+MIT License - ver [LICENSE](LICENSE) para mas detalles.
+
+---
+
+## Familia G360
+
+Este proyecto forma parte de la familia de microherramientas **G360** para apoyo CRM y gestión de datos en escritorio, enfocadas en áreas como ventas, finanzas y logística.
+
+### Herramientas Relacionadas
+
+- **[g360-cli](https://github.com/carloscus/g360-cli)**: Bootstrap de proyectos G360
+- **[g360-signature](https://github.com/carloscus/g360-signature)**: Web component de branding
+- **[g360-order-xlsx](https://github.com/carloscus/g360-order-xlsx)**: Procesador de cotizaciones Excel
+- **[g360-signature-creator](https://github.com/carloscus/g360-signature-creator)**: Generador de firmas corporativas
+
+---
+
+**Marca**: G360
+**Isotipo**: 3 puntos verticales paralelos (gris-verde-gris) + chevron `>`
+**Autor**: Carlos Cusi
+**Desarrollo**: Con asistencia de herramientas de código IA (Vibe Code)
+**Powered by**: [g360-signature](https://github.com/carloscus/g360-signature)
