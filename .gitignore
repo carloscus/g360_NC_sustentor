@@ -5,16 +5,23 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+*.egg-info/
 
 # Entornos virtuales
 .venv/
 venv/
 ENV/
 
-# Distribución y Builds (Portable)
+# Distribucion y Builds
 dist/
 build/
 *.spec
+
+# Portable
+*-portable/
+uv.exe
+uvx.exe
+run_log.txt
 
 # Excel y Datos (Ignorar salidas, mantener plantillas)
 *.xlsx
@@ -26,3 +33,23 @@ build/
 dev_logs/
 *.log
 .vscode/
+.idea/
+
+# OS
+.DS_Store
+desktop.ini
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# AI assistant
+.antigravitycli/
+.kilo/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# Runtime: single-instance lock (se crea al arrancar la app).
+.app_instance.lock

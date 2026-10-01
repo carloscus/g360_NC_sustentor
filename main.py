@@ -1,1230 +1,637 @@
-import sys
-import flet as ft
-import pandas as pd
-import os
-import re
-import shutil
-import threading
-from collections import Counter
-import logging
+from __future__ import annotations
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,  # Default level for console output
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
-from datetime import datetime
-from typing import Optional
+import logging
+import os
+import sys
+import threading
+import traceback
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from src.core.processor import NCProcessor
-from src.excel.generator import ExcelGenerator
-from src.ui.consolidated_view import ConsolidatedReportsModule
+import flet as ft
 
-# Importaciones Oficiales G360 Ecosystem
-if getattr(sys, 'frozen', False):
-    # Si es un ejecutable, el directorio base es donde está el EXE
-    BASE_DIR = Path(sys.executable).parent
-else:
-    # MODO DESARROLLO: Directorio base es la carpeta actual del proyecto
-    BASE_DIR = Path(__file__).resolve().parent
-
+BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-# from g360.palettes import G360_PALETTE
+from src.core.g360_theme import G360Theme
+from src.ui.template_dialog import mostrar_dialogo_plantillas
+
 try:
     from g360.ui.signature import G360Signature
 except ImportError:
-    # Fallback si el componente compartido no se encuentra (para desarrollo local sin el ecosistema completo)
     G360Signature = None
-    print("Advertencia: No se encontro el componente G360Signature en", BASE_DIR)
 
-# Paleta de colores para el Pie Chart (G360 Themed)
-PIE_CHART_COLORS = [
-    ft.colors.CYAN_400,
-    ft.colors.PURPLE_400,
-    ft.colors.ORANGE_400,
-    ft.colors.LIGHT_GREEN_400,
-    ft.colors.PINK_400,
-    ft.colors.BLUE_400,
-    ft.colors.AMBER_400,
-    ft.colors.TEAL_400,
-    ft.colors.DEEP_PURPLE_400,
-    ft.colors.RED_400,
-    ft.colors.INDIGO_400,
-    ft.colors.LIME_400,
-    ft.colors.DEEP_ORANGE_400,
-    ft.colors.LIGHT_BLUE_400,
-    ft.colors.YELLOW_600,
-]
+_logger = logging.getLogger("g360.app")
+if not _logger.handlers:
+    _fmt = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
+    # Log a APPDATA para evitar PermissionError cuando el .bat tiene el archivo abierto
+    _log_dir = (
+        Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+        / "g360-erp-nc-sustentor"
+    )
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_file = _log_dir / "app.log"
+    _handler = RotatingFileHandler(
+        _log_file,
+        maxBytes=2 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    _handler.setFormatter(_fmt)
+    _logger.addHandler(_handler)
+    _logger.setLevel(logging.INFO)
+
+# Log de captura (paso a paso de descargas) a run_log.txt Y a consola:
+# la UI muestra la tira de progreso, pero la consola queda como evidencia
+# completa (util si se cierra la ventana o para soporte remoto).
+_cap_logger = logging.getLogger("src.core.capture_service")
+_cap_logger.addHandler(_handler)
+_cons = logging.StreamHandler(sys.stdout)
+_cons.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
+_cap_logger.addHandler(_cons)
+_cap_logger.setLevel(logging.INFO)
+
+
+# ── Single instance (multi-PC: evitar dobles capturas por abrir 2 veces) ─────
+
+LOCK_FILE = BASE_DIR / ".app_instance.lock"
+
+
+def _acquire_instance_lock() -> bool:
+    """True si somos la unica instancia. Windows: abrir archivo en exclusiva."""
+    try:
+        import msvcrt
+
+        _fh = open(LOCK_FILE, "a+")  # noqa: SIM115 — se mantiene abierto como lock
+        try:
+            msvcrt.locking(_fh.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            _fh.close()
+            return False
+        globals()["_instance_fh"] = _fh  # mantener abierto mientras vivimos
+        return True
+    except Exception:
+        return True  # si falla el mecanismo, no bloquear el arranque
+
+
+def _log_inicio():
+    _logger.info("=" * 60)
+    _logger.info("Arranque de aplicacion (PID %s)", os.getpid())
+    _logger.info("Python: %s | flet: %s", sys.version.split()[0], _flet_version())
+    _logger.info("DB local: %s (existe=%s)", _db_path_str(), Path(_db_path_str()).exists())
 
 
 class G360App:
-    """
-    Controlador principal de la interfaz G360 NC-Sustentor.
-    Maneja el estado de la aplicación, eventos de usuario y orquestación de procesos.
+    """App principal G360 — patron pulido:
+
+    * AppBar sin sidebar (maximiza area de trabajo)
+    * Dual theme dark/light con G360Theme classmethod dinamico
+    * Theme se propaga a todas las cards via reconstruccion controlada
+    * Plantillas accesible desde header (sin duplicados)
+    * Signature en footer (esquina inferior derecha)
+    * Boton reinicio en header
+    * Loading overlay centralizado
     """
 
     def __init__(self, page: ft.Page):
         self.page = page
+        self._is_dark = True
 
-        # 1. Configuración de Colores y Estilos (Constantes de la App)
-        self.G360_BLUE = "#00d084"
-        self.G360_SUCCESS = "#22c55e"
-        self.G360_WARNING = "#fbbf24"  # Amber 400
-        self.G360_ERROR = "#f87171"    # Red 400
-        self.G360_ACCENT = "#00d084"
-        self.G360_SURFACE = "#1a2333"  # Ligeramente más claro para elevación
-        self.G360_BG_DARK = "#0b1220"
-        self.G360_BORDER = "white12"
-        self.G360_TEXT_MUTED = "white38"
+        # Colores de marca (siempre iguales, independientes del tema)
+        self.G360_SUCCESS = G360Theme.SUCCESS
+        self.G360_WARNING = G360Theme.WARNING
+        self.G360_ERROR = G360Theme.ERROR
+        self.G360_ACCENT = G360Theme.ACCENT
+        self.G360_ACCENT_2 = G360Theme.ACCENT_2
 
-        # Rutas de Plantillas Oficiales
-        self.TEMPLATES_DIR = BASE_DIR / "assets" / "templates"
-        self.PLANTILLA_REQUERIMIENTOS = self.TEMPLATES_DIR / "G360_Plantilla_REQUERIMIENTOS.xlsx"
-        self.PLANTILLA_HISTORIAL = self.TEMPLATES_DIR / "G360_Plantilla_HISTORIAL.xlsx"
-        
-        # Verificar y generar plantillas si no existen al iniciar
-        self._verificar_plantillas()
-
-        # 2. Configuración inicial de la página (ventana)
-        # 2. Configuración inicial de la página (ventana)
         self._setup_page()
+        self._loading_count = 0
+        self._picker_callback = None
+        self._picker_files_callback = None
+        self._picking_lock = threading.Lock()
 
-        # 3. Estado inicial de la aplicación
-        self.historial_path = None
-        self.requerimientos_paths = []
-        self.df_historial_preview = None
-        self.current_processor = None  # Para módulos de reportes consolidados
-
-        self.dialog_event = threading.Event()
-        self.user_choice = None
-        # 4. Inicialización de componentes de UI y construcción del layout
         self._init_components()
         self._build_ui()
+        self._aplicar_tema()
+
+    # ── Page Setup ────────────────────────────────────────────────────────
 
     def _setup_page(self):
-        logger.info("Configurando página Flet.")
-        """Configura los parámetros visuales globales de la ventana."""
-        self.page.title = "G360 NC Sustentor"
-        self.page.window_width = 1100
-        self.page.window_height = 810
+        self.page.title = "Reconocimiento Comercial - CIPSA"
         self.page.theme_mode = ft.ThemeMode.DARK
-        self.page.bgcolor = "#0b1220"
         self.page.padding = 0
-        self.page.window_resizable = True  # Permite redimensionar la ventana
-        self.page.window_icon = "images/favicon.ico"
+        self.page.window.resizable = True
+        self.page.window.width = 1100
+        self.page.window.height = 810
+        self.page.window.min_width = 960
+        self.page.window.min_height = 640
+        self._aplicar_tema()
+
+    def _aplicar_tema(self):
+        """Aplica el modo theme a la pagina y propaga colores a toda la UI."""
+        self.page.theme_mode = ft.ThemeMode.DARK if self._is_dark else ft.ThemeMode.LIGHT
+        self.page.theme = ft.Theme(color_scheme_seed="blue")
+        G360Theme.set_theme_mode(self._is_dark)
+        self.G360_SUCCESS = G360Theme.success_color()
+        self.G360_WARNING = G360Theme.warning_color()
+        self.G360_ERROR = G360Theme.error_color()
+        self.G360_ACCENT = G360Theme.accent_color()
+        self.G360_ACCENT_2 = G360Theme.ACCENT_2
+        self.page.bgcolor = G360Theme.bg_color()
+        self._update_theme_indicators()
+        self._propagar_tema()
+        if self.page:
+            self.page.update()
+
+    def _update_theme_indicators(self):
+        """Sincroniza icono del boton tema con modo actual."""
+        if hasattr(self, "_theme_button"):
+            name = ft.Icons.DARK_MODE_OUTLINED if self._is_dark else ft.Icons.LIGHT_MODE
+            self._theme_button.icon = name
+
+    def _toggle_theme(self, e):
+        """Alterna dark/light y propaga colores sin reconstruir (preserva estado)."""
+        self._is_dark = not self._is_dark
+        self._aplicar_tema()
+
+    def _propagar_tema(self):
+        """Actualiza colores G360 de body y header in-place (sin perder estado)."""
+        if hasattr(self, "body") and self.body is not None:
+            G360Theme.apply_theme(self.body)
+        if hasattr(self, "_header") and self._header is not None:
+            G360Theme.apply_theme(self._header)
+
+    # ── Loading & Feedback ────────────────────────────────────────────────
+
+    def show_loading(self, message: str = "Procesando..."):
+        self._loading_count += 1
+        self._loading_title.value = message
+        self._loading_subtitle.value = "Esto puede tomar unos segundos"
+        self.loading_overlay.visible = True
+        if self.page:
+            self.page.update()
+
+    def hide_loading(self):
+        self._loading_count = max(0, self._loading_count - 1)
+        if self._loading_count == 0:
+            self.loading_overlay.visible = False
+            if self.page:
+                self.page.update()
+
+    def show_snackbar(
+        self,
+        message: str,
+        color: str | None = None,
+        action_text: str | None = None,
+        action_callback=None,
+    ):
+        if color in (self.G360_ERROR, G360Theme.ERROR, G360Theme.ERROR_LIGHT):
+            bg_color = "#b91c1c"
+        elif color in (self.G360_WARNING, G360Theme.WARNING, G360Theme.WARNING_LIGHT):
+            bg_color = "#b45309"
+        elif color in (
+            self.G360_SUCCESS,
+            G360Theme.SUCCESS,
+            G360Theme.ACCENT,
+            G360Theme.ACCENT_LIGHT,
+        ):
+            bg_color = G360Theme.primary_color()
+        else:
+            bg_color = color or G360Theme.primary_color()
+        if not hasattr(self, "_snackbar") or self._snackbar is None:
+            self._snackbar = ft.SnackBar(
+                content=ft.Text(message, size=14, weight=ft.FontWeight.W_500),
+                bgcolor=bg_color,
+                padding=20,
+                duration=4000,
+                action=action_text,
+                action_color="white",
+                on_action=action_callback,
+            )
+            self.page.overlay.append(self._snackbar)
+        else:
+            self._snackbar.content = ft.Text(message, size=14, weight=ft.FontWeight.W_500)
+            self._snackbar.bgcolor = bg_color
+            self._snackbar.action = action_text
+            self._snackbar.on_action = action_callback
+        self._snackbar.open = True
+        self.page.update()
+
+    # ── Components ────────────────────────────────────────────────────────
 
     def _init_components(self):
-        logger.info("Inicializando componentes de UI.")
-        self.txt_cliente = ft.TextField(
-            label="Nombre del Cliente",
-            hint_text="Identificación oficial...",
-            prefix_icon=ft.icons.BUSINESS_CENTER_OUTLINED,
-            border_radius=15,
-            bgcolor=ft.colors.with_opacity(0.05, ft.colors.WHITE),
-            expand=True,
-            on_change=lambda _: self.verificar_boton_generar(),
+        self._loading_title = ft.Text(
+            "Procesando...", size=16, color="white", weight=ft.FontWeight.W_600
         )
-        self.txt_motivo = ft.TextField(
-            label="Motivo del Sustento",
-            hint_text="Razón técnica...",
-            prefix_icon=ft.icons.ASSIGNMENT_OUTLINED,
-            border_radius=15,
-            bgcolor=ft.colors.with_opacity(0.05, ft.colors.WHITE),
-            expand=True,
-            on_change=lambda _: self.verificar_boton_generar(),
-        )
-        self.sw_forzar_cant = ft.Switch(
-            label="Sustentar cantidad total (aunque falte stock)",
-            value=True,
-            active_color=self.G360_ACCENT,
-            label_style=ft.TextStyle(size=12),
-        )
-        self.rg_tipo_orden = ft.RadioGroup(
-            content=ft.Row(
-                [
-                    ft.Radio(value="fecha_desc", label="Más Recientes"),
-                    ft.Radio(value="fecha_asc", label="Más Antiguo"),
-                    ft.Radio(value="cantidad_desc", label="Mayor Volumen"),
-                    ft.Radio(value="cantidad_asc", label="Menor Cantidad"),
-                ],
-                spacing=20,
-            ),
-            value="fecha_desc",
-        )
-        self.card_historial = self.file_status_card(
-            "1. HISTORIAL (BASE)", ft.icons.HISTORY_EDU
-        )
-        self.card_requerimientos = self.file_status_card(
-            "2. REQUERIMIENTOS", ft.icons.FACT_CHECK_OUTLINED
-        )
-        self.status = ft.Text("", weight=ft.FontWeight.W_600, size=13)
-        self.req_files_container = ft.Row(
-            wrap=True, spacing=5
-        )  # Nueva lista visual de archivos
-        self.progress = ft.ProgressBar(width=450, color=self.G360_ACCENT, visible=False)
-
-        # Dashboard Components - Contenedores específicos para badges
-        self.date_badges_container = ft.Row(spacing=8)  # Para las fechas
-
-        # Contenedores para la disposición "mariposa"
-        self.left_lines_column = ft.Column(
-            spacing=10, expand=True, scroll=ft.ScrollMode.ADAPTIVE
-        )
-        self.right_lines_column = ft.Column(
-            spacing=10, expand=True, scroll=ft.ScrollMode.ADAPTIVE
-        )
-        self.central_axis = ft.VerticalDivider(width=1, color="white24", thickness=1)
-
-        self.lines_list_container = ft.Row(  # Este Row contendrá las dos columnas
-            controls=[
-                self.left_lines_column,
-                self.central_axis,
-                self.right_lines_column,
-            ],
-            spacing=20,  # Espacio entre la columna izquierda y derecha
-            vertical_alignment=ft.CrossAxisAlignment.START,  # Alinea los elementos al inicio (arriba)
-            expand=True,
-        )
-
-        self.dashboard_card = ft.Container(
+        self._loading_subtitle = ft.Text("Un momento por favor", size=11, color="white70")
+        # Overlay minimalista: glass-morphism + spinner centrado
+        self.loading_overlay = ft.Container(
             visible=False,
-            height=580,
-            padding=20,
-            bgcolor=self.G360_SURFACE,
-            border_radius=18,
-             animate_opacity=300,
-            animate_scale=ft.Animation(400, ft.AnimationCurve.DECELERATE),
+            expand=True,
+            # Scrim oscuro en ambos temas (convención Material): con 0.55 el
+            # texto blanco del overlay mantiene ≥4.5:1 también en tema claro.
+            bgcolor=ft.Colors.with_opacity(0.55, ft.Colors.BLACK),
             content=ft.Column(
                 [
+                    ft.Container(expand=True),
                     ft.Row(
                         [
-                            ft.Icon(ft.icons.ANALYTICS_OUTLINED, color=self.G360_BLUE),
-                            ft.Text(
-                                "RESUMEN DE HISTORIAL POR LÍNEAS",
-                                weight=ft.FontWeight.BOLD,
-                                color=self.G360_BLUE,
+                            ft.Container(expand=True),
+                            ft.Column(
+                                [
+                                    # ProgressRing: nativo, GPU-accelerated, minimo CPU
+                                    ft.ProgressRing(
+                                        width=44,
+                                        height=44,
+                                        stroke_width=3,
+                                        color=self.G360_ACCENT,
+                                    ),
+                                    ft.Container(height=14),
+                                    self._loading_title,
+                                    self._loading_subtitle,
+                                ],
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                spacing=2,
                             ),
+                            ft.Container(expand=True),
                         ]
                     ),
-                    self.date_badges_container,  # Badges de fechas aquí
-                    self.lines_list_container,  # Ahora es el ft.Row que contiene las dos columnas
-                ],
-                spacing=15,
-                expand=True,
-            ),  # El Column principal del dashboard_card también debe expandirse
-        )
-
-        self.btn_generar = ft.ElevatedButton(
-            "PROCESAR SUSTENTO NC",
-            icon=ft.icons.ROCKET_LAUNCH_ROUNDED,
-            height=65,
-            width=450,
-            disabled=True,
-            on_click=lambda _: self.generar_flow(),
-        )
-
-        # Vista Previa Historial en Layout Principal
-        self.preview_data_table = ft.DataTable(
-            columns=[ft.DataColumn(ft.Text("Cargando..."))],  # Placeholder para evitar error
-            rows=[],
-            column_spacing=20,
-            heading_row_height=35,
-            heading_row_color=ft.colors.with_opacity(0.15, self.G360_ACCENT),
-            border_radius=10,
-            horizontal_lines=ft.border.BorderSide(
-                0.5, ft.colors.with_opacity(0.1, ft.colors.WHITE)
-            ),
-            vertical_lines=ft.border.BorderSide(
-                0.3, ft.colors.with_opacity(0.05, ft.colors.WHITE)
+                    ft.Container(expand=True),
+                ]
             ),
         )
-        self.preview_container = ft.Container(
-            visible=False,
-            animate_opacity=300,
-            content=ft.Column(
+        self.fp_generic = ft.FilePicker(on_result=self._on_picker_generic)
+        self.page.overlay.extend([self.fp_generic, self.loading_overlay])
+
+    # ── Footer ────────────────────────────────────────────────────────────
+
+    def _build_footer(self) -> ft.Container:
+        """Footer con signature en esquina inferior derecha."""
+        sig = G360Signature(mode="powered", version="2.0", opacity=0.5) if G360Signature else None
+        if sig is None:
+            return ft.Container(height=0)
+        return ft.Container(
+            content=ft.Row(
                 [
+                    ft.Container(expand=True),
+                    sig,
+                ]
+            ),
+            bgcolor=G360Theme.surface_color(),
+            border=ft.border.only(top=ft.border.BorderSide(0.5, G360Theme.border_subtle_color())),
+            padding=ft.padding.only(right=20, top=4, bottom=4),
+        )
+
+    # ── Header ───────────────────────────────────────────────────────────────
+
+    def _build_header(self) -> ft.Container:
+        """Header propio (sin AppBar de Flet) para evitar overflow/superposicion:
+        un Container(expand=True) absorbe el espacio sobrante entre titulo y botones."""
+        self._theme_button = ft.IconButton(
+            icon=ft.Icons.DARK_MODE_OUTLINED,
+            icon_size=18,
+            tooltip="Cambiar tema",
+            on_click=lambda _: self._toggle_theme(None),
+            style=ft.ButtonStyle(
+                color=ft.Colors.ON_SURFACE_VARIANT,
+                bgcolor={"hovered": ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)},
+                padding=ft.padding.all(8),
+            ),
+        )
+
+        plantillas_btn = ft.ElevatedButton(
+            content=ft.Row(
+                [
+                    ft.Icon(
+                        ft.Icons.PLAYLIST_PLAY_OUTLINED,
+                        size=14,
+                        color="white",
+                    ),
+                    ft.Text("Plantillas", size=13, color="white"),
+                ],
+                spacing=6,
+            ),
+            height=34,
+            style=ft.ButtonStyle(
+                padding=ft.padding.symmetric(horizontal=14),
+                shape=ft.RoundedRectangleBorder(radius=12),
+                bgcolor=G360Theme.primary_color(),
+                elevation=0,
+            ),
+            on_click=lambda _: mostrar_dialogo_plantillas(self.page, self),
+        )
+
+        reset_btn = ft.IconButton(
+            icon=ft.Icons.RESTART_ALT,
+            icon_size=18,
+            tooltip="Reiniciar",
+            on_click=lambda _: self.reset_app(None),
+            style=ft.ButtonStyle(
+                color=ft.Colors.ON_SURFACE_VARIANT,
+                bgcolor={"hovered": ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)},
+                padding=ft.padding.all(8),
+            ),
+        )
+
+        return ft.Container(
+            height=64,
+            bgcolor=G360Theme.surface_color(),
+            border=ft.border.only(bottom=ft.border.BorderSide(1, G360Theme.border_subtle_color())),
+            padding=ft.padding.symmetric(horizontal=16),
+            content=ft.Row(
+                [
+                    # Logo + titulo horizontal
                     ft.Row(
                         [
-                            ft.Icon(
-                                ft.icons.TABLE_CHART_OUTLINED,
-                                color=self.G360_BLUE,
-                                size=18,
+                            ft.Container(
+                                content=ft.Image(
+                                    src="/images/Logo_cipsa_solid.png",
+                                    width=44,
+                                    height=44,
+                                    fit=ft.ImageFit.CONTAIN,
+                                ),
                             ),
-                            ft.Text(
-                                "VISTA PREVIA HISTORIAL",
-                                size=12,
-                                weight=ft.FontWeight.BOLD,
-                                color=self.G360_BLUE,
+                            ft.Container(width=12),
+                            ft.Row(
+                                [
+                                    ft.Text(
+                                        "NC Sustentor",
+                                        size=19,
+                                        weight=ft.FontWeight.W_800,
+                                        color=ft.Colors.ON_SURFACE,
+                                    ),
+                                    ft.Container(width=4),
+                                    ft.Container(
+                                        width=1,
+                                        height=20,
+                                        bgcolor=G360Theme.border_color(),
+                                    ),
+                                    ft.Container(width=8),
+                                    ft.Text(
+                                        "Reconocimiento Comercial",
+                                        size=14,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                spacing=0,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
                         ],
-                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
-                    ft.Container(
-                        content=ft.Row(
-                            [self.preview_data_table], scroll=ft.ScrollMode.ALWAYS
-                        ),
-                        bgcolor=self.G360_SURFACE,
-                        padding=12,
-                        border_radius=12,
-                        height=280,
-                        shadow=ft.BoxShadow(
-                            spread_radius=0,
-                            blur_radius=25,
-                            color=ft.colors.with_opacity(0.08, self.G360_ACCENT),
-                            blur_style=ft.ShadowBlurStyle.OUTER,
-                        ),
-                    ),
+                    # Absorbe el espacio sobrante: los botones quedan fijos a la derecha
+                    ft.Container(expand=True),
+                    plantillas_btn,
+                    ft.Container(width=6),
+                    reset_btn,
+                    ft.Container(width=6),
+                    self._theme_button,
                 ],
-                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         )
 
-        # Pickers
-        self.fp_h = ft.FilePicker(on_result=self.seleccionar_historial)
-        self.fp_r = ft.FilePicker(on_result=self.seleccionar_requerimientos)
-        self.page.overlay.extend([self.fp_h, self.fp_r])
+    # ── Layout ────────────────────────────────────────────────────────────
 
-    def file_status_card(self, title, icon):
-        return ft.Container(
+    def _build_ui(self):
+        from src.ui.reconocimiento_view import ReconocimientoView
+
+        self._header = self._build_header()
+        self.reco_view = ReconocimientoView(self)
+        content = self.reco_view.build()
+        body_content = ft.Column(
+            [
+                content,
+                self._build_footer(),
+            ],
+            expand=True,
+            spacing=0,
+        )
+        self.body = ft.Container(
             content=ft.Column(
                 [
-                    ft.Icon(icon, size=32, color=ft.colors.GREY_400),
-                    ft.Text(title, size=13, weight="bold", color="white"),
-                    ft.Text(
-                        "Click para seleccionar", size=11, color=self.G360_TEXT_MUTED
-                    ),
+                    self._header,
+                    body_content,
                 ],
-                horizontal_alignment="center",
-                spacing=8,
+                expand=True,
+                spacing=0,
             ),
-            padding=20,
-            bgcolor=self.G360_SURFACE,
-            border_radius=18,
             expand=True,
-            border=ft.border.all(1, self.G360_BORDER),
-            animate=ft.Animation(300, ft.AnimationCurve.DECELERATE),
-            shadow=ft.BoxShadow(
-                spread_radius=0,
-                blur_radius=15,
-                color=ft.colors.with_opacity(0.02, ft.colors.BLACK),
-                blur_style=ft.ShadowBlurStyle.OUTER,
-            ),
         )
+        self.page.add(self.body)
 
-    def verificar_boton_generar(self):
-        """Valida requisitos y habilita/deshabilita el botón de acción con feedback visual."""
-        cli = str(self.txt_cliente.value or "").strip()
-        mot = str(self.txt_motivo.value or "").strip()
-        
-        faltantes = []
-        if not self.historial_path: faltantes.append("Historial")
-        if not self.requerimientos_paths: faltantes.append("Requerimientos")
-        if not cli: faltantes.append("Nombre Cliente")
-        if not mot: faltantes.append("Motivo")
-        
-        is_ready = len(faltantes) == 0
-        self.btn_generar.disabled = not is_ready
-        
-        if not is_ready:
-            # Solo mostrar mensaje de "Falta..." si ya se intentó cargar algo
-            if self.historial_path or self.requerimientos_paths:
-                self.status.value = f"⏳ Pendiente: Falta {', '.join(faltantes)}"
-                self.status.color = "orange"
-        elif self.status.value and "Pendiente:" in self.status.value:
-            self.status.value = "✅ Todo listo para procesar"
-            self.status.color = self.G360_SUCCESS
-            
-        if getattr(self.btn_generar, 'page', None):
-            self.btn_generar.update()
-        if getattr(self.status, 'page', None):
-            self.status.update()
+    # ── File Picker ───────────────────────────────────────────────────────
 
-    def seleccionar_historial(self, e: ft.FilePickerResultEvent):
-        if not e.files:
-            return
-
-        if self.progress.visible: return # Evitar cargas simultáneas
-
-        # UI Feedback inmediato
-        self.progress.visible = True
-        self.btn_generar.disabled = True
-        self.status.value = "⏳ Analizando base de datos (Historial)..."
-        self.status.color = self.G360_BLUE
-        self.page.update()
-
-        def load_task():
-            try:
-                path = e.files[0].path
-                df_full = pd.read_excel(path, dtype=str)
-                proc = NCProcessor(df_full, sort_mode=self.rg_tipo_orden.value)
-
-                if proc.historial.empty:
-                    self.historial_path = None
-                    self._actualizar_card_ui(self.card_historial, False, "Sin datos")
-                    self.status.value = "⚠️ No se hallaron datos válidos en el archivo."
-                else:
-                    self.historial_path = path
-                    self.df_historial_preview = proc.historial.head(10)
-                    self.current_processor = proc  # Guardar para módulos de reportes consolidados
-                    self._update_consolidated_button()  # Habilitar botón de consolidados
-                    
-                    # Auto-llenado de cliente
-                    col_nom = next((c for c in proc.historial.columns if "NOM_CLIENTE" in str(c).upper()), None)
-                    if col_nom and not self.txt_cliente.value:
-                        valid_names = proc.historial[col_nom].dropna()
-                        if not valid_names.empty:
-                            self.txt_cliente.value = str(valid_names.iloc[0]).strip()
-
-                    self._update_dashboard(proc)
-                    self._show_preview()
-                    self._actualizar_card_ui(self.card_historial, True, e.files[0].name)
-                    self.status.value = f"✅ Historial vinculado: {e.files[0].name}"
-                    self.status.color = self.G360_SUCCESS
-            except PermissionError:
-                self.historial_path = None
-                self._actualizar_card_ui(self.card_historial, False, "Acceso Denegado")
-                self.status.value = "❌ El historial está abierto o bloqueado por otro programa."
-                self.status.color = "red"
-            except Exception as ex:
-                self.historial_path = None
-                self._actualizar_card_ui(self.card_historial, False, "Error")
-                self.status.value = f"❌ Error: {str(ex)}"
-                self.status.color = "red"
-            finally:
-                self.progress.visible = False
-                self.verificar_boton_generar()
-                self.page.update()
-
-        threading.Thread(target=load_task, daemon=True).start()
-
-    def _update_dashboard(self, proc):
-        logger.info("Actualizando dashboard con datos del historial.")
-        # Badges de fechas
-        f_ant, f_rec = proc.obtener_rango_fechas()
-        
-        date_badges = [
-            self._crear_badge(f"📅 {f_ant.strftime('%d/%m/%Y')}" if f_ant and not pd.isna(f_ant) else "---"),
-            self._crear_badge(
-                f"📅 {f_rec.strftime('%d/%m/%Y')}" if f_rec and not pd.isna(f_rec) else "---", is_new=True
-            ),
-        ]
-        self.dashboard_card.opacity = 0
-        self.dashboard_card.scale = 0.95
-        self.date_badges_container.controls = date_badges  # Asignar a su contenedor
-
-        # Resumen por líneas (Lista de Progreso Linear)
-        lineas_resumen = proc.obtener_resumen_lineas()
-        self.left_lines_column.controls.clear()
-        self.right_lines_column.controls.clear()
-
-        # Función auxiliar para crear el control de cada línea con soporte para "Espejo"
-        def create_line_item_control(line_data, original_index, is_left=False):
-            color = PIE_CHART_COLORS[
-                original_index % len(PIE_CHART_COLORS)
-            ]  # Ciclar colores
-
-            # Configuración de alineación según el lado
-            alignment = (
-                ft.MainAxisAlignment.END if is_left else ft.MainAxisAlignment.START
-            )
-            cross_alignment = (
-                ft.CrossAxisAlignment.END if is_left else ft.CrossAxisAlignment.START
-            )
-            # Rotación de 180 grados (pi) para que la barra crezca de derecha a izquierda
-            bar_rotation = ft.Rotate(3.14159) if is_left else None
-
-            # Sub-fila de datos numéricos (Monto y %)
-            data_row = ft.Row(
-                [
-                    ft.Text(
-                        f"{line_data['PORCENTAJE']:.2%}",
-                        size=12,
-                        color=color,
-                        weight="bold",
-                    ),
-                    ft.Text(
-                        f"S/ {line_data['SOLES']:,.0f}",
-                        size=13,
-                        font_family="monospace",
-                        weight="bold",
-                    ),
-                ],
-                spacing=35,
-                rtl=is_left,
-            )
-
-            # Construir la fila principal invirtiendo el orden para el efecto espejo real
-            name_text = ft.Text(
-                line_data["NOM_LINEA"], size=13, weight=ft.FontWeight.W_500
-            )
-            row_controls = [data_row, name_text] if is_left else [name_text, data_row]
-
-            return ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Row(row_controls, alignment=alignment, spacing=15),
-            ft.ProgressBar(
-                value=line_data["ESCALA_VISUAL"],
-                color=ft.colors.RED_400 if line_data["ES_NEGATIVO"] else color,
-                bgcolor=ft.colors.with_opacity(0.1, ft.colors.RED_400 if line_data["ES_NEGATIVO"] else color),
-                height=12,
-                border_radius=6,
-                rotate=bar_rotation,
-            ),
-                    ],
-                    spacing=5,
-                    horizontal_alignment=cross_alignment,
-                ),
-                padding=ft.padding.only(bottom=15),  # Más aire entre cada fila
-            )
-
-        # Distribuir los elementos en pares para mantener el balance visual (1 y 2, 3 y 4, etc.)
-        for i in range(0, len(lineas_resumen), 2):
-            # El más alto del par actual va a la izquierda
-            self.left_lines_column.controls.append(
-                create_line_item_control(lineas_resumen[i], i, is_left=True)
-            )
-
-            # El segundo más alto del par actual va a la derecha
-            if i + 1 < len(lineas_resumen):
-                self.right_lines_column.controls.append(
-                    create_line_item_control(
-                        lineas_resumen[i + 1], i + 1, is_left=False
-                    )
-                )
-
-        self.dashboard_card.visible = not proc.historial.empty
-        self.dashboard_card.opacity = 1
-        self.dashboard_card.scale = 1
-        
-        # Auto-expandir si hay datos
-        # Buscamos el ExpansionTile del dashboard en main_view
-        try:
-            # main_view.content.controls[5] es el ExpansionTile del dashboard
-            self.main_view.content.controls[5].initially_expanded = True
-            self.main_view.content.controls[5].update()
-        except:
-            pass
-            
-        self.page.update()
-
-    def _crear_badge(self, text, is_new=False):
-        bg_color = self.G360_ACCENT if is_new else "#2A3547"
-        return ft.Container(
-            content=ft.Text(text, size=10, weight="bold", color="white"),
-            padding=ft.padding.symmetric(horizontal=12, vertical=8),
-            bgcolor=bg_color,
-            border_radius=8,
-        )
-
-    def seleccionar_requerimientos(self, e: ft.FilePickerResultEvent):
-        logger.info("Evento de selección de requerimientos disparado.")
-        if e.files:
-            nuevos_archivos = 0
-            for f in e.files:
-                path = f.path
-                if path is None:
-                    logger.warning(f"El archivo '{f.name}' no tiene ruta local. Omitiendo (Modo Web no soportado para rutas directas).")
-                    continue
-                
-                if path not in self.requerimientos_paths:
-                    self.requerimientos_paths.append(path)
-                    nuevos_archivos += 1
-                    logger.info(f"Requerimiento añadido: {f.name}")
-                    # Añadir indicador visual del archivo cargado
-                    self.req_files_container.controls.append(
-                        ft.Container(
-                            content=ft.Text(f.name, size=10, color="white"),
-                            bgcolor=ft.colors.with_opacity(0.1, self.G360_ACCENT),
-                            padding=ft.padding.symmetric(horizontal=10, vertical=5),
-                            border_radius=5,
-                            border=ft.border.all(1, self.G360_ACCENT),
-                        )
-                    )
-            
-            if nuevos_archivos > 0:
-                logger.info(f"Se vincularon {nuevos_archivos} nuevos archivos de requerimientos.")
-            if self.requerimientos_paths:
-                self._actualizar_card_ui(
-                    self.card_requerimientos,
-                    True,
-                    f"{len(self.requerimientos_paths)} archivos",
-                )
-                self.status.value = "✅ Requerimientos vinculados correctamente."
-                self.status.color = self.G360_SUCCESS
-                
-            self.verificar_boton_generar()
+    def _on_picker_generic(self, e: ft.FilePickerResultEvent):
+        cb = self._picker_callback
+        cb_files = self._picker_files_callback
+        self._picker_callback = None
+        self._picker_files_callback = None
+        if cb:
+            ruta = e.files[0].path if e.files else None
+            cb(ruta)
+        elif cb_files:
+            rutas = [f.path for f in e.files if f.path] if e.files else []
+            cb_files(rutas)
+        if self.page:
             self.page.update()
 
-    def _actualizar_card_ui(self, card, success, text=""):
-        if success:
-            card.border = ft.border.all(2, self.G360_ACCENT)
-            card.bgcolor = ft.colors.with_opacity(0.05, self.G360_ACCENT)
-            card.content.controls[0].color = self.G360_ACCENT
-            card.content.controls[2].value = text
-            card.content.controls[2].color = self.G360_ACCENT
-            card.content.controls[2].weight = "bold"
-        else:
-            card.border = ft.border.all(1, self.G360_BORDER)
-            card.bgcolor = self.G360_SURFACE
-            card.content.controls[0].color = ft.colors.GREY_400
-            logger.debug(f"Actualizando tarjeta '{card.content.controls[1].value}' a estado: {text if text else 'Pendiente'}")
-            card.content.controls[2].value = text if text else "Click para seleccionar"
-            card.content.controls[2].color = self.G360_TEXT_MUTED
-            card.content.controls[2].weight = "normal"
-
-    def _show_preview(self):
-        self.preview_data_table.columns.clear()
-        self.preview_data_table.rows.clear()
-
-        if (
-            self.df_historial_preview is not None
-            and not self.df_historial_preview.empty
-        ):
-            # Seleccionar columnas clave para no saturar la vista
-            cols = self.df_historial_preview.columns.tolist()[:6]
-            if cols:
-                for col in cols:
-                    self.preview_data_table.columns.append(
-                        ft.DataColumn(ft.Text(col.upper(), size=10, weight="bold"))
-                    )
-                for _, fila in self.df_historial_preview.head(7).iterrows():
-                    celdas = [
-                        ft.DataCell(
-                            ft.Text(str(fila[c])[:22], size=9, color=ft.colors.GREY_300)
-                        )
-                        for c in cols
-                    ]
-                    self.preview_data_table.rows.append(ft.DataRow(cells=celdas))
-            self.preview_container.visible = True
-            self.preview_container.opacity = 1
-        else:
-            self.preview_container.visible = False
-
-        self.page.update()
-
-    def reset_app(self, e):
-        logger.info("Reseteando la aplicación a su estado inicial.")
-        # Limpiar estado interno y memoria
-        self.historial_path = None
-        self.requerimientos_paths = []
-        self.current_processor = None  # Liberar el procesador anterior
-        self.date_badges_container.controls.clear()
-        self.left_lines_column.controls.clear()  # Limpiar también las columnas individuales
-        self.right_lines_column.controls.clear()
-        self.req_files_container.controls.clear()
-        self.df_historial_preview = None
-        self.status.value = "✨ Sistema reseteado."
-        self.status.color = self.G360_BLUE
-
-        # Limpiar campos de texto
-        self.txt_cliente.value = ""
-        self.txt_motivo.value = ""
-
-        # Resetear interfaz
-        self._actualizar_card_ui(self.card_historial, False)
-        self._actualizar_card_ui(self.card_requerimientos, False)
-        self.dashboard_card.visible = False
-        self.preview_container.visible = False
-        self.verificar_boton_generar()
-        self.page.update()
-        logger.info("Estado de la aplicación y UI reseteados completamente.")
-
-    def _verificar_plantillas(self):
-        """Verifica que las plantillas oficiales existan en assets/templates"""
+    def _pick_file(
+        self, dialog_title: str = "Seleccionar archivo", allowed_extensions: list | None = None
+    ) -> str:
+        if not self._picking_lock.acquire(blocking=False):
+            return None
         try:
-            self.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
-            if self.PLANTILLA_REQUERIMIENTOS.exists() and self.PLANTILLA_HISTORIAL.exists():
-                logger.info("✅ Plantillas disponibles en assets/templates")
-            else:
-                logger.warning(f"⚠️ Plantillas no encontradas en {self.TEMPLATES_DIR}")
-        except Exception as ex:
-            logger.warning(f"No se pudieron verificar las plantillas: {str(ex)}")
+            result = [None]
+            event = threading.Event()
 
-    def crear_plantillas(self, e):
-        def task():
-            logger.info("Copiando plantillas oficiales desde assets/templates al Escritorio...")
-            try:
-                copied_count = 0
-                
-                for template_path in [self.PLANTILLA_REQUERIMIENTOS, self.PLANTILLA_HISTORIAL]:
-                    if template_path.exists():
-                        # Verificación de duplicados con opción de "Guardar como" (Crear Copia)
-                        dest_path = self._get_unique_out_path(template_path.name)
-                        if dest_path:
-                            shutil.copy2(template_path, dest_path)
-                            copied_count += 1
-                
-                if copied_count > 0:
-                    desktop = self._get_desktop_path()
-                    if os.name == 'nt' and not self.page.web:
-                        os.startfile(str(desktop))
-                    
-                    self.page.snack_bar = ft.SnackBar(ft.Text(f"✅ Se exportaron {copied_count} plantillas al Escritorio"))
-                    self.page.snack_bar.open = True
-                    self.status.value = f"✅ {copied_count} plantillas exportadas"
-                    self.status.color = self.G360_SUCCESS
-                else:
-                    self.status.value = "❌ Plantillas no encontradas en assets/templates"
-                    self.status.color = "red"
-                
-                self.page.update()
-            except Exception as ex:
-                self.status.value = f"❌ Error plantillas: {str(ex)}"
-                self.status.color = "red"
-                self.page.update()
-        
-        threading.Thread(target=task, daemon=True).start()
+            def on_pick(ruta):
+                result[0] = ruta
+                event.set()
 
-    def preguntar_sobrescribir(self, filename):
-        self.dialog_event.clear()
+            def schedule_pick():
+                self._picker_callback = on_pick
+                self.fp_generic.pick_files(
+                    allowed_extensions=allowed_extensions or ["xlsx", "xls", "csv"],
+                    dialog_title=dialog_title,
+                )
 
-        logger.info(f"Preguntando al usuario sobre archivo duplicado: '{filename}'")
-        def handle_click(choice):
-            self.user_choice = choice
-            self.page.dialog.open = False
-            self.page.update()
-            self.dialog_event.set()
+            if self.page:
+                self.page.run_thread(schedule_pick)
 
-        self.page.dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Archivo duplicado"),
-            content=ft.Text(f"El archivo '{filename}' ya existe en el escritorio. ¿Qué desea hacer?"),
-            actions=[
-                ft.TextButton("Sobrescribir", on_click=lambda _: handle_click("overwrite")),
-                ft.TextButton("Crear Copia", on_click=lambda _: handle_click("copy")),
-                ft.TextButton("Saltar", on_click=lambda _: handle_click("skip")),
+            event.wait(timeout=60)
+            return result[0]
+        finally:
+            self._picking_lock.release()
+
+    def _pick_files(self, dialog_title: str = "Seleccionar archivos") -> list:
+        if not self._picking_lock.acquire(blocking=False):
+            return []
+        try:
+            result = [None]
+            event = threading.Event()
+
+            def on_pick(rutas):
+                result[0] = rutas
+                event.set()
+
+            def schedule_pick():
+                self._picker_files_callback = on_pick
+                self.fp_generic.pick_files(
+                    allowed_extensions=["xlsx", "xls", "csv"],
+                    dialog_title=dialog_title,
+                    allow_multiple=True,
+                )
+
+            if self.page:
+                self.page.run_thread(schedule_pick)
+
+            event.wait(timeout=60)
+            return result[0] if result[0] else []
+        finally:
+            self._picking_lock.release()
+
+    # ── Reset ─────────────────────────────────────────────────────────────
+
+    def reset_app(self, e=None):
+        from src.ui.reconocimiento_view import ReconocimientoView
+
+        view = ReconocimientoView(self)
+        view.reset()
+        content = view.build()
+        # Reemplazar solo el contenido, preservar header y footer
+        self.body.content = ft.Column(
+            [
+                self._header,
+                content,
+                self._build_footer(),
             ],
-            actions_alignment=ft.MainAxisAlignment.END,
+            expand=True,
+            spacing=0,
         )
-        self.page.dialog.open = True
-        self.page.update()
-        self.dialog_event.wait()
-        logger.info(f"Usuario eligió: '{self.user_choice}' para '{filename}'")
-        return self.user_choice
+        if self.page:
+            self.page.update()
+        self.show_snackbar("App reiniciado", self.G360_SUCCESS)
 
-    def _sort_historial(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Aplica el ordenamiento seleccionado por el usuario al historial."""
-        if self.rg_tipo_orden.value == "fecha_desc" and "FECHA_ORIG" in df.columns:
-            df["FECHA_DT"] = pd.to_datetime(df["FECHA_ORIG"], dayfirst=True, errors="coerce", format="mixed")
-            logger.debug("Historial ordenado por fecha (más recientes primero).")
-            return df.sort_values(by="FECHA_DT", ascending=False).drop(columns=["FECHA_DT"])
-        elif self.rg_tipo_orden.value == "fecha_asc" and "FECHA_ORIG" in df.columns:
-            df["FECHA_DT"] = pd.to_datetime(df["FECHA_ORIG"], dayfirst=True, errors="coerce", format="mixed")
-            logger.debug("Historial ordenado por fecha (más antiguo primero).")
-            return df.sort_values(by="FECHA_DT", ascending=True).drop(columns=["FECHA_DT"])
-        elif self.rg_tipo_orden.value == "cantidad_desc" and "CANTIDAD" in df.columns:
-            df["CANT_NUM"] = pd.to_numeric(df["CANTIDAD"], errors="coerce").fillna(0)
-            logger.debug("Historial ordenado por cantidad (mayor volumen primero).")
-            return df.sort_values(by="CANT_NUM", ascending=False).drop(columns=["CANT_NUM"])
-        elif self.rg_tipo_orden.value == "cantidad_asc" and "CANTIDAD" in df.columns:
-            df["CANT_NUM"] = pd.to_numeric(df["CANTIDAD"], errors="coerce").fillna(0)
-            logger.debug("Historial ordenado por cantidad (menor cantidad primero).")
-            return df.sort_values(by="CANT_NUM", ascending=True).drop(columns=["CANT_NUM"])
-        return df
+    # ── Desktop Path ──────────────────────────────────────────────────────
 
     def _get_desktop_path(self) -> Path:
-        """Obtiene la ruta real del Escritorio, comprobando si usa OneDrive u otras rutas."""
         onedrive_desktop = Path.home() / "OneDrive" / "Desktop"
         if onedrive_desktop.exists():
             return onedrive_desktop
         return Path.home() / "Desktop"
 
-    def _get_unique_out_path(self, base_name: str) -> Optional[Path]:
-        """Gestiona la existencia del archivo y retorna la ruta final o None si se salta."""
-        out_path = self._get_desktop_path() / base_name
-        if out_path.exists():
-            choice = self.preguntar_sobrescribir(out_path.name)
-            if choice == "skip":
-                logger.info(f"Generación de '{out_path.name}' omitida por elección del usuario.")
-                return None
-            if choice == "copy":
-                base_out_path = out_path
-                counter = 1
-                while out_path.exists():
-                    out_path = base_out_path.parent / f"{base_out_path.stem} ({counter}){base_out_path.suffix}"
-                    counter += 1
-                logger.info(f"Se generará una copia de '{base_name}' como '{out_path.name}'.")
-        return out_path
-
-    def _update_inventory_balances(self, df_h: pd.DataFrame, items: list) -> pd.DataFrame:
-        """Descuenta las cantidades procesadas del historial actual por cada documento utilizado."""
-        for item in items:
-            # Si el item tiene el mapeo de cantidad por documento, usarlo
-            if item.DOCUMENTOS_CANTIDAD:
-                for doc_str, cant_tomada in item.DOCUMENTOS_CANTIDAD.items():
-                    # Parsear el documento para obtener serie y nro
-                    # Formato: F204-51999 => tipo=F, serie=204, nro=51999
-                    if '-' in doc_str:
-                        tipo_serie, nro_target = doc_str.rsplit('-', 1)
-                        tipo_target = tipo_serie[0] if tipo_serie else 'F'
-                        serie_target = tipo_serie[1:] if len(tipo_serie) > 1 else ''
-                    else:
-                        continue
-                    
-                    # Normalizar y buscar el documento en el historial
-                    mask_match = False
-                    indices_art = df_h.index[df_h["ID_ARTICULO"] == item.ID_ARTICULO]
-                    for idx in indices_art:
-                        row = df_h.loc[idx]
-                        # Normalizar SERIE_DOC
-                        serie_h = str(row['SERIE_DOC']).strip()
-                        while serie_h.upper().startswith(tipo_target.upper()):
-                            serie_h = serie_h[1:]
-                        serie_h = serie_h.lstrip('-').strip()
-                        
-                        # Normalizar NRO_DOC
-                        nro_h = str(row['NRO_DOC']).strip()
-                        if '-' in nro_h:
-                            nro_h = nro_h.split('-', 1)[1]
-                        while nro_h.upper().startswith(tipo_target.upper()):
-                            nro_h = nro_h[1:]
-                        nro_h = nro_h.lstrip('-').strip()
-                        
-                        # Comparar
-                        if serie_h == serie_target and nro_h == nro_target:
-                            precio_u = float(df_h.at[idx, "PRECIO_UNID"])
-                            nuevo_v = max(0.0, float(df_h.at[idx, "CANTIDAD"]) - float(cant_tomada or 0))
-                            logger.debug(f"Descontando {cant_tomada} de '{item.ID_ARTICULO}' Doc({doc_str}). Nuevo saldo: {nuevo_v}")
-                            df_h.at[idx, "CANTIDAD"] = nuevo_v
-                            # Sincronización de SOLES para evitar saltos de precio en Reporte 2
-                            df_h.at[idx, "SOLES"] = round(nuevo_v * precio_u, 4)
-                            mask_match = True
-                            break
-                    
-                    if not mask_match:
-                        logger.warning(f"No se encontró documento {doc_str} para {item.ID_ARTICULO} en el historial.")
-            else:
-                # Fallback: usar el documento más reciente si no existe mapeo
-                mask = (
-                    (df_h["ID_ARTICULO"] == item.ID_ARTICULO)
-                )
-                # Filtrar por NRO y SERIE normalizados
-                nro_item = str(item.NRO_DOC).strip()
-                serie_item = str(item.SERIE_DOC).strip()
-                for idx in df_h[mask].index:
-                    if df_h.at[idx, "ID_ARTICULO"] == item.ID_ARTICULO:
-                        match_found = False
-                        try:
-                            if nro_item in str(df_h.at[idx, "NRO_DOC"]) and serie_item in str(df_h.at[idx, "SERIE_DOC"]):
-                                match_found = True
-                        except:
-                            pass
-                        
-                        if match_found:
-                            precio_u = float(df_h.at[idx, "PRECIO_UNID"])
-                            nuevo_v = max(0.0, float(df_h.at[idx, "CANTIDAD"]) - float(item.CANTIDAD_REAL_ENCONTRADA or 0))
-                            logger.debug(f"Descontando {item.CANTIDAD_REAL_ENCONTRADA} de '{item.ID_ARTICULO}' (Doc: {item.NRO_DOC}). Nuevo saldo: {nuevo_v}")
-                            df_h.at[idx, "CANTIDAD"] = nuevo_v
-                            # Sincronizar SOLES para que el P.U. no salte en el Reporte 2
-                            df_h.at[idx, "SOLES"] = round(nuevo_v * precio_u, 4)
-                            break
-        
-        return df_h[pd.to_numeric(df_h["CANTIDAD"], errors="coerce").fillna(0) > 0].reset_index(drop=True)
-
-    def generar_flow(self):
-        def task():
-            logger.info("Iniciando flujo de generación de reportes en hilo secundario.")
-            self.progress.visible = True
-            self.btn_generar.disabled = True
-            self.page.update()
-            try:
-                cli_clean = re.sub(r'[\\/*?:"<>|]', "", self.txt_cliente.value).strip().replace(" ", "_")
-                base_fname = f"NC_{cli_clean}_{datetime.now().strftime('%d%m%Y')}.xlsx"
-                
-                # OPTIMIZACIÓN: Usar el historial ya procesado y cargado en memoria si existe
-                if self.current_processor and self.current_processor.historial is not None:
-                    df_h = self.current_processor.historial.copy()
-                    logger.info(f"Usando historial ya cargado en memoria: {len(df_h)} registros.")
-                else:
-                    df_h_original = pd.read_excel(self.historial_path, dtype=str)
-                    proc_hist_initial = NCProcessor(df_h_original, sort_mode=self.rg_tipo_orden.value)
-                    df_h = proc_hist_initial.historial.copy()
-                    logger.info(f"Historial cargado desde disco: {len(df_h)} registros.")
-
-                for idx, req_path in enumerate(self.requerimientos_paths):
-                    logger.info(f"Procesando archivo {idx + 1}/{len(self.requerimientos_paths)}: {Path(req_path).name}")
-                    self.status.value = f"⏳ Procesando {idx + 1}/{len(self.requerimientos_paths)}..."
-                    self.page.update()
-                    
-                    try:
-                        df_r = pd.read_excel(req_path, dtype=str)
-                        proc = NCProcessor(df_h, sort_mode=self.rg_tipo_orden.value)
-                        
-                        # NUEVA LÓGICA: Identificar mejor factura de referencia (cobertura + solvencia)
-                        best_ref = proc.identificar_mejor_referencia(df_r)
-                        final_ref_doc = best_ref if best_ref else "Sustento"
-                        
-                        items, docs = proc.procesar_lote(df_r, forzar_cantidad_solicitada=self.sw_forzar_cant.value)
-
-                        if not items:
-                            logger.warning(f"No se encontraron coincidencias para el requerimiento {idx + 1}.")
-                            continue
-
-                        out_path = self._get_unique_out_path(f"PARTE_{idx + 1}_{base_fname}")
-                        if not out_path: continue
-
-                        logger.info(f"Escribiendo Excel con referencia: {final_ref_doc}")
-                        # Obtener ID_CLIENTE para el reporte
-                        cliente_id = ""
-                        df_cli = df_h[df_h['NOM_CLIENTE'] == self.txt_cliente.value]
-                        if not df_cli.empty:
-                            cliente_id = str(df_cli['ID_CLIENTE'].iloc[0])
-                        
-                        ExcelGenerator().generar_reporte(
-                            str(out_path), self.txt_cliente.value, cliente_id, f"{self.txt_motivo.value} (P{idx + 1})",
-                            items, docs, proc.obtener_rango_fechas(),
-                            sheet_name=final_ref_doc,
-                            factura_referencia=final_ref_doc
-                        )
-                        df_h = self._update_inventory_balances(df_h, items)
-                        
-                        if not self.page.web and os.name == 'nt':
-                            os.startfile(str(out_path))
-
-                    except PermissionError:
-                        self.status.value = f"❌ Error Permisos en Lote {idx + 1}"
-                        self.status.color = "red"
-                        self.page.update()
-                        continue
-                    except Exception as ex:
-                        logger.error(f"Error en Lote {idx + 1}: {ex}")
-                        self.status.value = f"❌ Error en Lote {idx + 1}"
-                        self.status.color = "red"
-                        self.page.update()
-                        continue
-
-                self.status.value = "🎯 Proceso Completado"
-                self.status.color = self.G360_ACCENT
-                logger.info("Flujo de generación completado exitosamente.")
-            except Exception as ex:
-                logger.exception("Error crítico en generar_flow:")
-                self.status.value = f"❌ Error Crítico: {str(ex)}"
-                self.status.color = "red"
-            finally:
-                self.progress.visible = False
-                self.btn_generar.disabled = False
-                self.page.update()
-
-        threading.Thread(target=task, daemon=True).start()
-
-    def _build_sidebar(self) -> ft.Container:
-        """Construye sidebar con indicador de sección activa y mejor organización."""
-        self.sidebar_nc_indicator = ft.Container(width=4, height=24, bgcolor=self.G360_ACCENT, border_radius=2, visible=True)
-        self.sidebar_consolidated_indicator = ft.Container(width=4, height=24, bgcolor=self.G360_ACCENT, border_radius=2, visible=False)
-        
-        def sidebar_item(icon, text, on_click, indicator, tooltip, disabled=False):
-            return ft.Container(
-                content=ft.Row([
-                    indicator,
-                    ft.Container(
-                        content=ft.Row([
-                            ft.Icon(icon, size=20, color=ft.colors.GREY_400),
-                            ft.Text(text, size=13, color=ft.colors.GREY_400, weight=ft.FontWeight.W_500),
-                        ], spacing=12),
-                        padding=ft.padding.symmetric(horizontal=12, vertical=10),
-                        border_radius=10,
-                        on_click=on_click,
-                        disabled=disabled,
-                        on_hover=lambda e: self._on_sidebar_hover(e),
-                        expand=True,
-                    ),
-                ], spacing=0),
-                tooltip=tooltip,
-            )
-
-        self.sidebar_btn_consol_icon = ft.Icon(ft.icons.ANALYTICS_OUTLINED, size=20, color=ft.colors.GREY_400)
-        
-        return ft.Container(
-            width=200,
-            padding=ft.padding.only(top=40, bottom=20, left=10, right=10),
-            bgcolor=self.G360_SURFACE,
-            content=ft.Column([
-                # Logo + nombre
-                ft.Container(
-                    content=ft.Row([
-                        ft.Image(src="/images/logo-g360.svg", width=42, height=42), # Solo el logo
-                    ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
-                    margin=ft.margin.only(bottom=40),
-                ),
-                
-                # Módulos
-                ft.Text("   MÓDULOS", size=10, weight=ft.FontWeight.BOLD, color=self.G360_TEXT_MUTED),
-                ft.Divider(height=10, color="transparent"),
-                
-                sidebar_item(ft.icons.DESCRIPTION_OUTLINED, "NC Sustentor", lambda _: self._switch_to_nc(), 
-                             self.sidebar_nc_indicator, "Generación de Notas de Crédito"),
-                
-                ft.Container(
-                    content=ft.Row([
-                        self.sidebar_consolidated_indicator,
-                        ft.Container(
-                            content=ft.Row([
-                                self.sidebar_btn_consol_icon,
-                                ft.Text("Consolidados", size=13, color=ft.colors.GREY_400, weight=ft.FontWeight.W_500),
-                            ], spacing=12),
-                            padding=ft.padding.symmetric(horizontal=12, vertical=10),
-                            border_radius=10,
-                            on_click=self._switch_to_consolidated,
-                            on_hover=lambda e: self._on_sidebar_hover(e),
-                            expand=True,
-                            ref=ft.Ref(), # Placeholder for disabled state logic if needed
-                        ),
-                    ], spacing=0),
-                    tooltip="Análisis y Reportes Consolidados",
-                ),
-                
-                ft.Divider(height=30, color=self.G360_BORDER),
-                
-                # Herramientas
-                ft.Text("   HERRAMIENTAS", size=10, weight=ft.FontWeight.BOLD, color=self.G360_TEXT_MUTED),
-                ft.Divider(height=10, color="transparent"),
-                
-                ft.Container(
-                    content=ft.Row([
-                        ft.Container(width=4), # Spacer for alignment with modules
-                        ft.TextButton(
-                            content=ft.Row([
-                                ft.Icon(ft.icons.DOWNLOAD_FOR_OFFLINE, size=20, color=ft.colors.GREY_400),
-                                ft.Text("Plantillas", size=13, color=ft.colors.GREY_400, weight=ft.FontWeight.W_500),
-                            ], spacing=12),
-                            on_click=self.crear_plantillas,
-                            style=ft.ButtonStyle(padding=ft.padding.all(12)),
-                        ),
-                    ]),
-                ),
-                
-                ft.Container(
-                    content=ft.Row([
-                        ft.Container(width=4),
-                        ft.TextButton(
-                            content=ft.Row([
-                                ft.Icon(ft.icons.REFRESH, size=20, color=ft.colors.GREY_400),
-                                ft.Text("Limpiar", size=13, color=ft.colors.GREY_400, weight=ft.FontWeight.W_500),
-                            ], spacing=12),
-                            on_click=self.reset_app,
-                            style=ft.ButtonStyle(padding=ft.padding.all(12)),
-                        ),
-                    ]),
-                ),
-                
-                ft.Container(expand=True),
-                
-                # Footer Signature
-                ft.Container(
-                    content=ft.Column([
-                        ft.Divider(height=20, color=self.G360_BORDER),
-                        G360Signature(mode="powered", version="2.0") if G360Signature else ft.Text("powered G360 v2.0", color=self.G360_BLUE, size=9),
-                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                    padding=ft.padding.only(bottom=10),
-                ),
-            ], horizontal_alignment=ft.CrossAxisAlignment.START, spacing=5),
-        )
-
-    def _on_sidebar_hover(self, e):
-        e.control.bgcolor = ft.colors.with_opacity(0.05, ft.colors.WHITE) if e.data == "true" else None
-        e.control.update()
-
-    def _build_main_view(self) -> ft.Container:
-        """Construye la vista principal de NC Sustentor con layout mejorado."""
-        self.card_historial = self.file_status_card("1. HISTORIAL (BASE)", ft.icons.HISTORY_EDU)
-        self.card_requerimientos = self.file_status_card("2. REQUERIMIENTOS", ft.icons.FACT_CHECK_OUTLINED)
-        self.txt_resumen = ft.Text("", size=12, color=self.G360_TEXT_MUTED, visible=False)
-
-        self.btn_generar = ft.ElevatedButton(
-            content=ft.Row([
-                ft.Icon(ft.icons.ROCKET_LAUNCH_ROUNDED, size=24),
-                ft.Text("PROCESAR SUSTENTO NC", size=16, weight=ft.FontWeight.BOLD),
-            ], alignment=ft.MainAxisAlignment.CENTER, spacing=15),
-            style=ft.ButtonStyle(
-                color="white",
-                bgcolor={"": self.G360_ACCENT, "disabled": "white10"},
-                shape=ft.RoundedRectangleBorder(radius=15),
-                elevation={"hovered": 10, "": 2},
-                animation_duration=300,
-            ),
-            height=65,
-            width=450,
-            disabled=True,
-            on_click=lambda _: self.generar_flow(),
-        )
-
-        self.btn_container = ft.Container(
-            content=self.btn_generar,
-            shadow=ft.BoxShadow(
-                spread_radius=0,
-                blur_radius=20,
-                color=ft.colors.with_opacity(0.15, self.G360_ACCENT),
-                blur_style=ft.ShadowBlurStyle.OUTER,
-            ),
-            animate_opacity=300,
-        )
-
-        return ft.Container(
-            expand=True,
-            padding=ft.padding.only(top=30, bottom=40, left=50, right=50),
-            content=ft.Column([
-                ft.Row([
-                    ft.Column([
-                        ft.Text("NC SUSTENTOR", size=36, weight=ft.FontWeight.W_900),
-                        ft.Text("Procesamiento inteligente de Notas de Crédito", size=14, color=self.G360_TEXT_MUTED),
-                    ], spacing=2),
-                    ft.Container(expand=True),
-                    self.txt_resumen,
-                ], alignment=ft.MainAxisAlignment.START),
-                
-                ft.Divider(height=20, color="transparent"),
-                
-                ft.Row([
-                    ft.Container(content=self.txt_cliente, expand=True),
-                    ft.Container(content=self.txt_motivo, expand=True),
-                ], spacing=20),
-                
-                ft.Row([
-                    ft.Icon(ft.icons.INFO_OUTLINE, size=14, color=self.G360_TEXT_MUTED),
-                    ft.Text("Sustentar cantidad total aunque falte stock", size=12, color=self.G360_TEXT_MUTED),
-                    self.sw_forzar_cant,
-                ], alignment=ft.MainAxisAlignment.END, spacing=10),
-                
-                ft.Container(
-                    padding=15, bgcolor=ft.colors.with_opacity(0.03, ft.colors.WHITE), border_radius=18,
-                    border=ft.border.all(1, self.G360_BORDER),
-                    content=ft.Column([
-                        ft.Row([
-                            ft.Icon(ft.icons.SORT, size=16, color=self.G360_ACCENT),
-                            ft.Text("CRITERIO DE SELECCIÓN (FIFO/LIFO)", size=11, weight=ft.FontWeight.BOLD, color=self.G360_TEXT_MUTED),
-                        ], spacing=8),
-                        self.rg_tipo_orden,
-                    ], spacing=10),
-                ),
-                
-                ft.Row([
-                    ft.GestureDetector(
-                        content=self.card_historial, 
-                        on_tap=lambda _: self.fp_h.pick_files(allowed_extensions=["xlsx", "xls"]),
-                        mouse_cursor=ft.MouseCursor.CLICK,
-                    ),
-                    ft.GestureDetector(
-                        content=self.card_requerimientos, 
-                        on_tap=lambda _: self.fp_r.pick_files(allowed_extensions=["xlsx", "xls"]),
-                        mouse_cursor=ft.MouseCursor.CLICK,
-                    ),
-                ], spacing=20),
-                
-                ft.ExpansionTile(
-                    title=ft.Row([
-                        ft.Icon(ft.icons.ANALYTICS_OUTLINED, color=self.G360_ACCENT, size=20), 
-                        ft.Text("DASHBOARD DE LÍNEAS", size=14, weight=ft.FontWeight.BOLD, color="white")
-                    ], spacing=12),
-                    subtitle=ft.Text("Resumen comparativo del historial cargado", size=11, color=self.G360_TEXT_MUTED),
-                    initially_expanded=False,
-                    controls=[self.dashboard_card],
-                    bgcolor="transparent",
-                    collapsed_bgcolor="transparent",
-                    shape=ft.RoundedRectangleBorder(radius=18),
-                    text_color=self.G360_ACCENT,
-                    icon_color=self.G360_ACCENT,
-                ),
-                
-                ft.ExpansionTile(
-                    title=ft.Row([
-                        ft.Icon(ft.icons.TABLE_CHART_OUTLINED, color=self.G360_ACCENT, size=20), 
-                        ft.Text("VISTA PREVIA DE DATOS", size=14, weight=ft.FontWeight.BOLD, color="white")
-                    ], spacing=12),
-                    subtitle=ft.Text("Primeros 10 registros para validación rápida", size=11, color=self.G360_TEXT_MUTED),
-                    initially_expanded=False,
-                    controls=[self.preview_container],
-                    bgcolor="transparent",
-                    collapsed_bgcolor="transparent",
-                    shape=ft.RoundedRectangleBorder(radius=18),
-                    text_color=self.G360_ACCENT,
-                    icon_color=self.G360_ACCENT,
-                ),
-                
-                ft.Container(
-                    content=ft.Column([
-                        ft.Row([self.status], alignment=ft.MainAxisAlignment.CENTER),
-                        ft.Row([self.progress], alignment=ft.MainAxisAlignment.CENTER),
-                        ft.Row([self.btn_container], alignment=ft.MainAxisAlignment.CENTER),
-                        ft.Row([
-                            ft.Icon(ft.icons.INFO_OUTLINE, size=12, color=self.G360_TEXT_MUTED),
-                            ft.Text("Los cálculos se realizan sobre montos sin IGV.", size=11, italic=True, color=self.G360_TEXT_MUTED),
-                        ], alignment=ft.MainAxisAlignment.CENTER, spacing=5),
-                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=15),
-                    padding=ft.padding.only(top=20),
-                ),
-            ], scroll=ft.ScrollMode.AUTO, spacing=15),
-        )
-
-    def _build_ui(self):
-        sidebar = self._build_sidebar()
-        self.main_view = self._build_main_view()
-        self.body = ft.Container(expand=True, content=self.main_view)
-        self.consolidated_module = ConsolidatedReportsModule(self)
-        self.page.add(ft.Row([sidebar, ft.VerticalDivider(width=1), self.body], expand=True))
-
-    def _switch_to_nc(self):
-        """Vuelve a la vista principal de NC."""
-        self.sidebar_nc_indicator.visible = True
-        self.sidebar_consolidated_indicator.visible = False
-        self.body.content = self.main_view
-        self.body.update()
-        if hasattr(self, 'page'): 
-            self.page.update()
-
-    def _update_consolidated_button(self):
-        """Habilita/deshabilita el botón de consolidados según exista historial."""
-        if hasattr(self, 'sidebar_btn_consol_icon'):
-            self.sidebar_btn_consol_icon.disabled = self.current_processor is None
-            if hasattr(self, 'page'):
-                self.sidebar_btn_consol_icon.update()
-
-    def _switch_to_consolidated(self, e):
-        """Cambia a la vista de reportes consolidados."""
-        if not self.current_processor:
-            self.status.value = "Cargue un historial primero"
-            self.status.color = "orange"
-            self.page.update()
-            return
-        
-        # Actualizar indicadores del sidebar
-        self.sidebar_nc_indicator.visible = False
-        self.sidebar_consolidated_indicator.visible = True
-        
-        try:
-            self.consolidated_module.update_data(self.current_processor)
-            consolidado_view = self.consolidated_module.build()
-            self.body.content = consolidado_view
-            self.consolidated_module._update_dashboard()
-            self.consolidated_module._update_filtros_activos()
-            self.body.update()
-            self.status.value = "Reportes Consolidados"
-            self.status.color = self.G360_BLUE
-            self.page.update()
-        except Exception as ex:
-            import traceback
-            traceback.print_exc()
-            self.status.value = f"Error al abrir consolidados: {str(ex)}"
-            self.status.color = "red"
-            self.page.update()
-
 
 def main(page: ft.Page):
-    G360App(page)
+    print(
+        "Reconocimiento Comercial - CIPSA iniciado. Cierre la ventana de la aplicacion para salir.",
+        flush=True,
+    )
+    _log_inicio()
+
+    # Errores de render/eventos del cliente Flet -> run_log (antes se perdian y
+    # la ventana quedaba en blanco sin pista alguna)
+    def _on_flet_error(e):
+        _logger.error("FLET ERROR: %s", getattr(e, "data", e))
+
+    page.on_error = _on_flet_error
+
+    try:
+        globals()["_gapp_instance"] = G360App(page)
+        print("G360App creado exitosamente", flush=True)
+    except Exception as e:
+        print(f"FATAL al crear G360App: {e}", flush=True)
+        _logger.exception("FATAL al crear G360App")
+        raise
+
+    # Pre-calienta el catalogo de lineas (distinct_lineas tarda ~28s sobre la
+    # DB real) para que el modal de config abra al instante. Si la DB local
+    # está vacía (PC nueva), busca la DB fuente y propone la primera carga.
+    try:
+        from src.core import ventas_db
+
+        if ventas_db.db_exists() and ventas_db.db_is_populated():
+            ventas_db.refresh_lineas_async()
+            ventas_db.refresh_card_info_async()
+            ventas_db.refresh_stats_cache_async()
+        else:
+            _proponer_carga_inicial(page, globals()["_gapp_instance"])
+    except Exception:
+        _logger.exception("pre-warm de lineas fallo")
+
+
+def _flet_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("flet")
+    except Exception:
+        return "?"
+
+
+def _proponer_carga_inicial(page, app) -> None:
+    """Si la DB local está vacía y existe una DB fuente, sugiere la primera
+    carga (modal con ventana 5/10/todos años). Corrida en background para no
+    bloquear el arranque (buscar_db_remota comprueba rutas conocidas)."""
+
+    def worker():
+        try:
+            from src.core import ventas_db
+
+            if ventas_db.db_is_populated():
+                return
+            from src.core.db_network import buscar_db_remota
+
+            info = buscar_db_remota()
+            if not info:
+                return
+            view = getattr(app, "reco_view", None)
+            if view is None or not hasattr(view, "sugerir_carga_inicial"):
+                return
+            view.sugerir_carga_inicial(page, info)
+        except Exception:
+            _logger.exception("sugerencia de carga inicial falló")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _db_path_str() -> str:
+    try:
+        from src.core.ventas_db import db_path
+
+        return str(db_path())
+    except Exception:
+        return "?"
 
 
 if __name__ == "__main__":
-    # Configuración de puerto fijo para evitar WinError 10013 (Access Denied)
-    # El host 127.0.0.1 asegura que el socket sea puramente local.
-    ft.app(
-        target=main, 
-        view=ft.AppView.FLET_APP, 
-        assets_dir="assets",
-        host="127.0.0.1",
-        port=0
-    )
+    try:
+        if not _acquire_instance_lock():
+            msg = (
+                "Ya existe una instancia de la aplicacion en ejecucion.\n\n"
+                "Cierra la ventana abierta de G360 NC Sustentor (o el proceso "
+                "python.exe desde el Administrador de tareas) y vuelve a intentar."
+            )
+            print(msg, flush=True)
+            _logger.warning("Segundo arranque bloqueado (single instance)")
+            try:
+                # MessageBox grafica: visible aunque la consola este minimizada
+                import ctypes
+
+                ctypes.windll.user32.MessageBoxW(0, msg, "G360 NC Sustentor", 0x40)
+            except Exception:
+                input("Presione Enter para salir...")
+            sys.exit(0)
+        ft.app(
+            target=main,
+            view=ft.AppView.FLET_APP,
+            assets_dir="assets",
+            host="127.0.0.1",
+            port=0,
+        )
+    except Exception as e:
+        print(f"\n[FATAL] Error al iniciar la aplicacion: {e}", flush=True)
+        _logger.exception("FATAL al iniciar")
+        traceback.print_exc()
+        input("\nPresione Enter para salir...")

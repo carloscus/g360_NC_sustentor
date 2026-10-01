@@ -1,12 +1,12 @@
 """
-Endpoint local para alimentar g360-erp-nc-sustentor desde Supabase (g360-ventas-db).
+Endpoint local para alimentar g360-erp-nc-sustentor desde SQLite local (intranet CIPSA).
 
 Uso standalone:
     uvicorn src.api.supabase_endpoint:app --reload --port 8001
 
 Uso desde el sustentor (sin servidor):
-    from src.core.supabase_client import SupabaseVentasClient
-    df = SupabaseVentasClient().fetch_historial(id_cliente="00068414")
+    from src.core.ventas_db_client import VentasDbClient
+    df = VentasDbClient().fetch_historial(id_cliente="00068414")
 
 Endpoints expuestos (si se corre como API):
     GET  /retornos/validar-sku?id_articulo=02211
@@ -14,9 +14,8 @@ Endpoints expuestos (si se corre como API):
     GET  /retornos/facturas?id_cliente=..&id_articulo=..&limit=50
     POST /retornos/calcular  {id_cliente, id_articulo, cantidad_solicitada}
 """
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 try:
     from fastapi import FastAPI, Query, HTTPException
@@ -28,7 +27,7 @@ except ImportError:
     FastAPI = object  # type: ignore
     BaseModel = object  # type: ignore
 
-from src.core.supabase_client import SupabaseVentasClient
+from src.core.ventas_db_client import VentasDbClient
 
 app = FastAPI(title="g360-retornos API", version="1.0.0") if HAS_FASTAPI else None  # type: ignore
 
@@ -50,8 +49,9 @@ if HAS_FASTAPI:
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
-def _get_client() -> SupabaseVentasClient:
-    return SupabaseVentasClient()
+
+def _get_client() -> VentasDbClient:
+    return VentasDbClient()
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────
@@ -125,14 +125,18 @@ if HAS_FASTAPI:
         try:
             # Usar la vista Supabase directamente si está disponible
             # Fallback: lógica LIFO simple en Python
-            df = cli.fetch_historial(id_cliente=req.id_cliente, id_articulo=req.id_articulo, limit=50000)
+            df = cli.fetch_historial(
+                id_cliente=req.id_cliente, id_articulo=req.id_articulo, limit=50000
+            )
             if df.empty:
                 raise HTTPException(status_code=400, detail="Sin historial para cliente+SKU")
 
             # Agrupar por folio y calcular saldo (simplificado: sin NC totales aún)
             # Para la versión completa, consultar vw_facturas_disponibles
             try:
-                facturas = cli.fetch_facturas_disponibles(req.id_cliente, req.id_articulo, limit=200)
+                facturas = cli.fetch_facturas_disponibles(
+                    req.id_cliente, req.id_articulo, limit=200
+                )
                 if not facturas.empty and "saldo_disponible" in facturas.columns:
                     # Usar la vista con saldo ya calculado
                     facturas = facturas.sort_values("fecha_orig", ascending=False)
@@ -146,7 +150,9 @@ if HAS_FASTAPI:
                         if saldo <= 0:
                             continue
                         tomar = min(remaining, saldo)
-                        precio = float(row.get("precio_para_devolucion", row.get("precio_unitario", 0)))
+                        precio = float(
+                            row.get("precio_para_devolucion", row.get("precio_unitario", 0))
+                        )
                         subtotal = tomar * precio
                         total += subtotal
                         breakdown.append(
@@ -209,7 +215,9 @@ if HAS_FASTAPI:
                 remaining -= tomar
 
             if remaining > 0:
-                raise HTTPException(status_code=400, detail=f"Saldo insuficiente. Faltan {remaining}u")
+                raise HTTPException(
+                    status_code=400, detail=f"Saldo insuficiente. Faltan {remaining}u"
+                )
 
             return {
                 "cantidad_solicitada": req.cantidad_solicitada,
@@ -227,4 +235,4 @@ if HAS_FASTAPI:
     def health():
         cli = _get_client()
         ok, msg = cli.test_connection()
-        return {"ok": ok, "message": msg, "url": cli.url}
+        return {"ok": ok, "message": msg}

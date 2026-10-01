@@ -1,0 +1,88 @@
+{
+  "snippets": [
+    {
+      "name": "sustentor-read-erp",
+      "description": "Lectura centralizada de archivos ERP preservando ceros a la izquierda",
+      "language": "python",
+      "code": "from src.core.utils import read_erp_file\n\n# Lectura unica; dtype=str garantiza que SKU '011019' y '11019'\n# se conservan como strings distintos.\ndf = read_erp_file('historial.xlsx')  # soporta .xls/.xlsx/.xlsm/.csv"
+    },
+    {
+      "name": "sustentor-scan-erp",
+      "description": "Escanear un directorio de archivos ERP y detectar firma dgvVentas",
+      "language": "python",
+      "code": "from src.core.erp_scanner import ERPScanner, find_erp_files\nfrom pathlib import Path\n\nscanner = ERPScanner(min_score=60)\nresults = scanner.scan_directory(Path('./historiales'))\n\nfor f in scanner.get_valid_files(results):\n    print(f'{f.path.name}: {f.erp_type} (score={f.score}, {f.n_rows_estimate} filas, {f.n_unique_clients} clientes)')"
+    },
+    {
+      "name": "sustentor-normalize-erp",
+      "description": "Ingesta canonical del ERP con deteccion automatica de cabecera + mapa + tipos",
+      "language": "python",
+      "code": "from src.validation.normalization import NormalizationEngine\nfrom src.core.utils import read_erp_file\n\ndf = read_erp_file('dgvVentas.xlsx')\nengine = NormalizationEngine()\ndf_norm = engine.preparar_historial_erp(\n    df,\n    validar_columnas=True,           # raise ValueError si faltan cols criticas\n    omitidas_sink=[],                # lista donde se registran filas con FECHA NaT\n    reescribir_precio_unitario_cero=True,\n)\n# df_norm tiene: CODIGO, ARTICULO, FECHA (datetime64), CANTIDAD, SOLES, PRECIO_UNITARIO, ..."
+    },
+    {
+      "name": "sustentor-doc-id-split",
+      "description": "Separar TPO_DOC + SERIE + NUMERO preservando prefijo correctamente",
+      "language": "python",
+      "code": "from src.core.utils import split_doc_id, build_doc_full\n\n# Caso: el ERP trae 'F004' como serie (prefijo duplicado)\ntipo, serie, nro = split_doc_id('F', 'FF004', '100')\n# tipo = 'F', serie = '004' (prefijo duplicado eliminado), nro = '100'\n\ndoc_full = build_doc_full(tipo, serie, nro)  # 'F004-100'\n\n# Soporta vectorizado: pasa pd.Series para aplicar a todo el dataframe\ntipo_s, serie_s, nro_s = split_doc_id(df['TIPO_DOC'], df['SERIE'], df['NUMERO'])"
+    },
+    {
+      "name": "sustentor-clean-ids",
+      "description": "Limpiar campos ID preservando ceros a la izquierda (011019 != 11019)",
+      "language": "python",
+      "code": "from src.core.utils import clean_id_column, normalize_ids, ID_COLS_PRESERVE_ZEROS\n\n# Una sola columna:\nsku_clean = clean_id_column(df['CODIGO'])\n# -> '011019', '11019', '00456', ... (NO colapsa ni rellena)\n\n# DataFrame completo:\ndf_clean = normalize_ids(df)\n# Aplica clean_id_column a: CODIGO, TIPO_DOC, SERIE, NUMERO, COD_CLIENTE,\n#                            DOC_CLIENTE, COD_VENDEDOR, COD_SUCURSAL, ..."
+    },
+    {
+      "name": "sustentor-id-name-pairs",
+      "description": "Extraer pares unicos (id, nombre) deduplicados y ordenados",
+      "language": "python",
+      "code": "from src.core.data_dictionary import DataDictionary\n\n# Todos los clientes unicos del historial:\nclientes = DataDictionary.unique_clients(df)\n# -> [('C01', 'EMPRESA X'), ('C02', 'EMPRESA Y'), ...] (orden case-insensitive)\n\n# Tambien disponibles:\nskus = DataDictionary.unique_skus(df)        # (CODIGO, ARTICULO)\nvendors = DataDictionary.unique_vendors(df)  # (COD_VENDEDOR, VENDEDOR)\nbranches = DataDictionary.unique_branches(df)  # (COD_SUCURSAL, SUCURSAL)\n\n# Custom (ej. campo de transporte):\ntransportes = DataDictionary.get_id_name_pairs(\n    df, id_field='COD_TRANSP', name_field='NOM_TRANSP'\n)"
+    },
+    {
+      "name": "sustentor-dropdown-options",
+      "description": "Fabricar ft.dropdown.Option desde DataFrame respetando 'ID - NOMBRE'",
+      "language": "python",
+      "code": "from src.core.utils import build_dropdown_options\n\n# Crea lista de ft.dropdown.Option para un Dropdown de Flet.\nopts = build_dropdown_options(\n    df,\n    id_field='COD_CLIENTE',\n    name_field='CLIENTE',\n    label_field='CLIENTE',\n    max_options=200,\n)\ndropdown.options = opts\n# Cada Option muestra: 'C01 - EMPRESA XYZ S.A.' (formato ID - NOMBRE)"
+    },
+    {
+      "name": "sustentor-format-id-name",
+      "description": "Formatear ID - NOMBRE con reglas del DataDictionary",
+      "language": "python",
+      "code": "from src.core.utils import format_id_name\n\n# Compo site: 'C01 - EMPRESA XYZ'\ndisplay = format_id_name('C01', 'EMPRESA XYZ', field_name='CLIENTE')\n\n# Si falta ID -> solo nombre\ndisplay = format_id_name('', 'EMPRESA XYZ', field_name='CLIENTE')  # 'EMPRESA XYZ'\n\n# Si falta nombre -> solo ID\ndisplay = format_id_name('C01', '', field_name='CLIENTE')  # 'C01'\n\n# Labels declarados en DataDictionary.COMPOSITE_FIELDS:\n# 'SKU', 'LINEA', 'CLIENTE', 'VENDEDOR', 'SUCURSAL'"
+    },
+    {
+      "name": "sustentor-catalog-schema",
+      "description": "Cargar y consultar el catalogo tipado de procesos",
+      "language": "python",
+      "code": "from src.core.catalog_schema import ProcessSchemaRegistry\n\nregistry = ProcessSchemaRegistry.default()  # carga catalog/processes.yaml\n\n# Obtener un schema especifico:\nschema = registry.get('feria_preventa')\nprint(f'Estrategia: {schema.strategy}')\nprint(f'Required cols: {schema.template.columnas_requeridas}')\nprint(f'Header map: {schema.template.header_map}')\n\n# Buscar la variante default de una estrategia:\ndefault = registry.find_default_for_strategy('PriceDifference')\n\n# Validar consistencia:\nerrores = registry.validate_all()\nassert not errores, errores"
+    },
+    {
+      "name": "sustentor-pandas-precio-unitario",
+      "description": "Calcular PRECIO_UNITARIO vectorizado, manejo de division por cero",
+      "language": "python",
+      "code": "from src.core.utils import calcular_precio_unitario_df\n\n# Calcula PRECIO_UNITARIO = SOLES / CANTIDAD para cada fila\n# Maneja division por cero (devuelve 0 en vez de inf/NaN)\n# Redondea a 5 decimales.\ndf = calcular_precio_unitario_df(df)"
+    },
+    {
+      "name": "sustentor-pandas-groupby-venta",
+      "description": "Agregar ventas por cliente/SKU con cache y metodos puros",
+      "language": "python",
+      "code": "import pandas as pd\n\n# Venta por (cliente, SKU):\nventa = df.groupby(['COD_CLIENTE', 'CODIGO'], as_index=False).agg(\n    TotalSoles=('SOLES', 'sum'),\n    TotalCant=('CANTIDAD', 'sum'),\n    UltimaFecha=('FECHA', 'max'),\n)\n\n# Promedio ponderado de precio:\nventa['PrecioPromedio'] = venta['TotalSoles'] / venta['TotalCant']"
+    },
+    {
+      "name": "sustentor-flet-drop-zone",
+      "description": "Zona de drop Flet para arrastrar archivos ERP (dgvVentas)",
+      "language": "python",
+      "code": "import flet as ft\nfrom src.core.erp_scanner import ERPScanner\nfrom src.core.utils import read_erp_file\nfrom src.validation.normalization import NormalizationEngine\n\ndef drop_zone_handler(page, ruta_archivo):\n    scanner = ERPScanner(min_score=50)\n    info = scanner.analyze_file(ruta_archivo)\n    if info.is_valid:\n        page.snack_bar = ft.SnackBar(\n            content=ft.Text(f'ERP {info.erp_type}: {info.n_unique_clients} clientes, {info.n_unique_skus} SKUs'),\n        )\n        df = read_erp_file(ruta_archivo)\n        # normalizar y procesar\n        norm = NormalizationEngine()\n        df_norm = norm.preparar_historial_erp(df)\n    page.update()"
+    },
+    {
+      "name": "sustentor-validation-alerts",
+      "description": "Tipos de alertas estandard del dominio G360",
+      "language": "python",
+      "code": "from src.domain import BusinessAlert, CATALOGO_ALERTAS\n\n# El Sustentor tiene catalogadas las siguientes alertas (catalogo/CATALOGO_ALERTAS):\n# AL03: Precios variables en historial\n# AL04: Descuento excede 100%\n# AL06: SKU no encontrado en historial\n# AL08: SKU con descuentos repetidos en diferentes lotes\n# AL09: Sustentacion incompleta (faltan unidades)\n# AL10: Cantidad o descuento vacio / cero\n\nalerta = BusinessAlert(\n    codigo='AL09',\n    tipo='warning',\n    severidad='media',\n    sku='72014',\n    mensaje='Sustentadas 1152 de 1500, pendientes 348',\n    impacto=348 * 1.07,\n    motor='FeriaPreventa',\n)"
+    },
+    {
+      "name": "sustentor-allocation-engine",
+      "description": "Asignar facturas FIFO desde requerimientos (legacy + nuevo flujo)",
+      "language": "python",
+      "code": "from src.strategies.allocation import AllocationEngine\nfrom src.core.utils import read_erp_file\nfrom src.validation.normalization import NormalizationEngine\n\nhistorial = read_erp_file('historial.xlsx')\n# Normaliza usando el motor canonico\nhistorial = NormalizationEngine().preparar_historial_erp(historial)\n\nengine = AllocationEngine(\n    sort_mode='fecha_desc',\n    fecha_desde='2024-01-01',\n    fecha_hasta='2024-12-31',\n    forzar_cantidad=True,\n)\nitems, docs = engine.assign(requerimientos_df, historial)"
+    }
+  ]
+}

@@ -1,0 +1,364 @@
+# G360 Commercial Workspace - Catálogo de Procesos
+# Cada proceso define: estrategia, schema de columnas, validación, outputs permitidos
+
+diferencia_precio:
+  id: 1
+  nombre: "Diferencia de Precio"
+  descripcion: "Compara precio histórico vs precio base. Aplica descuentos si existen."
+  familia: precio
+  strategy: PriceDifference
+  template:
+    header_map:
+      CODIGO_SKU: SKU
+      PRECIO_BASE: PRECIO_BASE
+      PRECIO _LISTA: PRECIO_BASE
+      PRECIO_CORRECTO_SIN_IGV: PRECIO_BASE
+      PRECIOS: PRECIO_BASE
+      PRECIO_LISTA: PRECIO_BASE
+      UNIDADES_X_PRESENTACION: PRESENTACION
+    columnas_requeridas:
+      - SKU
+      - PRECIO_BASE
+    columnas_descuento:
+      pattern: "^DESC\\d+$"
+      min: 0
+      max: 20
+    columnas_opcionales:
+      - PRESENTACION
+    tipos:
+      SKU: string
+      PRECIO_BASE: float
+      PRESENTACION: { type: int, default: 1 }
+  config:
+    orden: ["fifo_desc", "fifo_asc"]
+  validation:
+    tolerancia_precio_neto: 0.01
+  outputs: ["excel_calculo", "informe_docx"]
+  # Bloque de nivel UI: define el ''caso'' (Caso de NC) que construye este proceso.
+  caso:
+    codigo: DC
+    label: "Diferencia de costo"
+    insumos: ["historico", "lista_precios"]
+    resultado: "NC"
+    legacy_types: ["diferencia_precio"]
+    strategy: diferencia_precio
+    modalidades: ["individual", "consolidado"]
+    historico_default:
+      facturas: [true, true]
+      nc: [true, false]
+      ndb: [true, false]
+
+descuento_precio:
+  id: 2
+  nombre: "Descuentos por SKU (Periodo)"
+  descripcion: "Aplica % descuento por SKU sobre precio histórico masivo."
+  familia: precio
+  strategy: PriceDifference
+  variant: discount_period
+  template:
+    header_map:
+      CODIGO_SKU: CODIGO
+      CODIGO: CODIGO
+      SKU: CODIGO
+      DESCUENTO_PORCENTAJE: DESCUENTO
+      DESCUENTO: DESCUENTO
+      DESC: DESCUENTO
+      DESCUENTO %: DESCUENTO
+      DESCUENTO%: DESCUENTO
+    columnas_requeridas:
+      - CODIGO
+      - DESCUENTO
+    columnas_opcionales: []
+    tipos:
+      CODIGO: string
+      DESCUENTO: { type: float, min: 0, max: 100 }
+  config:
+    modalidades: ["por_factura", "por_sku_periodo"]
+    orden: ["fifo_desc", "fifo_asc"]
+  outputs: ["excel_calculo", "informe_docx"]
+  caso:
+    codigo: DO
+    label: "Descuento comercial"
+    insumos: ["historico", "sku", "porcentaje"]
+    resultado: "NC"
+    legacy_types: ["descuento_precio", "descuento_factura"]
+    strategy: descuento_precio
+    modalidades: ["individual", "consolidado"]
+    historico_default:
+      facturas: [true, true]
+      nc: [true, false]
+      ndb: [true, false]
+
+bonificacion_promocion:
+  id: 3
+  nombre: "Promoción 12+1"
+  descripcion: "Calcula unidades bonificadas según mecánica (12+1, 48+1, etc.)"
+  familia: promocion
+  strategy: PromotionBonus
+  template:
+    header_map:
+      PRECIO_UNITARIO_SIN_IGV: PRECIO_UNITARIO
+      REGLA_PROMOCIONAL: REGLA
+      UNIDADES_X_PRESENTACION: PRESENTACION
+    columnas_requeridas:
+      - SKU
+      - PRECIO_UNITARIO
+    columnas_opcionales:
+      - REGLA
+      - PRESENTACION
+    tipos:
+      SKU: string
+      PRECIO_UNITARIO: float
+      REGLA: string
+  config:
+    mecanicas_disponibles: ["6+1", "12+1", "24+2", "48+1", "personalizado"]
+    nivel_calculo: ["sku", "linea"]
+  outputs: ["excel_calculo", "informe_docx"]
+  caso:
+    codigo: PROM
+    label: "Promoción / mecánica"
+    insumos: ["historico", "sku", "mecanica"]
+    resultado: "NC"
+    legacy_types: ["bonificacion_promocion"]
+    strategy: bonificacion_promocion
+    modalidades: ["consolidado"]
+    historico_default:
+      facturas: [true, true]
+      nc: [false, false]
+      ndb: [false, false]
+
+rebate_volumen:
+  id: 4
+  nombre: "Rebate por Meta"
+  descripcion: "Aplica % de rebate sobre total comprado si se alcanza objetivo."
+  familia: rebate
+  strategy: VolumeRebate
+  template:
+    header_map:
+      PORCENTAJE_REBATE: PORCENTAJE_REBATE
+      META_MONTO_SOLES: META_MONTO
+    columnas_requeridas:
+      - SKU
+      - PORCENTAJE_REBATE
+      - META_MONTO
+    tipos:
+      SKU: string
+      PORCENTAJE_REBATE: { type: float, min: 0, max: 100 }
+      META_MONTO: { type: float, min: 0 }
+  config:
+    nivel_calculo: ["sku", "linea", "cliente"]
+    aplicar_sobre: ["total_compra", "excedente_meta"]
+  outputs: ["excel_calculo", "informe_docx"]
+  caso:
+    codigo: CMV
+    label: "Concurso / meta de venta"
+    insumos: ["historico", "linea", "sku", "objetivo"]
+    resultado: "NC"
+    legacy_types: ["rebate_volumen"]
+    strategy: rebate_volumen
+    modalidades: ["consolidado"]
+    historico_default:
+      facturas: [true, true]
+      nc: [false, true]
+      ndb: [false, false]
+
+anular_factura:
+  id: 5
+  nombre: "Anular Factura"
+  descripcion: "Genera NC por el 100% del valor de una factura."
+  familia: anulacion
+  strategy: CancelInvoice
+  template:
+    columnas_requeridas: []
+    columnas_opcionales: []
+    tipos: {}
+  config:
+    requiere_historial: true
+    requiere_lista: false
+  outputs: ["excel_calculo", "informe_docx"]
+  caso:
+    codigo: ANF
+    label: "Anulación de factura"
+    insumos: ["historico"]
+    resultado: "NC 100%"
+    legacy_types: ["anular_factura"]
+    strategy: anular_factura
+    modalidades: ["individual"]
+    historico_default:
+      facturas: [true, true]
+      nc: [false, false]
+      ndb: [false, false]
+
+feria_preventa:
+  id: 6
+  nombre: "Feria / Preventa"
+  descripcion: "Asigna facturas de sustento en el orden elegido (LIFO por defecto)."
+  familia: ferias
+  strategy: FeriaPreventa
+  template:
+    header_map:
+      CODIGO_SKU: CODIGO
+      CANTIDAD_A_SUSTENTAR: CANTIDAD_NC
+      DESCUENTO_PORCENTAJE: PORCENTAJE_DESC
+    columnas_requeridas:
+      - CODIGO
+      - CANTIDAD_NC
+    columnas_opcionales:
+      - PORCENTAJE_DESC
+    tipos:
+      CODIGO: string
+      CANTIDAD_NC: int
+      PORCENTAJE_DESC: { type: float, default: 0 }
+  outputs: ["excel_sustento", "informe_docx"]
+  caso:
+    codigo: FPE
+    label: "Feria / preventa / evento"
+    insumos: ["historico", "sku", "cantidad", "porcentaje"]
+    resultado: "NC"
+    legacy_types: ["feria_preventa"]
+    strategy: feria_preventa
+    modalidades: ["individual", "consolidado"]
+    historico_default:
+      facturas: [true, true]
+      nc: [true, false]
+      ndb: [true, false]
+
+descuento_factura:
+  id: 8
+  nombre: "Descuento en Factura"
+  descripcion: "Aplica % descuento por SKU a una factura específica."
+  familia: precio
+  strategy: PriceDifference
+  variant: discount_invoice
+  template:
+    header_map:
+      CODIGO_SKU: CODIGO
+      CODIGO: CODIGO
+      SKU: CODIGO
+      DESCUENTO_PORCENTAJE: DESCUENTO
+      DESCUENTO: DESCUENTO
+      DESC: DESCUENTO
+      DESCUENTO %: DESCUENTO
+      DESCUENTO%: DESCUENTO
+    columnas_requeridas:
+      - CODIGO
+      - DESCUENTO
+    columnas_opcionales: []
+    tipos:
+      CODIGO: string
+      DESCUENTO: { type: float, min: 0, max: 100 }
+  config:
+    requiere_historial: true
+    requiere_lista: false
+    requiere_requerimientos: false
+  outputs: ["excel_calculo", "informe_docx"]
+
+diferencia_stock:
+  id: 9
+  nombre: "Reconocimiento por Stock / Cantidad Determinada"
+  descripcion: >-
+    Un solo archivo por SKU (CANTIDAD + PRECIO_BASE + cadena de descuentos).
+    El reparto contra facturas sigue sort_mode (FIFO/LIFO) y el exceso sobre
+    lo facturado alerta AL09. Un segundo archivo de solo cantidades pisa
+    las del archivo combinado.
+  familia: precio
+  strategy: CantidadDeterminada
+  template:
+    header_map:
+      SKU: CODIGO
+      CODIGO: CODIGO
+      CODIGO_SKU: CODIGO
+      CANTIDAD: CANTIDAD_NC
+      CANTIDAD_NC: CANTIDAD_NC
+      CANTIDAD_STOCK: CANTIDAD_NC
+      CANTIDAD_A_SUSTENTAR: CANTIDAD_NC
+      STOCK: CANTIDAD_NC
+      CANTIDAD_A_RECONOCER: CANTIDAD_NC
+      PRECIO_BASE: PRECIO_BASE
+      PRECIO_LISTA: PRECIO_BASE
+      PRECIOS: PRECIO_BASE
+      PRECIO _LISTA: PRECIO_BASE
+      PRECIO_CORRECTO_SIN_IGV: PRECIO_BASE
+    columnas_descuento:
+      pattern: "^DESC\\d+$"
+      min: 0
+      max: 1
+    columnas_requeridas:
+      - CODIGO
+      - PRECIO_BASE
+      - CANTIDAD_NC
+    columnas_opcionales:
+      - ARTICULO
+    tipos:
+      CODIGO: string
+      PRECIO_BASE: float
+      CANTIDAD_NC: { type: float, min: 0 }
+      ARTICULO: string
+  config:
+    orden: ["fecha_asc", "fecha_desc"]
+    modalidades: ["fifo", "lifo"]
+  validation:
+    tolerancia_precio_neto: 0.01
+  outputs: ["excel_calculo", "informe_docx"]
+  caso:
+    codigo: VRS
+    label: "Venta / reconocimiento de stock"
+    descripcion: >-
+      El cliente aún tiene stock comprado y el precio de lista bajó; se reconoce
+      la diferencia sobre ese stock. Un solo archivo por SKU con cantidad y precio.
+    insumos: ["historico", "lista_precios", "cantidad"]
+    resultado: "NC"
+    # `diferencia_cantidad` queda como alias oculto de VRS: expedientes y
+    # archetypes viejos siguen resolviendo al mismo motor (CantidadDeterminada).
+    legacy_types: ["diferencia_stock", "diferencia_cantidad"]
+    strategy: diferencia_stock
+    modalidades: ["individual", "consolidado"]
+    historico_default:
+      facturas: [true, true]
+      nc: [true, false]
+      ndb: [true, false]
+
+devolucion_fisica:
+  id: 10
+  nombre: "Devolución Física"
+  descripcion: >-
+    Asigna las unidades devueltas (LIFO) contra las facturas del mismo artículo y
+    valora al precio neto de la factura (descuentando las NC previas de esas
+    unidades).
+  familia: precio
+  strategy: DevolucionFisica
+  template:
+    header_map:
+      CODIGO_SKU: CODIGO
+      CODIGO: CODIGO
+      SKU: CODIGO
+      CANTIDAD_DEVUELTA: CANTIDAD
+      CANTIDAD: CANTIDAD
+      FECHA_DEVOLUCION: FECHA
+    columnas_requeridas:
+      - CODIGO
+      - CANTIDAD
+    columnas_opcionales:
+      - FECHA
+    tipos:
+      CODIGO: string
+      CANTIDAD: { type: float, min: 0 }
+      FECHA: string
+  config:
+    orden: ["fecha_asc", "fecha_desc"]
+  outputs: ["excel_calculo", "informe_docx"]
+  caso:
+    codigo: DF
+    label: "Devolución física"
+    descripcion: >-
+      Mercadería devuelta físicamente por el cliente; se reconoce su valor al
+      precio de la factura de la que salió, descontando las notas ya emitidas.
+    insumos: ["historico", "sku", "cantidad"]
+    resultado: "NC"
+    legacy_types: ["devolucion_fisica"]
+    strategy: devolucion_fisica
+    modalidades: ["individual", "consolidado"]
+    historico_default:
+      facturas: [true, true]
+      nc: [true, false]
+      ndb: [true, false]
