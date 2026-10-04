@@ -36,6 +36,7 @@ from src.render.g360_styles import (
 )
 from src.render.docx_renderer import DocxInformeRenderer
 from src.core.utils import resolve_output_path
+from src.core.fechas import fecha_ui
 from src.ui.catalog import (
     CATALOGO,
     build_expediente_id,
@@ -974,11 +975,11 @@ def _fecha_documento(df_historial, cliente, doc_ref) -> str:
             continue
         v = vals["FECHA"].dropna().iloc[0]
         if isinstance(v, _dt):
-            return v.strftime("%d/%m/%Y")
+            return fecha_ui(v)
         s = str(v).strip()
         for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S"):
             try:
-                return _dt.strptime(s, fmt).strftime("%d/%m/%Y")
+                return fecha_ui(_dt.strptime(s, fmt))
             except ValueError:
                 continue
         return s[:10]
@@ -1013,7 +1014,7 @@ def _periodo_de_df(df):
                     continue
     if not fechas:
         return None, None
-    return min(fechas).strftime("%d/%m/%Y"), max(fechas).strftime("%d/%m/%Y")
+    return fecha_ui(min(fechas)), fecha_ui(max(fechas))
 
 
 def _extract_ruc(df_datos):

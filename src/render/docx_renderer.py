@@ -10,6 +10,7 @@ from docx.oxml import OxmlElement
 from datetime import datetime
 from src.domain import RecognitionResult, ExpedienteComercial
 from src.core.utils import coerce_str
+from src.core.fechas import fecha_ui
 from src.ui.reconocimiento_config import NAMING
 from src.ui.catalog import CATALOGO
 from src.render.g360_styles import (
@@ -230,7 +231,7 @@ class DocxInformeRenderer:
         fldChar2 = OxmlElement("w:fldChar")
         fldChar2.set(qn("w:fldCharType"), "end")
         run._r.append(fldChar2)
-        run2 = p.add_run(f"  |  {datetime.now().strftime('%d/%m/%Y')}")
+        run2 = p.add_run(f"  |  {fecha_ui(datetime.now())}")
         run2.font.size = Pt(8)
         run2.font.color.rgb = GRAY
         run2.font.name = "Calibri"
@@ -403,7 +404,7 @@ class DocxInformeRenderer:
             ("Tipo de gestión", tipo_label),
             (
                 "Fecha de documento" if fecha_doc else "Fecha de elaboración",
-                fecha_doc or datetime.now().strftime("%d/%m/%Y"),
+                fecha_doc or fecha_ui(datetime.now()),
             ),
         ]
         for i, (campo, valor) in enumerate(campos):

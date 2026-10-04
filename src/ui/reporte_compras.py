@@ -9,12 +9,14 @@ la DB (devolucion/ajuste en negativo, nota de debito en positivo).
 """
 
 from __future__ import annotations
+from datetime import date, datetime
 
 import re
 
 import flet as ft
 import pandas as pd
 
+from src.core.fechas import excel_fmt_ui, fecha_ui
 from src.core.g360_theme import G360Theme
 from src.core.utils import EXCEL_FMT_UNIT_PRICE, cliente_visible
 
@@ -22,9 +24,10 @@ from src.core.utils import EXCEL_FMT_UNIT_PRICE, cliente_visible
 _RE_FN = re.compile(r"[^\w\s().&-]", re.UNICODE)
 
 # ── Geometría horizontal (px) ────────────────────────────────────────
-# Presupuesto con la ventana MÍNIMA (main.py: min_width=960):
-#   960 − 64 (padding vista 32+32) − 32 (card 16+16) − 16 (cuerpo 8+8)
-ANCHO_UTIL_MIN = 848
+# Presupuesto con la ventana MÍNIMA (main.py: min_width=950):
+#   950 − 64 (padding vista 32+32) − 32 (card 16+16) − 16 (cuerpo 8+8)
+# El caso que aprieta es la tabla de 8 líneas (790px): quedan 48px de holgura.
+ANCHO_UTIL_MIN = 838
 # Anchos aproximados de la tabla mes×línea (DataTable dimensiona por contenido)
 _ANCHO_COL_MES = 60
 _ANCHO_COL_LINEA = 70
@@ -74,16 +77,13 @@ def _mes_label(mes_ref: str) -> str:
 
 
 def _fecha_corta(fecha) -> str:
-    """'YYYY-MM-DD…' → 'dd-mm-aaaa' para mostrar en el reporte.
+    """'YYYY-MM-DD' -> 'dd-mm-yyyy' para mostrar en el reporte.
 
-    Convención: interno siempre ISO (YYYY-MM-DD); display con guiones.
+    La convención vive en `src/core/fechas.py` (interno ISO, display con
+    guiones); esta función queda como alias de compatibilidad.
     """
-    s = str(fecha or "").strip()[:10]
-    try:
-        anho, mes, dia = s.split("-")
-        return f"{dia}-{mes}-{anho}"
-    except Exception:
-        return s
+
+    return fecha_ui(fecha) or str(fecha or "").strip()[:10]
 
 
 def _mes_display(mm: str, anio: str) -> str:
@@ -166,7 +166,7 @@ def _construir_tabla(df) -> ft.DataTable:
                     ),
                     ft.Text(
                         nom,
-                        size=8,
+                        size=10,
                         color=G360Theme.text_muted_color(),
                         text_align=ft.TextAlign.CENTER,
                     ),
@@ -203,7 +203,7 @@ def _construir_tabla(df) -> ft.DataTable:
                             ),
                             ft.Text(
                                 f"{q:,.0f}",
-                                size=8,
+                                size=10,
                                 color=G360Theme.text_muted_color(),
                                 text_align=ft.TextAlign.RIGHT,
                             ),
@@ -229,7 +229,7 @@ def _construir_tabla(df) -> ft.DataTable:
                         ),
                         ft.Text(
                             f"{tq:,.0f}",
-                            size=8,
+                            size=10,
                             color=G360Theme.text_muted_color(),
                             text_align=ft.TextAlign.RIGHT,
                         ),
@@ -264,7 +264,7 @@ def _construir_tabla(df) -> ft.DataTable:
                         ),
                         ft.Text(
                             f"{tq:,.0f}",
-                            size=8,
+                            size=10,
                             color=G360Theme.text_muted_color(),
                             text_align=ft.TextAlign.RIGHT,
                         ),
@@ -287,7 +287,7 @@ def _construir_tabla(df) -> ft.DataTable:
                     ),
                     ft.Text(
                         f"{p['total_cant']:,.0f}",
-                        size=8,
+                        size=10,
                         weight=ft.FontWeight.W_600,
                         color=G360Theme.text_muted_color(),
                         text_align=ft.TextAlign.RIGHT,
@@ -484,6 +484,10 @@ def _x_bloque(ws, matriz, unidad_fmt, start_row, st, subtitulo=None):
                 if ci > 1 and isinstance(val, (int, float)):
                     c.number_format = unidad_fmt
                     c.alignment = Alignment(horizontal="right")
+                elif isinstance(val, (date, datetime)):
+                    # Fecha real: sin esto openpyxl la muestra en ISO
+                    # (yyyy-mm-dd) y la columna no ordena como fecha.
+                    c.number_format = excel_fmt_ui()
         r += 1
     return r, r_hdr
 
@@ -2154,13 +2158,13 @@ def _ajustes_fila(drow) -> tuple:
         afecta, pu_neto = "NO", "—"
     celdas = [
         str(drow.get("FACTURA", "")),
-        _fecha_corta(drow.get("F_FACT", "")) or "—",
+        _fecha_obj(drow.get("F_FACT", "")),
         str(drow.get("SKU", "")),
         str(drow.get("ARTICULO", ""))[:40],
         cant_fact,
         "—" if sfact is None else round(sfact, 2),
         str(drow.get("NC", "") or ""),
-        _fecha_corta(drow.get("FECHA_DOC", "")),
+        _fecha_obj(drow.get("FECHA_DOC", "")),
         motivo,
         cant_c,
         fae,
@@ -2198,7 +2202,7 @@ def _x_ajustes_huerfanas(ws, df_huerf, st, r):
         mat.append(
             [
                 str(drow.get("NC", "") or ""),
-                _fecha_corta(drow.get("FECHA_DOC", "")),
+                _fecha_obj(drow.get("FECHA_DOC", "")),
                 _motivo(drow.get("TIPO", "")),
                 ref or "—",
                 str(drow.get("SKU", "")),

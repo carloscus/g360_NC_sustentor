@@ -53,6 +53,7 @@ class TestCardInfoCache:
         conn = tmp_db.get_conn()
         ventas_db.insert_ventas(conn, sample_ventas[:1])
         ventas_db._CARD_INFO_CACHE["data"] = {"filas": 1, "resumen": "viejo"}
+        ventas_db._CARD_INFO_CACHE["path"] = str(ventas_db.db_path())
         ventas_db._CARD_INFO_CACHE["ts"] = time.time() - 9999
         t0 = time.perf_counter()
         info = ventas_db.db_card_info()
@@ -64,6 +65,21 @@ class TestCardInfoCache:
                 break
             time.sleep(0.1)
         assert ventas_db._CARD_INFO_CACHE["data"]["filas"] == 1
+
+    def test_cache_no_cruza_de_db(self, tmp_db, sample_ventas, monkeypatch, tmp_path):
+        # El cache va anotando de que DB salio. Si el data dir cambia, los KPIs
+        # cacheados son de otra base y hay que descartarlos: invalidar solo
+        # marca vencido (serve-stale), asi que se servian datos ajenos.
+        conn = tmp_db.get_conn()
+        ventas_db.insert_ventas(conn, sample_ventas[:1])
+        ventas_db.invalidate_card_info_cache()
+        assert ventas_db.db_card_info()["filas"] == 1
+
+        otra = tmp_path / "otra_db"
+        monkeypatch.setenv("G360_DATA_DIR", str(otra))
+        ventas_db.init_db()
+        ventas_db.invalidate_card_info_cache()
+        assert ventas_db.db_card_info()["filas"] == 0
 
 
 def _vista_fake(tipo_actual="DC"):

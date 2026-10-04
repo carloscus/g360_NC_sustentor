@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import flet as ft
 
+from src.core.fechas import fecha_ui
 from src.ui import reporte_compras as rc
 from src.ui.reporte_panel import ReportePanel
 from src.ui.widgets.cliente_picker import _clave_orden
@@ -53,7 +54,7 @@ class TestCard:
         assert p.state["clientes"] == [("00068414", "NESTLE")]
         assert p.state["vendedor"] == "01188"
         assert p.state["desde"] == desde and p.state["hasta"] == hasta
-        assert "01/08/2026" in p.desde_label.value
+        assert fecha_ui(desde) in p.desde_label.value  # dd-mm-yyyy, no dd/mm/yyyy
         assert len(p.cli_chips.controls) == 1
 
     def test_toggle_colapsa(self):
@@ -372,7 +373,7 @@ class TestControlFactory:
         from src.core.g360_theme import G360Theme
         from src.ui.widgets import control_factory as cf
 
-        on = cf.date_label("Desde: 01/01/2026", active=True)
+        on = cf.date_label("Desde: 01-01-2026", active=True)
         off = cf.date_label("Hasta: todas", active=False)
         assert on.color == G360Theme.accent_text_color()
         assert off.color == G360Theme.text_muted_color()
@@ -381,9 +382,9 @@ class TestControlFactory:
         from src.ui.widgets import control_factory as cf
 
         b = cf.search_button("Buscar cliente", "icon")
-        assert b.height == 32
+        assert b.height == cf.HEIGHT
         d = cf.date_button(lambda e: None, "Desde")
-        assert d.height == 32
+        assert d.height == cf.HEIGHT
 
     def test_panel_usa_la_fabrica(self):
         """Los filtros de la card de compras salen con el estilo compartido."""
@@ -392,16 +393,18 @@ class TestControlFactory:
         p = _panel()
         p.construir_card()
         assert p.vend_dd.border_radius == cf.RADIUS
-        assert p.btn_buscar_cli.height == 32
-        assert p.desde_label.size == 11
+        assert p.btn_buscar_cli.height == cf.HEIGHT
+        from src.core.g360_theme import G360Theme
+
+        assert p.desde_label.size == G360Theme.TYPE_BODY
 
 
 class TestGeometriaHorizontal:
     """Presupuesto horizontal con la ventana mínima (960 px)."""
 
     def test_presupuesto_minimo(self):
-        # 960 − 64 (vista 32+32) − 32 (card 16+16) − 16 (cuerpo 8+8)
-        assert rc.ANCHO_UTIL_MIN == 848
+        # 950 (main.py: min_width) − 64 (vista 32+32) − 32 (card 16+16) − 16 (cuerpo 8+8)
+        assert rc.ANCHO_UTIL_MIN == 838
 
     def test_tabla_hasta_8_lineas_cabe(self):
         for n in (1, 4, 8):
@@ -411,12 +414,27 @@ class TestGeometriaHorizontal:
         # Con 15 líneas excede el ancho: la fila tiene scroll horizontal
         assert rc.ancho_estimado_tabla(15) > rc.ANCHO_UTIL_MIN
 
-    def test_fila_vendedor_elastica_como_busqueda(self):
+    def test_fila_vendedor_mide_como_el_de_busqueda(self):
+        """Mismo ancho que el vendedor de Búsqueda: WIDTH_FILTER, no elástico.
+
+        Este test antes afirmaba `expand is True` con el comentario "igual que el
+        de Búsqueda: ocupa el ancho disponible", pero la premisa era falsa: el
+        de Búsqueda nunca fue elástico, tenía width=260. Los dos eran el mismo
+        control con medidas distintas.
+
+        Y "elástico" tampoco era lo que queremos: con expand cada dropdown se
+        estira a lo que sobre en SU card, y como las cards tienen anchos
+        distintos seguian viéndose distintos. Un ancho fijo si garantiza la
+        igualdad, que es lo que se pidió.
+        """
+        from src.ui.widgets import control_factory as cf
+
         p = _panel()
         p.construir_card()
-        # Igual que el vendor de Búsqueda: ocupa el ancho disponible
-        assert p.vend_dd.expand is True
-        assert p.vend_dd.width is None
+        assert p.vend_dd.width == cf.WIDTH_FILTER
+        assert p.vend_dd.expand is False
+        assert p.vend_dd.border_radius == cf.RADIUS
+        assert p.vend_dd.height is None  # ft.Dropdown no lleva height
 
     def test_chips_hojas_igual_cliente(self):
         """Chips de hojas con el mismo estilo que los chips de cliente."""

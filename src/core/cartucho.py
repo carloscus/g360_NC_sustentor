@@ -46,8 +46,6 @@ _CONFIG_SEGURAS = frozenset(
     {
         "allowed_lines",
         "app_retention_years",
-        "supabase_retention_years",
-        "supabase_retention_days",
         "auto_sync",
         "auto_daily_capture",
         "capture_times",

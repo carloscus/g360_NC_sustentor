@@ -3,7 +3,7 @@ import flet as ft
 import pandas as pd
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 _logger = logging.getLogger("g360.app")
@@ -108,7 +108,281 @@ def _correr_export_cartucho(
     return t
 
 
+def _rango_sync(dias: int = 90) -> tuple[str, str]:
+    """Ventana por defecto del sync: los ultimos `dias` dias.
+
+    Termina en la ultima fecha con data local (no en hoy) para no pedirle al
+    servidor un rango lleno de dias vacios, y si la DB esta vacia, hoy.
+    """
+    from src.core import ventas_db
+
+    info = ventas_db.db_health() or {}
+    hasta = str(info.get("fecha_max") or "")[:10] or datetime.now().strftime("%Y-%m-%d")
+    try:
+        f = datetime.strptime(hasta, "%Y-%m-%d")
+    except ValueError:
+        f = datetime.now()
+    return (f - timedelta(days=dias)).strftime("%Y-%m-%d"), f.strftime("%Y-%m-%d")
+
+
+def _msgs_sync_api(wake=None, res=None, sin_token=False, ex=None) -> tuple[str, bool]:
+    """(texto, ok) del estado del sync, para no duplicar los textos en la UI."""
+    if ex is not None:
+        return f"✗ Sync desde la API falló: {ex}", False
+    if sin_token:
+        return "✗ Sin token de API: conectate antes con usuario/clave.", False
+    if wake is not None and not wake.get("ok"):
+        return f"✗ API de ventas no disponible: {wake.get('detalle')}", False
+    if res is None:
+        return "", True
+    if wake and wake.get("arrancada"):
+        extra = f" · API despertada en WSL ({wake.get('segundos')}s)"
+    else:
+        extra = ""
+    if res.get("estado") == "sin_cambios":
+        return (
+            f"✓ API al día: sin cambios entre {res.get('desde')} y {res.get('hasta')} "
+            f"({res.get('segundos')}s){extra}",
+            True,
+        )
+    adelante = len(res.get("dias_local_adelantado") or [])
+    extra_local = f" · {adelante} días con data local adelantada" if adelante else ""
+    return (
+        f"✓ API: {res.get('filas', 0):,} filas en {len(res.get('dias') or [])} días "
+        f"({len(res.get('dias_desfasados') or [])} días desfasados, "
+        f"{res.get('folios_faltantes', 0)} folios nuevos, {res.get('segundos')}s)"
+        f"{extra}{extra_local}",
+        True,
+    )
+
+
+def _token_valido_para(cli, api_url: str, renovar: bool = False) -> str:
+    """Devuelve un token usable, renovandolo si el cacheado ya no sirve.
+
+    El token cacheado caduca (y ademas queda inservible cada vez que el API
+    se reinicia con otro secreto), asi que estar cacheado no significa estar
+    vigente. Contra un 401 se renueva con usuario/clave y se reintenta UNA vez:
+    si el 401 se repite, el problema no es el token.
+
+    `renovar=True` fuerza el login sin mirar el cache (para el reintento).
+
+    Levanta TokenInvalidoError si no hay forma de obtener uno.
+    """
+    from src.core.capture_service import CaptureService
+    from src.core.ventas_api_client import TokenInvalidoError
+
+    def _sin_token(msg):
+        return TokenInvalidoError(msg, status=401)
+
+    if renovar:
+        nuevo = _renovar_token()
+        if not nuevo:
+            raise _sin_token("el token de API caduco y no hay usuario/clave para renovarlo")
+        cli.set_token(nuevo)
+        return nuevo
+
+    tok = CaptureService.api_token() or _renovar_token()
+    if not tok:
+        raise _sin_token("sin token de API: conectate antes con usuario/clave")
+
+    cli.set_token(tok)
+    try:
+        cli.health()
+    except TokenInvalidoError:
+        nuevo = _renovar_token()
+        if not nuevo:
+            raise _sin_token(
+                "el token de API caduco y no hay usuario/clave para renovarlo"
+            ) from None
+        cli.set_token(nuevo)
+        return nuevo
+    return tok
+
+
+def _renovar_token() -> str:
+    """Login contra la API Go con las credenciales guardadas. "" si no puede."""
+    from src.core.capture_service import CaptureService
+
+    user, pwd = CaptureService.credentials()
+    if not (user and pwd):
+        return ""
+    CaptureService.refresh_api_token_best_effort(user, pwd)
+    return CaptureService.api_token()
+
+
+def _correr_sync_api(
+    status,
+    btn_sync,
+    app,
+    page,
+    api_url,
+    set_busy,
+    al_actualizar=None,
+    ventana_dias: int = 90,
+    wake=None,
+    cliente=None,
+    sync=None,
+    rango=None,
+    registrar=None,
+    token_valido=None,
+    al_final=None,
+) -> threading.Thread:
+    """Actualiza desde la API, despertando WSL primero si hace falta.
+
+    El servidor vive en WSL y se apaga con la distro, asi que el health check va
+    PRIMERO: si no responde, arranca la API y espera a que responda, y recien
+    ahi pide token y sincroniza. Todo corre en un thread de fondo con el boton
+    deshabilitado y rehabilitado siempre en un finally.
+
+    `wake`, `cliente`, `sync`, `rango`, `registrar` y `token_valido` se inyectan
+    para testear el flujo completo sin WSL, API ni credenciales reales.
+    Devuelve el Thread (join en tests).
+    """
+    wake = wake or (lambda url: _asegurar_api(url=url))
+    rango = rango or (lambda: _rango_sync(ventana_dias))
+    registrar = registrar or (lambda msg: None)
+    factory = cliente
+
+    def _nuevo_cliente():
+        nonlocal factory
+        if factory is None:
+            from src.core.ventas_api_client import VentaAPIClient
+
+            factory = lambda: VentaAPIClient(api_url, timeout=120.0)  # noqa: E731
+        return factory()
+
+    def _log(msg: str):
+        try:
+            registrar(msg)
+        except Exception:
+            pass
+
+    def _estado(texto: str, ok: bool):
+        status.value = texto
+        status.color = app.G360_SUCCESS if ok else app.G360_ERROR
+        _safe_update(page)
+
+    def _cerrar(texto: str, ok: bool):
+        """Ultima palabra del flujo: avisa aunque el flujo corte temprano.
+
+        Deja el texto en `status` SIEMPRE (el panel de intranet lo muestra) y
+        ademas llama a `al_final` si lo hay (la card de la ventana principal no
+        tiene linea de estado y usa snackbar). Sin esto, los `return` temprano
+        —API caida, sin token— dejarian al usuario mirando como desaparece el
+        overlay de carga sin explicacion.
+        """
+        _estado(texto, ok)
+        if al_final is None:
+            return
+        try:
+            al_final(texto, ok)
+        except Exception:
+            _logger.exception("al_final del sync API fallo")
+
+    def _sin_token():
+        _cerrar(*_msgs_sync_api(sin_token=True))
+
+    def _api_caida(info):
+        _cerrar(*_msgs_sync_api(wake=info))
+
+    btn_sync.disabled = True
+    status.value = "⏳ Verificando la API de ventas (WSL)..."
+    status.color = ft.Colors.ON_SURFACE_VARIANT
+    _safe_update(page)
+
+    def run():
+        cli = None
+        try:
+            from src.core.capture_service import CaptureService
+            from src.core.ventas_api_client import TokenInvalidoError
+
+            info = wake(api_url)
+            if not info.get("ok"):
+                _api_caida(info)
+                _log(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] API no disponible: "
+                    f"{info.get('detalle')}"
+                )
+                return
+            if info.get("arrancada"):
+                _log(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] API de ventas despertada "
+                    f"en WSL en {info.get('segundos')}s"
+                )
+
+            if token_valido:
+                cli = _nuevo_cliente()
+                cli.set_token(token_valido)
+            elif token_valido is not None:
+                # token_valido="" explicito (tests): no hay token, no hay cliente.
+                _sin_token()
+                return
+            else:
+                try:
+                    tok = CaptureService.api_token()
+                except Exception:
+                    tok = ""
+                if not tok:
+                    _sin_token()
+                    return
+                cli = _nuevo_cliente()
+                cli.set_token(_token_valido_para(cli, api_url))
+
+            desde, hasta = rango()
+            factory = cliente
+            if factory is None:
+                from src.core.ventas_api_client import VentaAPIClient
+
+                factory = lambda: VentaAPIClient(api_url, timeout=120.0)  # noqa: E731
+            set_busy(True)
+            try:
+                res = sync(cli, desde, hasta) if sync else _sync_por_defecto(cli, desde, hasta)
+            except TokenInvalidoError:
+                # El token pudo caducar entre la validacion y la descarga.
+                cli.set_token(_token_valido_para(cli, api_url, renovar=True))
+                res = sync(cli, desde, hasta) if sync else _sync_por_defecto(cli, desde, hasta)
+            finally:
+                set_busy(False)
+            texto, ok = _msgs_sync_api(wake=info, res=res)
+            _cerrar(texto, ok)
+            if ok and res.get("estado") != "sin_cambios" and al_actualizar:
+                al_actualizar(res)
+            _log(
+                f"[{datetime.now().strftime('%H:%M:%S')}] sync API {desde}→{hasta}: "
+                f"{res.get('filas', 0)} filas, "
+                f"{len(res.get('dias_desfasados') or [])} días desfasados, "
+                f"modo {res.get('modo')}, estado {res.get('estado')}"
+            )
+        except Exception as ex:  # noqa: BLE001 - se muestra al usuario
+            _cerrar(*_msgs_sync_api(ex=ex))
+        finally:
+            if cli is not None:
+                try:
+                    cli.close()
+                except Exception:
+                    pass
+            btn_sync.disabled = False
+            _safe_update(page)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+
+def _asegurar_api(url: str) -> dict:
+    from src.core.api_wake import asegurar_api
+
+    return asegurar_api(url=url)
+
+
+def _sync_por_defecto(cli, desde: str, hasta: str) -> dict:
+    from src.core.sync_api import SyncAPI
+
+    return SyncAPI(cli).aplicar(desde, hasta)
+
+
 from src.core.g360_theme import G360Theme, safe_handler
+from src.core.fechas import fecha_ui
 from src.core.utils import cliente_visible
 from src.core.ventas_db_client import VentasDbClient
 from src.core import ventas_db
@@ -140,22 +414,19 @@ class _ViewPanels:
 
         self.reporte_panel = ReportePanel(self.app, self)
 
-        self.tipo_dropdown = ft.Dropdown(
-            label="Tipo de caso",
+        self.tipo_dropdown = control_factory.dropdown(
+            "Tipo de caso",
             expand=True,
-            border_radius=12,
-            dense=True,
-            text_size=13,
             value=self.tipo_actual,
             on_change=self._on_tipo_change,
         )
         self._construir_tipo_selector()
 
-        self.lbl_historial = ft.Text("Ninguno", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.lbl_lista = ft.Text("Ninguno", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.lbl_historial = ft.Text("Ninguno", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.lbl_lista = ft.Text("Ninguno", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
         self.lbl_requerimientos_list = ft.Column([], spacing=4)
         self.lbl_requerimientos_count = ft.Text(
-            "Ninguno", size=11, color=ft.Colors.ON_SURFACE_VARIANT
+            "Ninguno", size=12, color=ft.Colors.ON_SURFACE_VARIANT
         )
 
         # Search state (inline)
@@ -194,13 +465,10 @@ class _ViewPanels:
         # Historico config checkboxes (ETapa B)
         self.historico_incluir_ctrls: dict[str, ft.Checkbox] = {}
         self.historico_calc_ctrls: dict[str, ft.Checkbox] = {}
-        self.factura_dropdown = ft.Dropdown(
-            label="Seleccionar Factura",
-            width=400,
+        self.factura_dropdown = control_factory.dropdown(
+            "Seleccionar Factura",
+            width=control_factory.WIDTH_FILTER,
             on_change=self._on_factura_selected,
-            border_radius=12,
-            dense=True,
-            text_size=13,
         )
 
         self.selector_ci = ClienteFacturaSelector(
@@ -212,11 +480,11 @@ class _ViewPanels:
         self.cliente_dropdown_ci = self.selector_ci.cliente_dropdown
         self.factura_dropdown_ci = self.selector_ci.factura_dropdown
 
-        self.fecha_desde = ft.TextField(
-            label="Desde (dd/mm/aaaa)", width=180, border_radius=12, text_size=13, dense=True
+        self.fecha_desde = control_factory.text_field(
+            "Desde (dd-mm-aaaa)", width=control_factory.WIDTH_DATE
         )
-        self.fecha_hasta = ft.TextField(
-            label="Hasta (dd/mm/aaaa)", width=180, border_radius=12, text_size=13, dense=True
+        self.fecha_hasta = control_factory.text_field(
+            "Hasta (dd-mm-aaaa)", width=control_factory.WIDTH_DATE
         )
         # Fila de período — se muestra solo sin fragmento (sin busqueda segmentada)
         self._periodo_row = ft.Row(
@@ -229,34 +497,30 @@ class _ViewPanels:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        self.mecanica_dropdown = ft.Dropdown(
-            label="Mecánica",
-            options=[
-                ft.dropdown.Option("12+1"),
-                ft.dropdown.Option("24+2"),
-                ft.dropdown.Option("48+1"),
-                ft.dropdown.Option("personalizado", "Personalizado"),
-            ],
+        self.mecanica_dropdown = control_factory.dropdown(
+            "Mecánica",
+            width=control_factory.WIDTH_FILTER,
             value="12+1",
-            width=250,
-            border_radius=12,
-            dense=True,
-            text_size=13,
             on_change=self._on_mecanica_change,
         )
-        self.mecanica_personalizada = ft.TextField(
-            label="Mecánica (ej: 10+2)",
-            width=200,
-            visible=False,
-            border_radius=12,
-            text_size=13,
-            dense=True,
+        self.mecanica_dropdown.options = [
+            ft.dropdown.Option("12+1"),
+            ft.dropdown.Option("24+2"),
+            ft.dropdown.Option("48+1"),
+            ft.dropdown.Option("personalizado", "Personalizado"),
+        ]
+        self.mecanica_personalizada = control_factory.text_field(
+            "Mecánica (ej: 10+2)",
+            width=control_factory.WIDTH_FILTER,
         )
+        self.mecanica_personalizada.visible = False
 
-        self.vendedor_dropdown = ft.Dropdown(
-            label="Vendedor",
-            width=400,
-            border_radius=15,
+        self.vendedor_dropdown = control_factory.dropdown(
+            "Vendedor",
+            icon=ft.Icons.PERSON_OUTLINED,
+            width=control_factory.WIDTH_FILTER,
+            search=True,
+            hint="Todos los vendedores…",
             on_change=self._on_vendedor_change,
         )
 
@@ -266,11 +530,11 @@ class _ViewPanels:
             show_factura=False,
         )
         self.cliente_dropdown_pd = self.selector_pd.cliente_dropdown
-        self.fecha_desde_pd = ft.TextField(
-            label="Desde (dd/mm/aaaa)", width=180, border_radius=15, text_size=13
+        self.fecha_desde_pd = control_factory.text_field(
+            "Desde (dd-mm-aaaa)", width=control_factory.WIDTH_DATE
         )
-        self.fecha_hasta_pd = ft.TextField(
-            label="Hasta (dd/mm/aaaa)", width=180, border_radius=15, text_size=13
+        self.fecha_hasta_pd = control_factory.text_field(
+            "Hasta (dd-mm-aaaa)", width=control_factory.WIDTH_DATE
         )
 
         self.chk_omitir_sin_dif = ft.Checkbox(
@@ -311,9 +575,7 @@ class _ViewPanels:
             dense=True,
         )
 
-        self.meta_monto = ft.TextField(
-            label="Meta (S/)", width=180, border_radius=12, text_size=13, dense=True
-        )
+        self.meta_monto = control_factory.text_field("Meta (S/)", width=control_factory.WIDTH_DATE)
         self.rebate_pct = ft.TextField(
             label="% Rebate", width=150, border_radius=12, text_size=13, dense=True
         )
@@ -406,13 +668,10 @@ class _ViewPanels:
         )
         self.cliente_dropdown_df = self.selector_df.cliente_dropdown
         self.factura_dropdown_df = self.selector_df.factura_dropdown
-        self.descuento_pct = ft.TextField(
-            label="% Descuento",
-            width=200,
-            border_radius=12,
-            text_size=13,
-            dense=True,
-            keyboard_type=ft.KeyboardType.NUMBER,
+        self.descuento_pct = control_factory.text_field(
+            "% Descuento",
+            width=control_factory.WIDTH_FIELD,
+            keyboard=ft.KeyboardType.NUMBER,
             on_change=self._on_descuento_pct_change,
         )
         self.selector_pb = ClienteFacturaSelector(
@@ -568,7 +827,7 @@ class _ViewPanels:
             column_spacing=15,
             heading_row_height=35,
             heading_row_color=ft.Colors.with_opacity(0.2, self.app.G360_ACCENT),
-            border_radius=15,
+            border_radius=G360Theme.RADIUS_CONTROL,
             horizontal_lines=ft.border.BorderSide(0.5, G360Theme.border_subtle_color()),
         )
         self._result_load_more_btn = ft.ElevatedButton(
@@ -863,7 +1122,7 @@ class _ViewPanels:
             rows.append(
                 ft.Row(
                     [
-                        ft.Text(label, size=11, expand=True, color=G360Theme.text_primary_color()),
+                        ft.Text(label, size=12, expand=True, color=G360Theme.text_primary_color()),
                         ft.Container(chk_incl, width=105),
                         ft.Container(chk_calc, width=105),
                     ],
@@ -920,19 +1179,12 @@ class _ViewPanels:
                             ),
                             ft.Column(
                                 [
-                                    ft.Text(
-                                        "Preparar expediente",
-                                        size=16,
-                                        weight=ft.FontWeight.W_700,
-                                        color=G360Theme.text_primary_color(),
-                                    ),
-                                    ft.Text(
-                                        "Define el caso, selecciona los datos y completa sus insumos.",
-                                        size=11,
-                                        color=G360Theme.text_muted_color(),
+                                    G360Theme.card_title("Preparar expediente"),
+                                    G360Theme.subtitle(
+                                        "Define el caso, selecciona los datos y completa sus insumos."
                                     ),
                                 ],
-                                spacing=2,
+                                spacing=G360Theme.SPACE_XS,
                                 expand=True,
                             ),
                         ],
@@ -978,10 +1230,8 @@ class _ViewPanels:
                         padding=ft.padding.only(top=4),
                     ),
                 ],
-                spacing=16,
+                spacing=G360Theme.SPACE_MD,
             ),
-            padding=20,
-            border_radius=14,
         )
 
         return ft.Column(
@@ -1028,7 +1278,7 @@ class _ViewPanels:
                 ),
                 ft.Text(
                     tipo_cfg.get("descripcion", "") or tipo_cfg.get("label", ""),
-                    size=11,
+                    size=12,
                     color=G360Theme.text_muted_color(),
                 ),
                 G360Theme.section_header(ft.Icons.APPS_OUTLINED, "Modalidad"),
@@ -1106,7 +1356,7 @@ class _ViewPanels:
         has_db = ventas_db.db_exists()
 
         self.lbl_red_status = ft.Text(
-            "Escaneando red...", size=11, color=ft.Colors.ON_SURFACE_VARIANT
+            "Escaneando red...", size=12, color=ft.Colors.ON_SURFACE_VARIANT
         )
         self.lst_red_results = ft.Column([], spacing=4, scroll=ft.ScrollMode.AUTO, expand=True)
         self.btn_red_copy = ft.ElevatedButton(
@@ -1129,7 +1379,7 @@ class _ViewPanels:
                             ft.Icon(ft.Icons.INFO_OUTLINED, size=16, color=G360Theme.ACCENT),
                             ft.Text(
                                 "¿Quieres compartir tu historial con un compañero?",
-                                size=11,
+                                size=12,
                                 weight=ft.FontWeight.W_600,
                             ),
                         ],
@@ -1205,7 +1455,7 @@ class _ViewPanels:
                             ft.Icon(
                                 ft.Icons.STORAGE_OUTLINED, size=16, color=G360Theme.accent_2_color()
                             ),
-                            ft.Text(entry.ip, size=11, weight=ft.FontWeight.W_600, expand=True),
+                            ft.Text(entry.ip, size=12, weight=ft.FontWeight.W_600, expand=True),
                             ft.Text(
                                 f"{size_mb:.1f} MB", size=10, color=G360Theme.text_muted_color()
                             ),
@@ -1334,16 +1584,63 @@ class _ViewPanels:
         on_open()
 
     def _panel_resumen(self, page):
-        """Pestaña de resumen (solo lectura). Abre con spinner y calcula en hilo:
-        db_card_info() usa caché serve-stale (TTL 300s + refresh en background)
-        y no debe bloquear el hilo UI."""
+        """Pestaña Estado: DB local + estado del servidor (API/snapshot/token).
+
+        db_card_info() usa caché serve-stale y no bloquea; el bloque servidor
+        lee ``api_robustness.state.ultimo_health`` (publicado por el health-check
+        de background): no hay llamadas de red desde el modal.
+        """
         import flet as ft
         from src.core import ventas_db
 
         def _render(info: dict):
+            # Bloque servidor: lee el estado publicado por el health-check de
+            # fondo (sin red). Así el modal nunca se colga piding HTTP.
+            from src.core.api_robustness.state import ultimo_health
+
+            h = ultimo_health()
+            if h is None:
+                srv_txt = "API: sin chequear todavía"
+                srv_color = G360Theme.text_muted_color()
+            elif not h.get("api_online"):
+                err = h.get("error") or "sin detalle"
+                srv_txt = f"API offline · {err[:60]}"
+                srv_color = G360Theme.error_color()
+            else:
+                horas = h.get("desfase_horas")
+                url = h.get("url") or ""
+                if horas is None:
+                    srv_txt = f"API OK · {url}"
+                    srv_color = G360Theme.ok_color()
+                elif horas > 24:
+                    srv_txt = f"API OK · snapshot viejo ({horas:.0f}h) · {url}"
+                    srv_color = G360Theme.error_color()
+                elif horas > 2:
+                    srv_txt = f"API OK · snapshot {horas:.0f}h · {url}"
+                    srv_color = G360Theme.warning_color()
+                else:
+                    srv_txt = f"API OK · snapshot fresco · {url}"
+                    srv_color = G360Theme.ok_color()
+
+            srv_block = ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Icon(ft.Icons.WIFI_OUTLINED, size=16, color=srv_color),
+                        ft.Text(srv_txt, size=12, color=srv_color, weight=ft.FontWeight.W_600),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=G360Theme.surface_variant_color(),
+                border_radius=10,
+                padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                border=ft.border.all(1, G360Theme.border_subtle_color()),
+            )
             if not info.get("exists") or not info.get("filas"):
                 return ft.Column(
                     [
+                        srv_block,
+                        ft.Container(height=10),
                         ft.Icon(ft.Icons.STORAGE, size=32, color=G360Theme.text_muted_color()),
                         ft.Text(
                             "Sin base de datos todavía",
@@ -1352,9 +1649,9 @@ class _ViewPanels:
                             weight=ft.FontWeight.W_600,
                         ),
                         ft.Text(
-                            "Usa la pestaña 'Intranet' para descargar tu historial o "
-                            "'Red' para copiar la de un compañero.",
-                            size=11,
+                            "Usa «Gestión» para importar un cartucho/USB o una DB de la red, "
+                            "o «Actualizar hoy» para llenar la ventana reciente desde la API.",
+                            size=12,
                             color=G360Theme.text_muted_color(),
                         ),
                     ],
@@ -1376,16 +1673,31 @@ class _ViewPanels:
             ]
             return ft.Column(
                 [
-                    ft.Row(
+                    srv_block,
+                    ft.Container(height=8),
+                    ft.Column(
                         [
-                            ft.Text(k, size=11, color=G360Theme.text_muted_color(), width=110),
-                            ft.Text(
-                                v, size=12, color=ft.Colors.ON_SURFACE, weight=ft.FontWeight.W_600
-                            ),
+                            ft.Row(
+                                [
+                                    ft.Text(
+                                        k,
+                                        size=12,
+                                        color=G360Theme.text_muted_color(),
+                                        width=110,
+                                    ),
+                                    ft.Text(
+                                        v,
+                                        size=12,
+                                        color=ft.Colors.ON_SURFACE,
+                                        weight=ft.FontWeight.W_600,
+                                    ),
+                                ],
+                                spacing=8,
+                            )
+                            for k, v in rows
                         ],
                         spacing=8,
-                    )
-                    for k, v in rows
+                    ),
                 ],
                 spacing=8,
             )
@@ -1394,12 +1706,17 @@ class _ViewPanels:
             content=ft.Row(
                 [
                     ft.ProgressRing(width=22, height=22, stroke_width=2),
-                    ft.Text("Calculando estado…", size=11, color=G360Theme.text_muted_color()),
+                    ft.Text("Calculando estado…", size=12, color=G360Theme.text_muted_color()),
                 ],
                 spacing=8,
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
             padding=12,
+            # `alignment` de ft.Container es un ft.Alignment (x/y), NO un
+            # MainAxisAlignment: el enum suelto hace reventar el
+            # EmbedJsonEncoder ("'mappingproxy' object has no attribute
+            # '__dict__'") y un string llega al cliente Dart como String donde
+            # espera Map. ft.alignment.center es Alignment(0, 0).
             alignment=ft.alignment.center,
         )
 
@@ -1432,7 +1749,7 @@ class _ViewPanels:
                 content=ft.Row(
                     [
                         ft.ProgressRing(width=18, height=18, stroke_width=2),
-                        ft.Text(msg, size=11, color=G360Theme.text_muted_color()),
+                        ft.Text(msg, size=12, color=G360Theme.text_muted_color()),
                     ],
                     spacing=8,
                     alignment=ft.MainAxisAlignment.CENTER,
@@ -1441,34 +1758,17 @@ class _ViewPanels:
                 alignment=ft.alignment.center,
             )
 
-        # Tabs reorganizados:
-        # 0=Estado, 1=Líneas, 2=Campos, 3=Gestión (fusiona fuentes+compartir), 4=Reportes
+        # Tabs: Estado (local+servidor), Filtro XLS (legacy), Campos, Gestión.
+        # (El placeholder "Reportes" se eliminó: nunca tuvo contenido real).
         built = {"resumen": False, "lineas": False, "campos": False, "gestion": False}
         tab_estado = ft.Tab(text="Estado", icon=ft.Icons.ASSESSMENT, content=_placeholder())
-        tab_lineas = ft.Tab(text="Líneas", icon=ft.Icons.CATEGORY_OUTLINED, content=_placeholder())
+        tab_lineas = ft.Tab(
+            text="Filtro XLS", icon=ft.Icons.CATEGORY_OUTLINED, content=_placeholder()
+        )
         tab_campos = ft.Tab(
             text="Campos", icon=ft.Icons.VIEW_COLUMN_OUTLINED, content=_placeholder()
         )
         tab_gestion = ft.Tab(text="Gestión", icon=ft.Icons.SOURCE_OUTLINED, content=_placeholder())
-        tab_reportes = ft.Tab(
-            text="Reportes",
-            icon=ft.Icons.INSIGHTS_OUTLINED,
-            content=ft.Container(
-                ft.Column(
-                    [
-                        ft.Text("Módulo de reportes en desarrollo.", size=12),
-                        ft.Text(
-                            "Próximamente: análisis de ventas, tendencias, etc.",
-                            size=11,
-                            color=G360Theme.text_muted_color(),
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    expand=True,
-                ),
-                padding=24,
-            ),
-        )
 
         def _ensure(idx):
             """Construye el panel de la pestaña activa (una sola vez)."""
@@ -1508,7 +1808,7 @@ class _ViewPanels:
             selected_index=tab_inicial,
             animation_duration=200,
             expand=True,
-            tabs=[tab_estado, tab_lineas, tab_campos, tab_gestion, tab_reportes],
+            tabs=[tab_estado, tab_lineas, tab_campos, tab_gestion],
             on_change=_on_tab_change,
         )
         dlg = ft.AlertDialog(
@@ -1557,7 +1857,7 @@ class _ViewPanels:
         entradas: list[tuple[str, str, str]] = []
 
         cajas: dict[str, tuple[ft.Checkbox, str]] = {}
-        status = ft.Text("", size=11, color=G360Theme.text_muted_color())
+        status = ft.Text("", size=12, color=G360Theme.text_muted_color())
 
         def actualizar_suma():
             n_sel = sum(1 for cb, _s in cajas.values() if cb.value)
@@ -1574,7 +1874,7 @@ class _ViewPanels:
                 [
                     ft.ProgressRing(width=16, height=16, stroke_width=2),
                     ft.Text(
-                        "Cargando líneas de la DB…", size=11, color=G360Theme.text_muted_color()
+                        "Cargando líneas de la DB…", size=12, color=G360Theme.text_muted_color()
                     ),
                 ],
                 spacing=8,
@@ -1686,12 +1986,9 @@ class _ViewPanels:
             filtro.value = ""
             actualizar_suma()
 
-        filtro = ft.TextField(
-            label="Filtrar / agregar código de línea",
-            dense=True,
-            text_size=12,
-            width=250,
-            border_radius=12,
+        filtro = control_factory.text_field(
+            "Filtrar / agregar código de línea",
+            width=control_factory.WIDTH_FILTER,
             on_submit=lambda e: agregar(e.control.value),
             on_change=lambda e: filtrar_live(e.control.value),
         )
@@ -1761,7 +2058,7 @@ class _ViewPanels:
             "perdido": G360Theme.error_color(),
         }
 
-        status = ft.Text("Auditando campos…", size=11, color=G360Theme.text_muted_color())
+        status = ft.Text("Auditando campos…", size=12, color=G360Theme.text_muted_color())
         tabla = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=180)
         contraste_out = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=100)
         oc_list = ft.Column(spacing=4, scroll=ft.ScrollMode.AUTO, height=110)
@@ -1796,8 +2093,8 @@ class _ViewPanels:
                 tabla.controls.append(
                     ft.Row(
                         [
-                            ft.Text(r["etiqueta"], size=11, width=150),
-                            ft.Text(f"{100.0 * r['cobertura']:.1f}%", size=11, width=80),
+                            ft.Text(r["etiqueta"], size=12, width=150),
+                            ft.Text(f"{100.0 * r['cobertura']:.1f}%", size=12, width=80),
                             ft.Text(
                                 "✓ " + r["indice"] if r["tiene_indice"] else "✗ " + r["indice"],
                                 size=10,
@@ -1810,7 +2107,7 @@ class _ViewPanels:
                             ),
                             ft.Text(
                                 v.upper(),
-                                size=11,
+                                size=12,
                                 weight=ft.FontWeight.W_600,
                                 color=COL_VER.get(v),
                                 expand=True,
@@ -1845,14 +2142,14 @@ class _ViewPanels:
             oc_list.controls.clear()
             if not pends:
                 oc_list.controls.append(
-                    ft.Text("Sin O/C en colisión.", size=11, color=G360Theme.success_color())
+                    ft.Text("Sin O/C en colisión.", size=12, color=G360Theme.success_color())
                 )
             for p in pends:
                 cid, norm = p["id_cliente"], p["norm"]
                 oc_list.controls.append(
                     ft.Row(
                         [
-                            ft.Text(f"{cid} · {norm} ({p['filas']} filas)", size=11, expand=True),
+                            ft.Text(f"{cid} · {norm} ({p['filas']} filas)", size=12,  expand=True),
                             ft.TextButton(
                                 "Confirmar",
                                 on_click=lambda _, c=cid, n=norm: _resolver(c, n, "confirmado"),
@@ -1882,7 +2179,7 @@ class _ViewPanels:
                 oc_list.controls.append(
                     ft.Text(
                         f"O/C pendientes no disponibles: {ex}",
-                        size=11,
+                        size=12,
                         color=G360Theme.error_color(),
                     )
                 )
@@ -1903,7 +2200,9 @@ class _ViewPanels:
                     )
                     _recargar_ocs()
                 except Exception as ex:
-                    self.app.show_snackbar(f"no se pudo resolver: {ex}", self.app.G360_ERROR)
+                    from src.ui.mensajes import mensaje
+
+                    self.app.show_snackbar(mensaje(ex, "resolver el cliente"), self.app.G360_ERROR)
 
             threading.Thread(target=_run, daemon=True).start()
 
@@ -1911,7 +2210,7 @@ class _ViewPanels:
             contraste_out.controls.clear()
             contraste_out.controls.append(
                 ft.Text(
-                    "Contrastando últimos 90 días…", size=11, color=G360Theme.text_muted_color()
+                    "Contrastando últimos 90 días…", size=12, color=G360Theme.text_muted_color()
                 )
             )
             _upd()
@@ -1928,7 +2227,7 @@ class _ViewPanels:
                         contraste_out.controls.append(
                             ft.Text(
                                 "Sin DB fuente visible: no se pudo contrastar.",
-                                size=11,
+                                size=12,
                                 color=G360Theme.warning_color(),
                             )
                         )
@@ -1940,7 +2239,7 @@ class _ViewPanels:
                                 f"origen {f['origen']:,} filas · "
                                 f"solo-local {rep['folios_solo_local']:,} · "
                                 f"solo-origen {rep['folios_solo_origen']:,}",
-                                size=11,
+                                size=12,
                                 color=G360Theme.text_muted_color(),
                             )
                         )
@@ -1949,15 +2248,15 @@ class _ViewPanels:
                             contraste_out.controls.append(
                                 ft.Row(
                                     [
-                                        ft.Text(c, size=11, width=150),
+                                        ft.Text(c, size=12, width=150),
                                         ft.Text(
                                             f"local {v['local']:,} / origen {v['origen']:,}",
-                                            size=11,
+                                            size=12,
                                             expand=True,
                                         ),
                                         ft.Text(
                                             "PIERDE" if pierde else "ok",
-                                            size=11,
+                                            size=12,
                                             weight=ft.FontWeight.W_600,
                                             color=(
                                                 G360Theme.error_color()
@@ -1973,18 +2272,122 @@ class _ViewPanels:
                 except Exception as ex:
                     contraste_out.controls.clear()
                     contraste_out.controls.append(
-                        ft.Text(f"contraste falló: {ex}", size=11, color=G360Theme.error_color())
+                        ft.Text(f"contraste falló: {ex}", size=12, color=G360Theme.error_color())
                     )
                     _upd()
 
             threading.Thread(target=_run, daemon=True).start()
 
-        btn_contraste = ft.ElevatedButton(
-            "Contrastar con origen (90 días)",
-            on_click=_contrastar,
+        def _contrastar_api(_):
+            contraste_out.controls.clear()
+            contraste_out.controls.append(
+                ft.Text(
+                    "Contrastando últimos 90 días contra la API…",
+                    size=12,
+                    color=G360Theme.text_muted_color(),
+                )
+            )
+            _upd()
+
+            def _run():
+                try:
+                    from src.core.api_auth import default_api_url
+                    from src.core.capture_service import CaptureService
+                    from src.core.ventas_api_client import VentaAPIClient
+
+                    token = CaptureService.api_token()
+                    if not (token and CaptureService.is_api_token_valid()):
+                        contraste_out.controls.clear()
+                        contraste_out.controls.append(
+                            ft.Text(
+                                "Sin token válido contra la API: abrí «Actualizar hoy» "
+                                "e iniciá sesión una vez; queda guardado 24h.",
+                                size=12,
+                                color=G360Theme.warning_color(),
+                            )
+                        )
+                        _upd()
+                        return
+                    cli = VentaAPIClient(base_url=default_api_url(), api_token=token)
+                    try:
+                        hasta = date.today().isoformat()
+                        desde = (date.today() - timedelta(days=89)).isoformat()
+                        rep = cli.contrast(desde, hasta)
+                    finally:
+                        cli.close()
+                    conn = ventas_db.connect(readonly=True)
+                    try:
+                        cur = conn.execute(
+                            "SELECT substr(fecha_orig,1,10), COUNT(*) FROM ventas "
+                            "WHERE fecha_orig >= ? AND fecha_orig < date(?, '+1 day') "
+                            "GROUP BY substr(fecha_orig,1,10)",
+                            (desde, hasta),
+                        )
+                        local_por_dia = {str(d): int(n) for d, n in cur}
+                    finally:
+                        conn.close()
+                    contraste_out.controls.clear()
+                    dias_api = rep.get("dias") or {}
+                    total_api = sum(int(v.get("filas", 0) or 0) for v in dias_api.values())
+                    total_local = sum(local_por_dia.values())
+                    contraste_out.controls.append(
+                        ft.Text(
+                            f"API vs local (90 días): {total_api:,} vs {total_local:,} filas",
+                            size=12,
+                            color=G360Theme.text_muted_color(),
+                        )
+                    )
+                    claves = sorted(set(dias_api) | set(local_por_dia))
+                    mala = 0
+                    for dia in claves:
+                        a = int(dias_api.get(dia, {}).get("filas", 0) or 0)
+                        l = local_por_dia.get(dia, 0)
+                        if a != l:
+                            mala += 1
+                            contraste_out.controls.append(
+                                ft.Row(
+                                    [
+                                        ft.Text(dia, size=12, width=110),
+                                        ft.Text(f"api {a:,} / local {l:,}", size=12, expand=True),
+                                        ft.Text(
+                                            "DIFERENCIA",
+                                            size=12,
+                                            weight=ft.FontWeight.W_600,
+                                            color=G360Theme.error_color(),
+                                        ),
+                                    ],
+                                    spacing=6,
+                                )
+                            )
+                    if not mala:
+                        contraste_out.controls.append(
+                            ft.Text("Sin diferencias.", size=12, color=G360Theme.success_color())
+                        )
+                    _upd()
+                except Exception as ex:
+                    contraste_out.controls.clear()
+                    contraste_out.controls.append(
+                        ft.Text(
+                            f"contraste con API falló: {ex}", size=12, color=G360Theme.error_color()
+                        )
+                    )
+                    _upd()
+
+            threading.Thread(target=_run, daemon=True).start()
+
+        btn_contraste_api = ft.ElevatedButton(
+            "Contrastar con la API (90 días)",
+            on_click=_contrastar_api,
             height=34,
-            tooltip="Compara cobertura por columna entre la DB local y la fuente: "
-            "detecta si una captura dejó de traer un campo",
+            style=ft.ButtonStyle(bgcolor=self.app.G360_ACCENT),
+            tooltip="Compara filas por día entre la DB local y la API Go. "
+            "Detecta si a la API le falta data sin bajar archivos.",
+        )
+        btn_contraste_archivo = ft.TextButton(
+            "Desde archivo (DB fuente)",
+            on_click=_contrastar,
+            tooltip="Compara cobertura por columna contra la DB del productor "
+            "en disco/red. Usa cuando la API esté offline.",
         )
 
         threading.Thread(target=worker_campos, daemon=True).start()
@@ -1996,7 +2399,11 @@ class _ViewPanels:
                 status,
                 tabla,
                 ft.Divider(height=8),
-                ft.Row([btn_contraste], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Row(
+                    [btn_contraste_api, btn_contraste_archivo],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    spacing=8,
+                ),
                 contraste_out,
                 ft.Divider(height=8),
                 ft.Text(
@@ -2009,7 +2416,7 @@ class _ViewPanels:
         )
 
     def _panel_gestion(self, page):
-        """Pestaña 'Gestión': cargar DB desde archivo o carpeta de red."""
+        """Pestaña 'Gestión': cargar DB desde servidor, archivo, red o cartucho."""
         import threading
         from pathlib import Path
 
@@ -2018,18 +2425,84 @@ class _ViewPanels:
         from src.core import ventas_db
         from src.core.db_network import get_db_info_quick
 
+        def descargar_base_canonica(_):
+            """Descarga la base canónica exportada por la API y valida antes de reemplazar.
+
+            Flujo: export_list() → latest → export_base_canonica(name) →
+            archivo temporal → mismo camino de validación/reemplazo que el
+            archivo local (mismo botón comp_box/btn_reemplazar).
+            """
+            status.value = "Listando bases en el servidor…"
+            status.color = self.app.G360_ACCENT
+            _safe_update(page)
+
+            def worker():
+                try:
+                    from src.core.api_auth import default_api_url
+                    from src.core.capture_service import CaptureService
+                    from src.core.ventas_api_client import VentaAPIClient
+
+                    token = CaptureService.api_token()
+                    if not (token and CaptureService.is_api_token_valid()):
+                        status.value = (
+                            "Sin token contra la API: abrí «Actualizar hoy» e iniciá "
+                            "sesión una vez; queda guardado 24h."
+                        )
+                        status.color = self.app.G360_WARNING
+                        _safe_update(page)
+                        return
+                    cli = VentaAPIClient(base_url=default_api_url(), api_token=token)
+                    try:
+                        listing = cli.export_list()
+                        snaps = listing.get("snapshots") or []
+                        if not snaps:
+                            status.value = (
+                                "El servidor no exportó aún ninguna base canónica "
+                                "(no hay base_canonica_*.db en export/)."
+                            )
+                            status.color = self.app.G360_WARNING
+                            _safe_update(page)
+                            return
+                        elegir = snaps[0]
+                        nombre = elegir.get("nombre") or elegir.get("Nombre")
+                        status.value = f"Descargando {nombre}…"
+                        _safe_update(page)
+                        data = cli.export_base_canonica(name=nombre)
+                    finally:
+                        cli.close()
+                    if not data:
+                        status.value = "Descarga vacía."
+                        status.color = self.app.G360_ERROR
+                        _safe_update(page)
+                        return
+                    tmp = ventas_db.data_dir() / "export" / "descargada_base_canonica.db"
+                    tmp.parent.mkdir(parents=True, exist_ok=True)
+                    tmp.write_bytes(data)
+                    mb = len(data) / (1024 * 1024)
+                    status.value = f"✓ {nombre} descargado ({mb:.1f} MB). Validando…"
+                    status.color = self.app.G360_SUCCESS
+                    _safe_update(page)
+                    _validar_archivo(str(tmp))
+                except Exception as ex:
+                    status.value = f"✗ Descarga falló: {ex}"
+                    status.color = self.app.G360_ERROR
+                    _safe_update(page)
+
+            threading.Thread(target=worker, daemon=True).start()
+
         elegida: dict = {"ruta": None, "info": None}
+
         comp_box = ft.Column(
             [
                 ft.Text(
                     "Selecciona un archivo historial.db.",
-                    size=11,
+                    size=12,
                     color=G360Theme.text_muted_color(),
                 ),
             ],
             spacing=4,
         )
-        status = ft.Text("", size=11, color=G360Theme.text_muted_color())
+        status = ft.Text("", size=12, color=G360Theme.text_muted_color())
         btn_reemplazar = ft.ElevatedButton(
             "Reemplazar DB local",
             height=36,
@@ -2061,7 +2534,7 @@ class _ViewPanels:
             src = _fmt_info(src_info)
             comp_box.controls.clear()
             comp_box.controls.append(
-                ft.Text(f"Archivo: {elegida['ruta']}", size=11, weight=ft.FontWeight.W_600)
+                ft.Text(f"Archivo: {elegida['ruta']}", size=12, weight=ft.FontWeight.W_600)
             )
             for etiqueta, k in (
                 ("Filas", "filas"),
@@ -2073,11 +2546,11 @@ class _ViewPanels:
                     ft.Row(
                         [
                             ft.Text(
-                                etiqueta, size=11, width=90, color=G360Theme.text_muted_color()
+                                etiqueta, size=12, width=90, color=G360Theme.text_muted_color()
                             ),
                             ft.Text(
                                 src[k],
-                                size=11,
+                                size=12,
                                 expand=True,
                                 weight=ft.FontWeight.W_600 if k == "integ" else None,
                             ),
@@ -2360,9 +2833,9 @@ class _ViewPanels:
                 dest = ventas_db.db_path()
 
                 # Dialogo modal de progreso (imposible de ignorar)
-                prog_status = ft.Text("Iniciando reemplazo...", size=11)
+                prog_status = ft.Text("Iniciando reemplazo...", size=12)
                 prog_bar = ft.ProgressBar(value=0, width=440, color=self.app.G360_ACCENT)
-                prog_log = ft.Text("", size=9, color=G360Theme.text_muted_color())
+                prog_log = ft.Text("", size=10, color=G360Theme.text_muted_color())
                 prog_done = threading.Event()
                 btn_close = ft.TextButton(
                     "Cerrar", disabled=True, on_click=lambda _: page.close(dlg_prog)
@@ -2463,7 +2936,7 @@ class _ViewPanels:
                         comp_box.controls.append(
                             ft.Text(
                                 "Selecciona un archivo historial.db.",
-                                size=11,
+                                size=12,
                                 color=G360Theme.text_muted_color(),
                             )
                         )
@@ -2523,10 +2996,9 @@ class _ViewPanels:
             hint_text="\\\\servidor\\compartido\\historial.db",
             height=40,
             expand=True,
-            text_size=11,
-        )
+            text_size=12, )
 
-        db_info_text = ft.Text("Cargando...", size=9, color=G360Theme.text_muted_color())
+        db_info_text = ft.Text("Cargando...", size=10, color=G360Theme.text_muted_color())
 
         def _load_db_info():
             try:
@@ -2567,11 +3039,46 @@ class _ViewPanels:
                 ft.Container(
                     content=ft.Column(
                         [
+                            G360Theme.section_header(
+                                ft.Icons.CLOUD_DOWNLOAD_OUTLINED, "DEL SERVIDOR"
+                            ),
+                            ft.Container(height=4),
+                            ft.Text(
+                                "Sin cartucho a mano: descarga la base canónica que "
+                                "la API exportó (online). Útil si pasaron meses sin "
+                                "actualizar o quieres una copia limpia.",
+                                size=10,
+                                color=G360Theme.text_muted_color(),
+                            ),
+                            ft.Container(height=6),
+                            ft.ElevatedButton(
+                                "Descargar base canónica del servidor…",
+                                height=32,
+                                icon=ft.Icons.CLOUD_DOWNLOAD_OUTLINED,
+                                on_click=descargar_base_canonica,
+                                style=ft.ButtonStyle(
+                                    bgcolor=G360Theme.with_opacity(0.15, self.app.G360_ACCENT),
+                                    color=self.app.G360_ACCENT,
+                                ),
+                            ),
+                        ],
+                        spacing=0,
+                        tight=True,
+                    ),
+                    bgcolor=G360Theme.surface_variant_color(),
+                    border_radius=12,
+                    padding=ft.padding.symmetric(horizontal=12, vertical=10),
+                    border=ft.border.all(1, G360Theme.border_subtle_color()),
+                ),
+                ft.Container(height=4),
+                ft.Container(
+                    content=ft.Column(
+                        [
                             G360Theme.section_header(ft.Icons.USB_OUTLINED, "ARCHIVO / USB"),
                             ft.Container(height=4),
                             ft.Text(
                                 "Busca un historial.db en tu disco o pendrive.",
-                                size=9,
+                                size=10,
                                 color=G360Theme.text_muted_color(),
                             ),
                             ft.Container(height=6),
@@ -2602,7 +3109,7 @@ class _ViewPanels:
                             ft.Container(height=4),
                             ft.Text(
                                 "Pega la ruta UNC de un historial.db compartido.",
-                                size=9,
+                                size=10,
                                 color=G360Theme.text_muted_color(),
                             ),
                             ft.Container(height=6),
@@ -2641,7 +3148,7 @@ class _ViewPanels:
                                 "el CARTUCHO.json o el historial.db suelto. "
                                 "Se valida solo, reemplaza si es más nuevo o trae "
                                 "lo que falta sin pisar nada.",
-                                size=9,
+                                size=10,
                                 color=G360Theme.text_muted_color(),
                             ),
                             ft.Container(height=6),
@@ -2666,7 +3173,7 @@ class _ViewPanels:
                             ft.Text(
                                 "Para llevar a otra PC: genera el .zip único "
                                 "(DB + sidecar + manifiesto).",
-                                size=9,
+                                size=10,
                                 color=G360Theme.text_muted_color(),
                             ),
                             ft.Container(height=6),
@@ -2724,6 +3231,26 @@ class _ViewPanels:
                     padding=ft.padding.symmetric(horizontal=12, vertical=10),
                     border=ft.border.all(1, G360Theme.border_subtle_color()),
                 ),
+                ft.Container(height=8),
+                # ── Modo avanzado: captura XLS por intranet ──
+                # LEGACY: el flujo XLS completo (login intranet + descarga lenta)
+                # se mantiene como fallback. Solo visible/promovido acá, fuera
+                # del camino principal; la card y «Actualizar hoy» van por API.
+                ft.Row(
+                    [
+                        ft.TextButton(
+                            "Modo avanzado (captura XLS por intranet)",
+                            icon=ft.Icons.MORE_HORIZ,
+                            style=ft.ButtonStyle(color=G360Theme.text_muted_color()),
+                            on_click=self._gestionar_datos,
+                            tooltip=(
+                                "Descargas lentas por intranet (formato XLS). "
+                                "Para el día a día usa «Actualizar hoy»."
+                            ),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
             ],
             spacing=6,
             tight=True,
@@ -2736,7 +3263,7 @@ class _ViewPanels:
         paso a paso visible aunque se cierre el dialog). Polling de CAPTURE_STATUS."""
         import flet as ft
 
-        self.strip_txt = ft.Text("", size=11, expand=True, weight=ft.FontWeight.W_500)
+        self.strip_txt = ft.Text("", size=12, expand=True, weight=ft.FontWeight.W_500)
         self.strip_pasos = ft.Text("", size=10, color=ft.Colors.ON_SURFACE_VARIANT)
         self.strip_bar = ft.ProgressBar(value=0, visible=False, expand=True, height=4)
         self.btn_strip_stop = ft.TextButton(
@@ -2862,89 +3389,147 @@ class _ViewPanels:
 
         threading.Thread(target=poll, daemon=True).start()
 
-    def _construir_card_db(self) -> ft.Container:
+    def _construir_card_db(self, async_: bool = False) -> ft.Container:
         """Card de estado SQLite con KPIs modernos estilo G360."""
         import flet as ft
 
-        self.card_db_kpis = ft.Column([], spacing=8)
-        self.card_db_status = ft.Text("", size=10, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.card_db_progress = ft.ProgressBar(value=0, height=4, border_radius=2, visible=False)
-        self.card_db_alerta = ft.Text("", size=10, color=ft.Colors.ORANGE_300)
+        try:
+            self.card_db_kpis = ft.Column([], spacing=8)
+            self.card_db_status = ft.Text(
+                "Calculando…",
+                size=12,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+                text_align=ft.TextAlign.CENTER,
+            )
+            self.card_db_alerta = ft.Text("", size=12, color=ft.Colors.ORANGE_300)
 
-        # Botones: "Actualizar hoy" es el acceso rapido diario (1 clic, sin modal);
-        # "Configuración de DB" unifica intranet/red/importar en un modal con pestañas.
-        self.btn_actualizar_hoy = G360Theme.ghost_button(
-            "Actualizar hoy",
-            icon=ft.Icons.UPDATE_OUTLINED,
-            on_click=self._actualizar_hoy,
-        )
-        self.btn_config = G360Theme.ghost_button(
-            "Configuración de DB",
-            icon=ft.Icons.SETTINGS_OUTLINED,
-            on_click=self._abrir_config_db,
-        )
+            self.btn_actualizar_hoy = G360Theme.ghost_button(
+                "Actualizar hoy",
+                icon=ft.Icons.CLOUD_SYNC,
+                on_click=self._actualizar_hoy,
+            )
+            self.btn_config = G360Theme.ghost_button(
+                "Configuración de DB",
+                icon=ft.Icons.SETTINGS_OUTLINED,
+                on_click=self._abrir_config_db,
+            )
 
-        self._refrescar_card_db()
+            self.card_db_kpis.controls = [
+                ft.Row(
+                    [
+                        ft.ProgressRing(
+                            width=16, height=16, stroke_width=2, color=G360Theme.accent_color()
+                        ),
+                        ft.Text(
+                            "Calculando estado de la base…",
+                            size=12,
+                            color=G360Theme.text_muted_color(),
+                        ),
+                    ],
+                    spacing=8,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                )
+            ]
 
-        return G360Theme.card(
-            ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Icon(
-                                ft.Icons.STORAGE_OUTLINED, size=18, color=G360Theme.accent_color()
-                            ),
-                            ft.Text(
-                                "Historial local",
-                                size=13,
-                                weight=ft.FontWeight.W_700,
-                                color=G360Theme.text_primary_color(),
-                            ),
-                            ft.Container(expand=True),
-                            self.card_db_status,
-                        ],
-                        spacing=8,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    ft.Text(
-                        "Estado y actualización de la base del ERP",
-                        size=10,
-                        color=G360Theme.text_muted_color(),
-                    ),
-                    ft.Container(
-                        content=self.card_db_kpis,
-                        padding=ft.padding.only(top=6, bottom=4),
-                    ),
-                    self.card_db_progress,
-                    self.card_db_alerta,
-                    ft.Row(
-                        [
-                            self.btn_actualizar_hoy,
-                            self.btn_config,
-                        ],
-                        spacing=8,
-                        alignment=ft.MainAxisAlignment.END,
-                        wrap=True,
-                    ),
-                ],
-                spacing=6,
-            ),
-            padding=16,
-            border_radius=14,
-        )
+            self._refrescar_card_db(async_=async_)
 
-    def _refrescar_card_db(self):
+            return G360Theme.card(
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(
+                                    ft.Icons.STORAGE_OUTLINED,
+                                    size=18,
+                                    color=G360Theme.accent_color(),
+                                ),
+                                G360Theme.card_title("Historial local"),
+                            ],
+                            spacing=G360Theme.SPACE_SM,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            # El cuerpo de la card ya va centrado (KPIs, alerta y
+                            # descripcion); el titulo se alineaba a la izquierda
+                            # y los botones a la derecha, y esa mezcla se leia
+                            # como descompensada.
+                            alignment=ft.MainAxisAlignment.CENTER,
+                        ),
+                        G360Theme.subtitle(
+                            "Estado y actualización de la base del ERP",
+                            align=ft.TextAlign.CENTER,
+                        ),
+                        ft.Container(
+                            content=self.card_db_status,
+                            visible=bool(self.card_db_status.value),
+                        ),
+                        ft.Container(
+                            content=self.card_db_kpis,
+                            padding=ft.padding.only(top=6, bottom=4),
+                        ),
+                        ft.Container(
+                            content=self.card_db_alerta,
+                            # Alignment, no MainAxisAlignment: este enum era el
+                            # unico motivo real del crash que tumbaba la UI
+                            # principal con "'mappingproxy' object has no
+                            # attribute '__dict__'".
+                            alignment=ft.alignment.center,
+                            visible=bool(self.card_db_alerta.value),
+                        ),
+                        ft.Row(
+                            [
+                                self.btn_actualizar_hoy,
+                                self.btn_config,
+                            ],
+                            spacing=8,
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            wrap=True,
+                        ),
+                    ],
+                    spacing=G360Theme.SPACE_SM,
+                ),
+            )
+        except Exception as exc:
+            import logging
+
+            logging.getLogger("g360.ui").exception("_construir_card_db fallo: %s", exc)
+            return ft.Container(
+                content=ft.Text(
+                    f"Card DB no disponible: {exc}", size=12, color=ft.Colors.ON_SURFACE_VARIANT
+                ),
+                padding=12,
+                border_radius=12,
+                bgcolor=G360Theme.surface_variant_color(),
+            )
+
+    # LEGADO EN ELIMINACION: `_sincronizar_desde_api` y `_mostrar_resultado_api`
+    # ﹣  borradas. El modal `ApiSyncModal` (ver _actualizar_hoy) es el único
+    #  camino: login + frescura + sync incremental en un solo flujo sobre
+    #  forticor HTTP.
+    #
+    # El flujo XLS/intranet completo (_panel_intranet, _gestionar_datos,
+    # _modal_login_intranet, _iniciar_descarga) se mantiene funcionando pero
+    # es accesible solo desde Configuración → Fuentes.
+
+    def _refrescar_card_db(self, async_: bool = False):
         """Actualiza los KPIs de la card DB."""
+        import logging
+
+        log = logging.getLogger("g360.ui.card_db")
+        if async_:
+            threading.Thread(
+                target=self._refrescar_card_db, kwargs={"async_": False}, daemon=True
+            ).start()
+            return
+
         try:
             from src.core import ventas_db
-            from src.core.capture_service import CaptureService
+            from src.core.fechas import rango_ui
 
             info = ventas_db.db_card_info()
+            log.debug("db_card_info=%s", info)
             status_text = ""
             status_color = ft.Colors.ON_SURFACE_VARIANT
 
             if not info.get("exists"):
-                # ── Sin DB ──
                 self.card_db_kpis.controls = [
                     ft.Row(
                         [
@@ -2955,167 +3540,167 @@ class _ViewPanels:
                                 color=G360Theme.text_muted_color(),
                             ),
                         ],
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        alignment=ft.MainAxisAlignment.CENTER,
                     ),
                 ]
                 self.card_db_status.value = "Primera vez · configura tu base de datos"
                 self.card_db_status.color = G360Theme.text_muted_color()
                 self.card_db_alerta.value = ""
+                self.card_db_alerta.color = ft.Colors.TRANSPARENT
                 self.btn_config.visible = True
-                self.btn_actualizar_hoy.visible = False
-                self.card_db_progress.visible = False
-                self._refrescar_card_db = lambda: None  # skip future updates
+                self.btn_actualizar_hoy.visible = True
                 self.card_db_kpis.update()
+                self.card_db_status.update()
+                self.card_db_alerta.update()
+                self.btn_config.update()
+                self.btn_actualizar_hoy.update()
                 return
 
             filas = info.get("filas", 0)
-            meses = info.get("meses", 0)
             fmax = info.get("fecha_max")
             fmin = info.get("fecha_min")
             dias_ultimo = info.get("dias_desde_ultimo")
             incompletos = info.get("incompletos", [])
             huecos = info.get("huecos", [])
-
-            # NC asociadas (ya viene en info: evita otra conexión+COUNT)
             nc_count = info.get("nc_asociadas", 0)
-
-            # KPIs — 2 filas: volumen arriba, entidades abajo
-            clientes = info.get("clientes", 0)
-            facturas = info.get("facturas", 0)
-            skus = info.get("skus", 0)
-            lineas_prod = info.get("lineas_prod", 0)
             _fila_kpis = []
 
             def _kpi_chip(icon, valor, color, label):
-                """Chip sintético: icono + valor grande + label."""
+                # Chip = tile metrica. Comparte radio, fondo, borde y escala
+                # de texto con resultados_view._metric_tile para que las dos
+                # surfaces de KPI se lean como la misma pieza.
                 return ft.Container(
                     content=ft.Column(
                         [
                             ft.Icon(icon, size=14, color=color),
-                            ft.Text(valor, size=18, weight=ft.FontWeight.W_700, color=color),
-                            ft.Text(label, size=9, color=G360Theme.text_muted_color()),
+                            ft.Text(
+                                valor,
+                                size=12,
+                                weight=ft.FontWeight.W_700,
+                                color=color,
+                            ),
+                            ft.Text(
+                                label, size=12, color=G360Theme.text_muted_color()
+                            ),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=2,
+                        spacing=G360Theme.SPACE_XS,
                     ),
                     padding=ft.padding.symmetric(horizontal=18, vertical=10),
-                    border_radius=12,
+                    border_radius=G360Theme.RADIUS_CONTROL,
                     bgcolor=G360Theme.surface_variant_color(),
                     border=ft.border.all(1, G360Theme.border_subtle_color()),
-                    expand=True,
                 )
 
-            # Fila 1 — Volumen
-            _fila_kpis.append(
-                ft.Row(
-                    [
-                        _kpi_chip(
-                            ft.Icons.TABLE_CHART_OUTLINED,
-                            f"{filas:,}",
-                            G360Theme.text_primary_color(),
-                            "Filas",
-                        ),
-                        _kpi_chip(
-                            ft.Icons.RECEIPT_OUTLINED,
-                            f"{facturas:,}",
-                            G360Theme.warning_color(),
-                            "Facturas",
-                        ),
-                        _kpi_chip(
-                            ft.Icons.CALENDAR_MONTH_OUTLINED,
-                            str(meses),
-                            G360Theme.accent_color(),
-                            "Meses",
-                        ),
-                    ],
-                    spacing=10,
-                    alignment=ft.MainAxisAlignment.START,
+            # La DB guarda ISO; en pantalla va dd-mm-yyyy (ver src/core/fechas.py).
+            cobertura = rango_ui(fmin, fmax) if fmin and fmax else "—"
+            chips = [
+                _kpi_chip(
+                    ft.Icons.DATE_RANGE_OUTLINED,
+                    cobertura,
+                    G360Theme.accent_color(),
+                    "Cobertura",
+                ),
+                _kpi_chip(
+                    ft.Icons.TABLE_CHART_OUTLINED,
+                    f"{filas:,}",
+                    G360Theme.text_primary_color(),
+                    "Filas",
+                ),
+            ]
+            if nc_count:
+                chips.append(
+                    _kpi_chip(
+                        ft.Icons.NOTE_ADD_OUTLINED,
+                        f"{nc_count:,}",
+                        G360Theme.error_color(),
+                        "NC asoc.",
+                    )
                 )
-            )
 
-            # Separador sutil
-            _fila_kpis.append(
-                ft.Divider(height=1, color=G360Theme.border_subtle_color(), thickness=1)
-            )
+            snap_txt, snap_color = self._chip_snapshot_txt()
+            chips.append(_kpi_chip(ft.Icons.CLOUD_SYNC_OUTLINED, snap_txt, snap_color, "Snapshot"))
 
-            # Fila 2 — Entidades
             _fila_kpis.append(
                 ft.Row(
-                    [
-                        _kpi_chip(
-                            ft.Icons.PEOPLE_OUTLINED,
-                            f"{clientes:,}",
-                            G360Theme.accent_2_color(),
-                            "Clientes",
-                        ),
-                        _kpi_chip(
-                            ft.Icons.INVENTORY_2_OUTLINED,
-                            f"{skus:,}",
-                            G360Theme.accent_3_color(),
-                            "SKUs",
-                        ),
-                        _kpi_chip(
-                            ft.Icons.CATEGORY_OUTLINED,
-                            str(lineas_prod),
-                            G360Theme.warning_color(),
-                            "Líneas",
-                        ),
-                        _kpi_chip(
-                            ft.Icons.NOTE_ADD_OUTLINED,
-                            f"{nc_count:,}" if nc_count else "—",
-                            G360Theme.error_color(),
-                            "NC asoc.",
-                        ),
-                    ],
+                    chips,
                     spacing=10,
-                    alignment=ft.MainAxisAlignment.START,
+                    alignment=ft.MainAxisAlignment.CENTER,
                 )
             )
 
             self.card_db_kpis.controls = _fila_kpis
             self.card_db_kpis.update()
 
-            # Status text
             if incompletos:
                 status_text = f"⚠ {len(incompletos)} mes(es) incompleto(s)"
                 status_color = G360Theme.warning_color()
             elif huecos:
                 status_text = f"⚠ {len(huecos)} mes(es) ausente(s)"
                 status_color = G360Theme.warning_color()
-            elif dias_ultimo and dias_ultimo <= 1:
+            elif dias_ultimo is not None and dias_ultimo <= 1:
                 status_text = "✓ Al día"
                 status_color = G360Theme.ok_color()
             else:
-                status_text = f"Datos: {fmin[:10]} → {fmax[:10]}"
+                status_text = f"Datos: {rango_ui(fmin, fmax, '  ')}"
                 status_color = ft.Colors.ON_SURFACE_VARIANT
 
             self.card_db_status.value = status_text
             self.card_db_status.color = status_color
 
-            # Alertas
             alerts = []
             if incompletos:
                 alerts.append(f"Incompletos: {', '.join(incompletos[:4])}")
             if huecos:
                 alerts.append(f"Ausentes: {', '.join(huecos[:4])}")
-            self.card_db_alerta.value = " · ".join(alerts)
-            self.card_db_alerta.color = G360Theme.warning_color() if alerts else "transparent"
+            self.card_db_alerta.value = " · ".join(alerts) if alerts else ""
+            self.card_db_alerta.color = (
+                G360Theme.warning_color() if alerts else ft.Colors.TRANSPARENT
+            )
 
-            # Buttons visibility
-            has_creds = CaptureService.has_credentials()
             self.btn_config.visible = True
-            self.btn_actualizar_hoy.visible = has_creds
-
-            # Progress
-            self.card_db_progress.visible = False
+            self.btn_actualizar_hoy.visible = True
 
             self.card_db_kpis.update()
             self.card_db_status.update()
             self.card_db_alerta.update()
             self.btn_config.update()
             self.btn_actualizar_hoy.update()
+            log.debug("refresh ok status=%s kpis=%s", status_text, len(self.card_db_kpis.controls))
+        except AssertionError:
+            # Flet lanza esto al pedir update() de un control que todavia no
+            # esta en la pagina, y en el build sincrono inicial es lo normal:
+            # la card se pinta sola al abrir. Antes se logueaba como
+            # exception con traceback en cada arranque.
+            log.debug("card DB: controles sin montar aun; se pintaran al abrir")
         except Exception:
-            pass
+            log.exception("refrescar_card_db fallo")
+
+    def _chip_snapshot_txt(self) -> tuple[str, object]:
+        """Texto + color del chip "Snapshot" del servidor, según el health-check."""
+        import logging
+
+        log = logging.getLogger("g360.ui.card_db")
+        try:
+            from src.core.api_robustness.state import ultimo_health
+
+            h = ultimo_health()
+            log.debug("snapshot health=%s", h)
+            if h is None:
+                return "—", G360Theme.text_muted_color()
+            if not h.get("api_online"):
+                return "offline", G360Theme.error_color()
+            horas = h.get("desfase_horas")
+            if horas is None:
+                return "ok", G360Theme.ok_color()
+            if horas > 24:
+                return f"viejo {int(horas)}h", G360Theme.error_color()
+            if horas > 2:
+                return f"{horas:.0f}h", G360Theme.warning_color()
+            return "ok", G360Theme.ok_color()
+        except Exception:
+            log.exception("chip snapshot fallo")
+            return "—", G360Theme.text_muted_color()
 
     def _construir_seccion_insumos(self, tipo_cfg: dict) -> ft.Column:
         """Sección de adjuntos externos y estado del historial seleccionado."""
@@ -3236,7 +3821,9 @@ class _ViewPanels:
                     for ruta in rutas:
                         self._agregar_insumo(ruta)
             except Exception as ex:
-                self.app.show_snackbar(f"Error: {ex}", self.app.G360_ERROR)
+                from src.ui.mensajes import mensaje
+
+                self.app.show_snackbar(mensaje(ex, "cargar los datos"), self.app.G360_ERROR)
             finally:
                 self.app.hide_loading()
                 if self.app.page:
@@ -3262,7 +3849,7 @@ class _ViewPanels:
                         ),
                         ft.Text(
                             "Aún no agregaste los archivos de apoyo.",
-                            size=11,
+                            size=12,
                             color=G360Theme.text_muted_color(),
                         ),
                     ]
@@ -3287,12 +3874,12 @@ class _ViewPanels:
                                 [
                                     ft.Text(
                                         f["lbl"],
-                                        size=11,
+                                        size=12,
                                         weight=ft.FontWeight.W_600,
                                         color=G360Theme.text_primary_color(),
                                         overflow=ft.TextOverflow.ELLIPSIS,
                                     ),
-                                    ft.Text(f["tipo"], size=9, color=G360Theme.text_muted_color()),
+                                    ft.Text(f["tipo"], size=10, color=G360Theme.text_muted_color()),
                                 ],
                                 spacing=1,
                                 expand=True,
@@ -3338,7 +3925,7 @@ class _ViewPanels:
         ]
         ncols = [
             ft.DataColumn(
-                ft.Text(c, size=9, weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE_VARIANT)
+                ft.Text(c, size=10, weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE_VARIANT)
             )
             for c in cols_show
         ]
@@ -3349,7 +3936,7 @@ class _ViewPanels:
                 val = r.get(c)
                 if c == "FECHA" and val:
                     try:
-                        val = pd.Timestamp(val).strftime("%d/%m/%Y") if not pd.isna(val) else ""
+                        val = fecha_ui(pd.Timestamp(val)) if not pd.isna(val) else ""
                     except Exception:
                         val = str(val)[:10]
                 elif c == "SOLES":
@@ -3358,7 +3945,7 @@ class _ViewPanels:
                     val = f"{float(val or 0):,.2f}" if val is not None else ""
                 else:
                     val = str(val) if val is not None else ""
-                cells.append(ft.DataCell(ft.Text(val, size=9)))
+                cells.append(ft.DataCell(ft.Text(val, size=10)))
             data_rows.append(ft.DataRow(cells=cells))
         return ft.DataTable(
             columns=ncols,
@@ -3388,7 +3975,7 @@ class _ViewPanels:
                             [
                                 ft.Text(
                                     "Historial aún no seleccionado",
-                                    size=11,
+                                    size=12,
                                     weight=ft.FontWeight.W_600,
                                     color=G360Theme.text_primary_color(),
                                 ),
@@ -3415,7 +4002,7 @@ class _ViewPanels:
                     ),
                     ft.Text(
                         "Historial local seleccionado",
-                        size=11,
+                        size=12,
                         weight=ft.FontWeight.W_600,
                         color=G360Theme.text_primary_color(),
                     ),
@@ -3447,7 +4034,7 @@ class _ViewPanels:
             self._detalle_docs: dict[str, dict] = {}
 
         def _fmt(d):
-            return d.strftime("%d/%m/%Y") if d else "todas"
+            return fecha_ui(d) if d else "todas"
 
         def _rango_str():
             """Rango activo como 'YYYY-MM-DD' (usado por pickers y búsqueda)."""
@@ -3477,9 +4064,12 @@ class _ViewPanels:
         # Sin expand: la fila de filtros usa wrap=True y un hijo expandido
         # dentro de un Wrap rompe el render (WrapParentData/FlexParentData).
         self.busq_vend_dd = control_factory.dropdown(
-            "Vendedor (opcional: filtra clientes)",
+            # Mismo label que el de Reporte de Compras: son el mismo control y
+            # se leen como el mismo. El "(opcional: filtra clientes)" no
+            # entraba en 260px y hacia que los dos se vieran distintos.
+            "Vendedor (opcional)",
             icon=ft.Icons.PERSON_OUTLINED,
-            width=260,
+            width=control_factory.WIDTH_FILTER,
             search=True,
             hint="Todos los vendedores…",
         )
@@ -3514,7 +4104,7 @@ class _ViewPanels:
         self.busq_fd_label = control_factory.date_label(f"Desde: {_fmt(self.busq_fd[0])}")
         self.busq_fh_label = control_factory.date_label(f"Hasta: {_fmt(self.busq_fh[0])}")
         self.busq_status = ft.Text(
-            "Selecciona vendedor", size=11, color=ft.Colors.ON_SURFACE_VARIANT
+            "Selecciona vendedor", size=12, color=ft.Colors.ON_SURFACE_VARIANT
         )
         self.busq_badges = ft.Row([], wrap=True, spacing=6, visible=False)
         self.busq_preview_tbl = ft.Container(
@@ -3668,7 +4258,7 @@ class _ViewPanels:
         # ── cascada vendedor → clientes ──
         def _on_vendedor(_):
             vid = self.busq_vend_dd.value
-            _logger.info("busq.vendedor.change vid=%r", vid)
+            _logger.debug("busq.vendedor.change vid=%r", vid)
             self._search_vend_id = vid
             vopt = next((o for o in self.busq_vend_dd.options if o.key == vid), None)
             nombre_txt = vopt.text if vopt and vopt.text else ""
@@ -3731,7 +4321,7 @@ class _ViewPanels:
                 if pinned:
                     _merge_pinned_clientes(cs, pinned)
                 cs.sort(key=lambda c: (c["id"] not in pinned, -c.get("docs", 0)))
-                _logger.info("busq.clientes.result n=%d", len(cs))
+                _logger.debug("busq.clientes.result n=%d", len(cs))
                 if cs:
                     self.busq_status.value = (
                         f"{len(cs)} clientes con ventas en el rango — agrega uno o varios"
@@ -3862,7 +4452,7 @@ class _ViewPanels:
                             content=ft.Row(
                                 [
                                     cb,
-                                    ft.Text(lbl, size=11, expand=True, color=ft.Colors.ON_SURFACE),
+                                    ft.Text(lbl, size=12, expand=True, color=ft.Colors.ON_SURFACE),
                                 ],
                                 spacing=6,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -3885,7 +4475,7 @@ class _ViewPanels:
 
             def _add_selected(_):
                 checked = [iid for iid in _state["sel"] if iid in _item_info]
-                _logger.info("picker_items.add_selected title=%r n=%d", title, len(checked))
+                _logger.debug("picker_items.add_selected title=%r n=%d", title, len(checked))
                 added = []
                 for iid in checked:
                     sel = getattr(self, sel_list_attr)
@@ -3915,7 +4505,7 @@ class _ViewPanels:
 
             # Cargar todos los items del cliente (sin paginación, son pocos)
             def _load_all():
-                _logger.info("picker_items.load_start title=%r", title)
+                _logger.debug("picker_items.load_start title=%r", title)
                 try:
                     items = fetch_fn(None, 999, 0)
                     _all_items.clear()
@@ -3943,7 +4533,7 @@ class _ViewPanels:
                 picker_status.value = f"{len(shown)} de {len(_all_items)} {title.lower()}(es)" + (
                     f" · filtrando: '{qq}'" if qq else ""
                 )
-                _logger.info("picker_items.filter title=%r q=%r n=%d", title, qq, len(shown))
+                _logger.debug("picker_items.filter title=%r q=%r n=%d", title, qq, len(shown))
                 _refresh_modal()
 
             def _on_modal_search(e):
@@ -4008,13 +4598,13 @@ class _ViewPanels:
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
-            _logger.info("picker_items.open title=%r", title)
+            _logger.debug("picker_items.open title=%r", title)
             try:
                 _load_all()
             except Exception:
                 _logger.exception("picker_items.prefill_failed title=%r", title)
             page.open(dlg)
-            _logger.info("picker_items.dialog_opened title=%r", title)
+            _logger.debug("picker_items.dialog_opened title=%r", title)
 
         def _abrir_picker_ordenes(_):
             _logger.info("picker_items.button ordenes sel_clientes=%d", len(self._sel_clientes))
@@ -4636,7 +5226,7 @@ class _ViewPanels:
             u_saved, _ = CaptureService.credentials()
             user_input.value = u_saved
 
-        login_status = ft.Text(mensaje_previo, size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        login_status = ft.Text(mensaje_previo, size=12, color=ft.Colors.ON_SURFACE_VARIANT)
         spinner = ft.ProgressRing(width=20, height=20, stroke_width=2, visible=False)
 
         btn_verificar = ft.ElevatedButton(
@@ -4706,7 +5296,8 @@ class _ViewPanels:
                         login_status.color = self.app.G360_ERROR
                     else:
                         CaptureService.save_credentials(u, p)
-                        login_status.value = f"✓ {msg}"
+                        api_suffix = CaptureService.refresh_api_token_best_effort(u, p)
+                        login_status.value = f"✓ {msg}{api_suffix}"
                         login_status.color = self.app.G360_SUCCESS
                         # Cerrar modal y continuar
                         page.close(dlg)
@@ -4726,15 +5317,35 @@ class _ViewPanels:
         btn_verificar.on_click = on_verify
 
     def _actualizar_hoy(self, e):
-        """Un clic: siempre abre modal login primero, luego descarga."""
+        """Un clic: abre el modal unificado de sincronización desde la API Go.
 
+        El modal orquesta login intranet → check de frescura → sync incremental.
+        Mantiene fallback a XLS/intranet disponible en Configuración → Fuentes.
+        """
         page = self.app.page
+        if page is None:
+            return
 
-        def on_login_success(user, pwd):
-            """Callback: login OK, ahora inicia la descarga."""
-            self._iniciar_descarga(page)
+        from src.ui.components.api_sync_modal import ApiSyncModal
 
-        self._modal_login_intranet(page, on_login_success)
+        modal = ApiSyncModal(app=self.app, page=page)
+
+        def _on_result(res):
+            if res.error:
+                self.app.show_snackbar(f"Sync falló: {res.error[:100]}", self.app.G360_ERROR)
+            elif res.filas > 0:
+                self.app.show_snackbar(
+                    f"✓ {res.filas:,} filas actualizadas en {res.segundos:.0f}s",
+                    self.app.G360_SUCCESS,
+                )
+                self._refrescar_card_db()
+            else:
+                self.app.show_snackbar(
+                    "Tu DB ya está al día con la API", ft.Colors.ON_SURFACE_VARIANT
+                )
+                self._refrescar_card_db()
+
+        modal.open(on_result=_on_result)
 
     def _iniciar_descarga(self, page):
         """Inicia la descarga desde el ultimo dato hasta hoy (post-login)."""
@@ -4746,9 +5357,9 @@ class _ViewPanels:
         self.btn_actualizar_hoy.disabled = True
         page.update()
 
-        status = ft.Text("Iniciando...", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        status = ft.Text("Iniciando...", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
         progress = ft.ProgressBar(value=0, visible=False, width=440)
-        log_ctl = ft.Text("", size=9, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=10)
+        log_ctl = ft.Text("", size=10, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=10)
         abort_flag = threading.Event()
         _last_ui2 = [0.0]
         _svc_activo2 = [None]
@@ -4897,7 +5508,7 @@ class _ViewPanels:
             )
         guia_txt = ft.Text(
             (_sync_hint + guia_texto).rstrip(),
-            size=11,
+            size=12,
             color=G360Theme.text_muted_color(),
         )
 
@@ -4921,7 +5532,7 @@ class _ViewPanels:
             password=True,
             can_reveal_password=True,
         )
-        login_status = ft.Text(mensaje_previo, size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        login_status = ft.Text(mensaje_previo, size=12, color=ft.Colors.ON_SURFACE_VARIANT)
         btn_conectar = ft.ElevatedButton(
             "🔌 Conectar y guardar",
             on_click=None,
@@ -4934,6 +5545,16 @@ class _ViewPanels:
             "🔄 Sincronizar DB fuente",
             on_click=None,
             tooltip="Copia el historial.db actualizado de la DB fuente (g360-db-ventas)",
+        )
+        btn_sync_api = ft.TextButton(
+            "☁ Actualizar desde API",
+            on_click=None,
+            tooltip=(
+                "Actualiza los últimos 90 días desde la API de ventas "
+                "(g360-ventas-api) y los escribe en la DB local. Si la API está "
+                "apagada, despierta WSL automáticamente. No necesita la DB fuente "
+                "ni descargar el XLS por intranet."
+            ),
         )
         dd_anyos = ft.Dropdown(
             label="Ventana",
@@ -4968,7 +5589,7 @@ class _ViewPanels:
                 ft.Row([user_input, pass_input], spacing=8),
                 login_status,
                 btn_conectar,
-                ft.Row([btn_sync_db], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Row([btn_sync_db, btn_sync_api], alignment=ft.MainAxisAlignment.CENTER),
                 ft.Row(
                     [dd_anyos, btn_sync_parcial], alignment=ft.MainAxisAlignment.CENTER, spacing=8
                 ),
@@ -4995,7 +5616,7 @@ class _ViewPanels:
             ],
             spacing=8,
         )
-        db_status = ft.Text("Calculando cobertura…", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        db_status = ft.Text("Calculando cobertura…", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
 
         def _fill_db_status():
             try:
@@ -5006,7 +5627,7 @@ class _ViewPanels:
                 _logger.exception("db_status fallo")
 
         threading.Thread(target=_fill_db_status, daemon=True).start()
-        cap_status = ft.Text("", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        cap_status = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
 
         # Botón único: continuar la descarga desde el último dato guardado hasta hoy
         btn_update = ft.ElevatedButton(
@@ -5125,7 +5746,8 @@ class _ViewPanels:
                     page.update()
                     return
                 CaptureService.save_credentials(u, p)
-                badge_conectado.controls[1].value = f"Conectado — {msg}"
+                api_suffix = CaptureService.refresh_api_token_best_effort(u, p)
+                badge_conectado.controls[1].value = f"Conectado — {msg}{api_suffix}"
                 db_status.value = _estado_db_txt()
                 btn_update.disabled = False
                 login_box.visible = False
@@ -5204,7 +5826,7 @@ class _ViewPanels:
                         ft.Text(
                             "La intranet es lenta (~1 min por mes). Puedes detener en cualquier momento "
                             "con el botón 'Detener'; lo ya descargado queda guardado en SQLite.",
-                            size=11,
+                            size=12,
                             color=ft.Colors.ON_SURFACE_VARIANT,
                         ),
                     ],
@@ -5375,6 +5997,34 @@ class _ViewPanels:
 
             threading.Thread(target=run, daemon=True).start()
 
+        def sincronizar_api(_):
+            """Sync incremental desde la API Go hacia la DB local.
+
+            Despierta WSL/API si hace falta, detecta los días desfasados por
+            checksum (filas + soles) y baja solo esos días. Reemplaza folio por
+            folio, así que no toca la DB fuente ni pasa por la descarga del XLS.
+            """
+            from src.core.api_auth import default_api_url
+
+            _correr_sync_api(
+                status=login_status,
+                btn_sync=btn_sync_api,
+                app=self.app,
+                page=page,
+                api_url=default_api_url(),
+                set_busy=set_busy,
+                al_actualizar=_datos_nuevos,
+                registrar=append_log,
+            )
+
+        def _datos_nuevos(_res):
+            """Refresca la UI solo si el sync trajo filas nuevas."""
+            db_status.value = _estado_db_txt()
+            _upd(db_status)
+            self._refrescar_card_db()
+            btn_update.disabled = False
+            descarga_box.visible = True
+
         def cargar_parcial(_):
             """Copia de la DB fuente solo la ventana elegida (5/10/todos años)."""
             sel = dd_anyos.value
@@ -5419,6 +6069,7 @@ class _ViewPanels:
 
         btn_conectar.on_click = conectar
         btn_sync_db.on_click = sincronizar
+        btn_sync_api.on_click = sincronizar_api
         btn_sync_parcial.on_click = cargar_parcial
         pass_input.on_submit = conectar
         btn_update.on_click = confirmar_actualizar
@@ -5481,7 +6132,7 @@ class _ViewPanels:
                 ft.dropdown.Option("all", "Todos"),
             ],
         )
-        status = ft.Text("", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        status = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
         btn = ft.ElevatedButton(
             "Cargar historial",
             height=38,

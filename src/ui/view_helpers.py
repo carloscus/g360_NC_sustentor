@@ -86,7 +86,7 @@ class _ViewHelpers:
         ncols = [
             ft.DataColumn(
                 ft.Text(
-                    h[:14], size=8, weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE_VARIANT
+                    h[:14], size=10, weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE_VARIANT
                 )
             )
             for h in headers[:8]
@@ -96,7 +96,7 @@ class _ViewHelpers:
             cells = []
             for val in r[:8]:
                 v = str(val)[:20] if val else ""
-                cells.append(ft.DataCell(ft.Text(v, size=8)))
+                cells.append(ft.DataCell(ft.Text(v, size=10)))
             data_rows.append(ft.DataRow(cells=cells))
         return ft.Container(
             content=ft.DataTable(
@@ -117,7 +117,7 @@ class _ViewHelpers:
     @staticmethod
     def _badge(texto: str, color: str) -> ft.Container:
         return ft.Container(
-            content=ft.Text(texto, size=9, weight=ft.FontWeight.W_700, color=color),
+            content=ft.Text(texto, size=10, weight=ft.FontWeight.W_700, color=color),
             padding=ft.padding.symmetric(horizontal=7, vertical=3),
             border_radius=6,
             bgcolor=G360Theme.with_opacity(0.12, color),

@@ -81,7 +81,7 @@ def abrir_picker_clientes(
             ft.Row(
                 [
                     ft.ProgressRing(width=16, height=16, stroke_width=2),
-                    ft.Text("Cargando clientes…", size=11, color=G360Theme.text_muted_color()),
+                    ft.Text("Cargando clientes…", size=12, color=G360Theme.text_muted_color()),
                 ],
                 spacing=8,
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -172,7 +172,7 @@ def abrir_picker_clientes(
                     content=ft.Row(
                         [
                             checks[cid],
-                            ft.Text(display, size=11, expand=True, color=ft.Colors.ON_SURFACE),
+                            ft.Text(display, size=12, expand=True, color=ft.Colors.ON_SURFACE),
                             _pin_btn(cid),
                         ],
                         spacing=6,
@@ -199,7 +199,7 @@ def abrir_picker_clientes(
                                 color=G360Theme.text_muted_color(),
                             ),
                             ft.Text(
-                                mensaje, size=11, color=G360Theme.text_muted_color(), expand=True
+                                mensaje, size=12, color=G360Theme.text_muted_color(), expand=True
                             ),
                         ],
                         spacing=10,
@@ -246,7 +246,7 @@ def abrir_picker_clientes(
                             ft.Icon(ft.Icons.ERROR_OUTLINE, size=18, color=G360Theme.error_color()),
                             ft.Text(
                                 "No se pudo cargar la lista. Reintenta la búsqueda.",
-                                size=11,
+                                size=12,
                                 color=G360Theme.error_color(),
                                 expand=True,
                             ),

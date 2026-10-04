@@ -256,10 +256,20 @@ class TestAuditoria:
         assert r["malformados"][0]["sugerencia"] is None
         conn.close()
 
+    @pytest.mark.real_db
     def test_sobre_la_db_local(self):
         """Guard contra la DB real: hoy no debe haber vendedores malformados."""
         if not ventas_db.db_exists():
             pytest.skip("no hay DB local")
+        conn = ventas_db.get_conn()
+        try:
+            tabla = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ventas'"
+            ).fetchone()
+        finally:
+            conn.close()
+        if not tabla:
+            pytest.skip("la DB local no tiene schema")
         r = ventas_db.auditar_vendedores()
         if r["malformados"]:
             detalle = ", ".join(

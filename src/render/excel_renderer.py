@@ -10,6 +10,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XlImage
 from src.domain import RecognitionResult, CATALOGO_ALERTAS
 from src.core.utils import EXCEL_FMT_NUMBER, EXCEL_FMT_CURRENCY, EXCEL_FMT_PCT
+from src.core.fechas import fecha_ui
 from src.render.g360_styles import (
     G360Styles,
     EXP_NAVY,
@@ -1094,7 +1095,7 @@ class ExcelRenderer(_CalculoWriter):
         # Fecha en la columna mas a la derecha disponible
         fecha_col = max(2, max_col)
         ws.cell(
-            row=r2, column=fecha_col, value=f"Fecha: {datetime.now().strftime('%d/%m/%Y')}"
+            row=r2, column=fecha_col, value=f"Fecha: {fecha_ui(datetime.now())}"
         ).font = Font(size=9, color=EXP_FAINT)
         ws.cell(row=r2, column=fecha_col).alignment = Alignment(horizontal="right")
 

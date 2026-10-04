@@ -898,6 +898,86 @@ class TestEstado:
         n2, tot2 = ventas_db.record_month_checksum(conn, "2024-01")
         assert n2 == n
 
+    def _row(self, mes_ref="2024-01", folio="F1", soles=100.0):
+        from src.core.xls_processor import derivar_campos
+
+        v = dict(
+            id_articulo="02211",
+            original_sku="02211",
+            nom_articulo="X",
+            id_linea="0101",
+            nom_linea="GASEOSAS",
+            id_grupo="01",
+            nom_grupo="G",
+            id_tipo="01",
+            nom_tipo="T",
+            id_familia="01",
+            nom_familia="F",
+            id_cliente="00068414",
+            doc_cliente="20100047218",
+            nom_cliente="CLIENTE DEMO SAC",
+            tpo_doc="F01",
+            serie_doc="012",
+            nro_doc=folio,
+            referencia="",
+            moneda="Soles",
+            cantidad=1.0,
+            cantidad_fae=0.0,
+            soles=soles,
+            dolares=0.0,
+            precio_unitario=soles,
+            anho=int(mes_ref[:4]),
+            mes=int(mes_ref[5:7]),
+            fecha_orig=mes_ref,
+            fecha_ref=None,
+            fecha_venc=None,
+            cod_sucursal="01",
+            nom_sucursal="LIMA",
+            departamento="LIMA",
+            provincia="LIMA",
+            distrito="SAN ISIDRO",
+            id_vendedor="01177",
+            nom_vendedor="VEND",
+            id_pedido="P1",
+            file_source="t",
+            mes_ref=mes_ref,
+            tipo_operacion="",
+            factura_ref_serie="",
+            factura_ref_nro="",
+            folio_unico=folio,
+        )
+        derivar_campos(v)
+        return v
+
+    def test_verify_integrity_acepta_checksum_del_productor(self, tmp_db):
+        """Los meses que bajan del productor traen su propio formato de checksum.
+
+        `verify_integrity` debe validar las cifras (total_filas/total_soles), no
+        la cadena: comparar el string marca drift un mes que esta integro.
+        """
+        conn = tmp_db.get_conn()
+        tmp_db.insert_ventas(conn, [self._row(soles=100.0)])
+        tmp_db.record_month_checksum(conn, "2024-01")
+        ok, drifts, sin = ventas_db.verify_integrity(conn)
+        assert ok and drifts == [] and sin == []
+
+        conn.execute(
+            "UPDATE mes_checksums SET checksum = '0000002c-03e8d4c8-00000000-00000000' "
+            "WHERE mes_ref = '2024-01'"
+        )
+        ok, drifts, sin = ventas_db.verify_integrity(conn)
+        assert ok, drifts
+
+    def test_verify_integrity_marca_drift_con_cifras_distintas(self, tmp_db):
+        conn = tmp_db.get_conn()
+        tmp_db.insert_ventas(conn, [self._row(folio="F1", soles=100.0)])
+        tmp_db.record_month_checksum(conn, "2024-01")
+        tmp_db.insert_ventas(conn, [self._row(folio="F2", soles=50.0)])
+        ok, drifts, sin = ventas_db.verify_integrity(conn)
+        assert not ok
+        assert [d[0] for d in drifts] == ["2024-01"]
+        assert drifts[0][1:] == (1, 2, 150.0)
+
 
 class TestCobertura:
     def test_months_coverage(self, populated_db):

@@ -31,10 +31,19 @@ def workflow_section(
         border_radius=10,
     )
     heading = [
-        ft.Text(title, size=13, weight=ft.FontWeight.W_700, color=G360Theme.text_primary_color()),
+        ft.Text(
+            title,
+            size=G360Theme.TYPE_SECTION,
+            weight=ft.FontWeight.W_700,
+            color=G360Theme.text_primary_color(),
+        ),
     ]
     if description:
-        heading.append(ft.Text(description, size=10, color=G360Theme.text_muted_color()))
+        # Bajada: 11 y tintada desde el acento, no 10 gris. En gris se leía
+        # como texto suelto y el título no se sostenía.
+        heading.append(
+            ft.Text(description, size=G360Theme.TYPE_SUBTITLE, color=G360Theme.subtitle_color())
+        )
     controls = [
         ft.Row(
             [
@@ -49,4 +58,6 @@ def workflow_section(
     ]
     if divider:
         controls.append(ft.Divider(height=1, color=G360Theme.border_subtle_color()))
-    return ft.Column(controls, spacing=10, tight=True)
+    # Más aire arriba del encabezado que abajo: es lo que separa una sección de
+    # la anterior sin besoin de una caja alrededor.
+    return ft.Column(controls, spacing=G360Theme.SPACE_SM, tight=True)

@@ -88,8 +88,36 @@ class G360Theme:
 
     SHADOW_COLOR = ft.Colors.with_opacity(0.06, ft.Colors.BLACK)
     SHADOW_BLUR = 20
-    CARD_RADIUS = 18
-    BTN_RADIUS = 12
+
+    # ── Escalas ──────────────────────────────────────────────────────────────
+    # Antes estas medidas vivian como literales sueltos en las vistas (11 radios,
+    # 16 spacings, 18 tamanos de texto). Se declaran aqui para que "12" signific
+    # una sola cosa. Rango de radio de card 12-16: el radio de card va en 14.
+    SPACE_XS = 4  # gap dentro de un par (label + valor)
+    SPACE_SM = 8  # gap entre items de un grupo
+    SPACE_MD = 12  # gap entre sub-bloques
+    SPACE_LG = 16  # padding interno de card
+    SPACE_XL = 24  # separacion entre secciones
+
+    RADIUS_CHIP = 10  # chips, tiles metricas, inset compacto
+    RADIUS_CONTROL = 12  # inputs, botones, contenedores de lista
+    RADIUS_CARD = 14  # card
+    RADIUS_PILL = 999  # badges y pills (se recortan con el alto)
+
+    TYPE_KPI = 18  # valor numerico destacado
+    TYPE_TITLE = 16  # titulo de card (subió desde 14: paso de 1px no jerarquiza)
+    TYPE_SECTION = 13  # header de seccion dentro de una card
+    TYPE_BODY = 12  # texto corriente
+    TYPE_SUBTITLE = 11  # bajada: la línea que explica el titulo
+    TYPE_SMALL = 10  # metadato
+    TYPE_MICRO = 10  # el piso: 8/9 quedan vetados en Flet (ilegibles)
+
+    BTN_HEIGHT = 36  # boton estandar
+    BTN_HEIGHT_SM = 32  # boton compacto / en toolbar
+    BTN_HEIGHT_XS = 28  # chevron / disclosure
+
+    CARD_RADIUS = RADIUS_CARD
+    BTN_RADIUS = RADIUS_CONTROL
 
     _is_dark = True
 
@@ -149,6 +177,84 @@ class G360Theme:
         """Azul para texto pequeño (labels, ghost buttons): ≥4.5:1 en card."""
         return cls.ACCENT_TEXT if cls._is_dark else cls.ACCENT_LIGHT
 
+    # ── Helpers de jerarquía ──────────────────────────────────────────────────
+    # Antes cada título se escribía a mano con su propio size (12, 13, 14, 16,
+    # 18 convivían como "título") y la bajada iba en 10 gris. Resultado: cards
+    # con el título del mismo tamaño que el cuerpo, que es indistinguible.
+    # Estos helpers hacen la diferencia explícita y en un solo lugar.
+
+    @classmethod
+    def card_title(cls, text: str, icon=None):
+        """Título de card. W_700 y TYPE_TITLE (16): 3px sobre la sección."""
+        import flet as ft
+
+        return ft.Text(
+            text,
+            size=cls.TYPE_TITLE,
+            weight=ft.FontWeight.W_700,
+            color=cls.text_primary_color(),
+        )
+
+    @classmethod
+    def subtitle(cls, text: str, align=None):
+        """Bajada: explica el título. Tintada desde el acento, no gris."""
+        import flet as ft
+
+        return ft.Text(
+            text,
+            size=cls.TYPE_SUBTITLE,
+            color=cls.subtitle_color(),
+            text_align=align,
+        )
+
+    @classmethod
+    def meta(cls, text: str):
+        """Metadato: la capa más baja. Solo para datos, nunca para explicar."""
+        import flet as ft
+
+        return ft.Text(text, size=cls.TYPE_SMALL, color=cls.text_muted_color())
+
+    @classmethod
+    def subtitle_color(cls) -> str:
+        """Color de la bajada (la línea que explica un título).
+
+        No es gris: está tintado desde el acento. El gris puro sobre superficie
+        oscura hace que la bajada se lea como texto plano y el título no se
+        sostenga; tintándola conserva la jerarquía y sigue cumpliendo
+        contraste.
+        """
+        if cls._is_dark:
+            # 0.88 y no 0.72: medido sobre la card dark (#1a1f2e) y sobre la
+            # card teñida de la sección de Reporte. A 0.72 daba 3.78:1, por
+            # debajo del 4.5:1 mínimo; 0.85 es el primer valor que pasa en
+            # ambas (5.06 y 4.71), y 0.88 deja margen.
+            return ft.Colors.with_opacity(0.88, cls.ACCENT_TEXT)
+        return ft.Colors.with_opacity(0.88, cls.ACCENT_LIGHT)
+
+    @classmethod
+    def section_accent_color(cls) -> str:
+        """Acento de una sección independiente: el Reporte de Compras.
+
+        Usa el violeta (ACCENT_2) en vez del azul global para que la card se
+        lea como su propia zona y no como otra piece del flujo principal. En
+        dark va la variante brillante y en light la oscura, para no perder
+        contraste sobre el fondo de la card.
+        """
+        return cls.ACCENT_2_BRIGHT if cls._is_dark else cls.ACCENT_2_LIGHT
+
+    @classmethod
+    def section_surface_color(cls, opacity: float = 0.06) -> str:
+        """Fondo de la sección: un velo del acento sobre la superficie.
+
+        Delimita la zona sin un borde fuerte: el borde de 1px sigue estando, pero
+        teñido, para que la separación sea de color y no de líneas.
+        """
+        return ft.Colors.with_opacity(opacity, cls.section_accent_color())
+
+    @classmethod
+    def section_border_color(cls, opacity: float = 0.28) -> str:
+        return ft.Colors.with_opacity(opacity, cls.section_accent_color())
+
     @classmethod
     def accent_2_color(cls) -> str:
         """Violeta para texto/iconos: brillante en dark, oscuro en light."""
@@ -206,28 +312,60 @@ class G360Theme:
 
     @classmethod
     def section_header(cls, icon, text, accent_color=None):
+        """Header de sección: TYPE_SECTION (13), un paso bajo el título de card.
+
+        Antes iba en 12, que es justo el tamaño del cuerpo: el encabezado se
+        perdía dentro del texto y la card se leía plana.
+        """
         ac = accent_color or cls.accent_color()
         return ft.Row(
             [
                 ft.Icon(icon, size=14, color=ac),
-                ft.Text(text, size=11, weight=ft.FontWeight.W_600, color=cls.text_primary_color()),
+                ft.Text(
+                    text,
+                    size=cls.TYPE_SECTION,
+                    weight=ft.FontWeight.W_600,
+                    color=cls.text_primary_color(),
+                ),
             ],
             spacing=6,
         )
 
     @classmethod
     def section_header_sub(cls, icon, text, subtitle="", accent_color=None):
-        """Encabezado de sección con subtítulo para identificar cada bloque."""
+        """Encabezado de sección con bajada.
+
+        La bajada va a TYPE_SUBTITLE (11) y tintada desde el
+        acento, no en 10 gris: en gris la bajada se leía como texto suelto y no
+        sostenía al título.
+        """
         col = [cls.section_header(icon, text, accent_color)]
         if subtitle:
-            col.append(ft.Text(subtitle, size=10, color=cls.text_muted_color()))
+            col.append(ft.Text(subtitle, size=cls.TYPE_SUBTITLE, color=cls.subtitle_color()))
         return ft.Column(col, spacing=2)
 
     # ── Card Containers ──────────────────────────────────────────────────────
 
     @classmethod
-    def card(cls, content, padding=24, border_radius=None, bgcolor=None, on_hover=None, key=None):
-        br = border_radius if border_radius is not None else cls.CARD_RADIUS
+    def card(
+        cls,
+        content,
+        padding=SPACE_LG,
+        border_radius=None,
+        bgcolor=None,
+        on_hover=None,
+        key=None,
+        border_color=None,
+    ):
+        """Card base del sistema.
+
+        Defaults alineados con lo que la app ya usaba de facto (padding 16,
+        radio 14) en vez de los valores declarados que nadie usaba (24 / 18).
+        `border_color` existe porque antes no se podia pasar: las cards
+        construidas a mano tenian que reimplementar el borde, y por eso medio
+        dozen de contenedores se quedaban sin el.
+        """
+        br = border_radius if border_radius is not None else cls.RADIUS_CARD
         bc = bgcolor if bgcolor is not None else cls.surface_color()
         return ft.Container(
             key=key,
@@ -235,9 +373,26 @@ class G360Theme:
             padding=padding,
             bgcolor=bc,
             border_radius=br,
-            border=ft.border.all(1, cls.border_color()),
+            border=ft.border.all(1, border_color or cls.border_color()),
             animate=ft.Animation(300, ft.AnimationCurve.DECELERATE),
             **(on_hover or {}),
+        )
+
+    @classmethod
+    def inset(cls, content, padding=None, radius=None, bgcolor=None, border_color=None):
+        """Sub-superficie dentro de una card (bloque de config, fila de estado).
+
+        Existe para que los ~30 contenedores "inset" hechos a mano no inventen
+        su propia combinacion de padding/radio/fondo.
+        """
+        return ft.Container(
+            content=content,
+            padding=padding
+            if padding is not None
+            else ft.padding.symmetric(horizontal=cls.SPACE_MD, vertical=10),
+            border_radius=radius if radius is not None else cls.RADIUS_CONTROL,
+            bgcolor=bgcolor if bgcolor is not None else cls.surface_variant_color(),
+            border=ft.border.all(1, border_color or cls.border_subtle_color()),
         )
 
     @classmethod
@@ -297,9 +452,11 @@ class G360Theme:
             ),
             style=ft.ButtonStyle(
                 color="white",
-                bgcolor={"": cls.PRIMARY, "hovered": cls.PRIMARY_HOVER, "disabled": "white10"},
+                bgcolor=dict(
+                    [("", cls.PRIMARY), ("hovered", cls.PRIMARY_HOVER), ("disabled", "white10")]
+                ),
                 shape=ft.RoundedRectangleBorder(radius=cls.BTN_RADIUS),
-                elevation={"hovered": 8, "": 2},
+                elevation=dict([("hovered", 8), ("", 2)]),
                 animation_duration=300,
                 padding=ft.padding.symmetric(horizontal=28, vertical=10),
             ),
@@ -323,9 +480,11 @@ class G360Theme:
             content=content,
             style=ft.ButtonStyle(
                 color=cls.accent_text_color(),
-                bgcolor={"hovered": cls.with_opacity(0.12, cls.accent_color()), "": "transparent"},
+                bgcolor=dict(
+                    [("hovered", cls.with_opacity(0.12, cls.accent_color())), ("", "transparent")]
+                ),
                 shape=ft.RoundedRectangleBorder(radius=12),
-                elevation={"hovered": 4, "": 0},
+                elevation=dict([("hovered", 4), ("", 0)]),
                 padding=ft.padding.symmetric(horizontal=16, vertical=4),
             ),
             height=height,
@@ -342,14 +501,14 @@ class G360Theme:
                 ft.Icon(icon or ft.Icons.CHECK_CIRCLE_OUTLINED, size=14, color=value_color)
                 if value_text != "Ninguno"
                 else ft.Icon(ft.Icons.UPLOAD_FILE_OUTLINED, size=14, color=cls.text_muted_color()),
-                ft.Text(label, size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.Text(label, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
             ],
             spacing=6,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         right = ft.Row(
             [
-                ft.Text(value_text, size=11, color=value_color),
+                ft.Text(value_text, size=12, color=value_color),
                 clear_btn or ft.Container(width=24),
             ],
             spacing=4,
@@ -419,7 +578,7 @@ class G360Theme:
                 [
                     ft.Icon(icon, size=32, color=cls.text_muted_color()),
                     ft.Text(title, size=13, weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE),
-                    ft.Text("Click para seleccionar", size=11, color=cls.text_muted_color()),
+                    ft.Text("Click para seleccionar", size=12, color=cls.text_muted_color()),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=8,
@@ -469,7 +628,7 @@ class G360Theme:
         if sub_text:
             inner.controls.append(
                 ft.Text(
-                    sub_text, size=11, color=cls.text_muted_color(), text_align=ft.TextAlign.CENTER
+                    sub_text, size=12, color=cls.text_muted_color(), text_align=ft.TextAlign.CENTER
                 )
             )
         return ft.Container(

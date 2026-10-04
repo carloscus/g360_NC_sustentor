@@ -1,12 +1,4 @@
-"""Cliente de datos local SQLite — reemplazo 1:1 de SupabaseVentasClient.
-
-Misma interfaz publica: fetch_historial, fetch_facturas_disponibles, test_connection,
-fetch_vendedores, fetch_clientes, fetch_facturas_cliente, fetch_pedidos_cliente,
-fetch_ordenes_cliente, to_expediente_historial.
-Lee %APPDATA%/g360-erp-nc-sustentor/data/historial.db en modo read-only.
-Filtros de fecha empujados a SQL (antes se filtraban en pandas). NC_ASOCIADAS
-sale de la tabla materializada nc_asociadas (populada tras cada captura).
-"""
+"""Cliente de datos local SQLite — capa de lectura sobre el historial propio."""
 
 from __future__ import annotations
 
@@ -19,7 +11,7 @@ from src.core import ventas_db
 
 log = logging.getLogger(__name__)
 
-# Mapeo columna DB -> columna historial (identico al de supabase_client.py)
+# Mapeo columna DB -> columna historial (identico al de historial_client.py)
 VENTAS_TO_HISTORIAL = {
     "id_articulo": "CODIGO",
     "nom_articulo": "ARTICULO",
@@ -155,7 +147,7 @@ class VentasDbClient:
     # ── Mapeo a formato historial ────────────────────────────────────
 
     def _map_to_historial(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Port de _map_to_historial (supabase_client.py): derivadas UI/pipeline."""
+        """Port de _map_to_historial (historial_client.py): derivadas UI/pipeline."""
         if df.empty:
             return df
         df = df.rename(columns=VENTAS_TO_HISTORIAL)
@@ -254,7 +246,7 @@ class VentasDbClient:
         )
         return df
 
-    # ── API publica (misma firma que SupabaseVentasClient) ───────────
+    # ── API publica (misma firma que VentasDbClient) ───────────
 
     def fetch_historial(
         self,
@@ -1923,7 +1915,7 @@ class VentasDbClient:
                 params=(id_cliente, id_articulo, int(limit)),
             )
         except Exception:
-            # Fallback: historial base (igual que el cliente Supabase)
+            # Fallback: historial base (igual que el cliente historial)
             return self.fetch_historial(
                 id_cliente=id_cliente, id_articulo=id_articulo, limit=limit * 5
             )

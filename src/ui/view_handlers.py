@@ -10,6 +10,7 @@ _logger = logging.getLogger("src.ui.reconocimiento_view")
 from src.domain import ExpedienteComercial, PipelineContext
 from src.pipeline import Pipeline
 from src.core.g360_theme import G360Theme, safe_handler
+from src.core.fechas import fecha_ui
 from src.core.utils import (
     read_erp_file,
 )
@@ -126,10 +127,11 @@ class _ViewHandlers:
         try:
             self._renderizar_ui()
         except Exception as ex:
-            import traceback
+            from src.ui.mensajes import mensaje
 
-            traceback.print_exc()
-            self.app.show_snackbar(f"Error al renderizar UI: {ex}", color=self.app.G360_ERROR)
+            self.app.show_snackbar(
+                mensaje(ex, "pintar la pantalla"), color=self.app.G360_ERROR
+            )
         self._verificar_puede_ejecutar()
         if self.container:
             self.container.update()
@@ -150,7 +152,7 @@ class _ViewHandlers:
                 row = ft.Row(
                     [
                         ft.Text(
-                            f"  • {name}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, expand=True
+                            f"  • {name}", size=12, color=ft.Colors.ON_SURFACE_VARIANT, expand=True
                         ),
                         ft.IconButton(
                             icon=ft.Icons.CLOSE,
@@ -237,11 +239,11 @@ class _ViewHandlers:
             self.skus_table_sf.rows.append(
                 ft.DataRow(
                     cells=[
-                        ft.DataCell(ft.Text(sku, size=9)),
-                        ft.DataCell(ft.Text(articulo, size=9)),
-                        ft.DataCell(ft.Text(str(cant), size=9)),
-                        ft.DataCell(ft.Text(f"S/ {pu:.5f}", size=9)),
-                        ft.DataCell(ft.Text(f"S/ {total:.2f}", size=9)),
+                        ft.DataCell(ft.Text(sku, size=10)),
+                        ft.DataCell(ft.Text(articulo, size=10)),
+                        ft.DataCell(ft.Text(str(cant), size=10)),
+                        ft.DataCell(ft.Text(f"S/ {pu:.5f}", size=10)),
+                        ft.DataCell(ft.Text(f"S/ {total:.2f}", size=10)),
                         ft.DataCell(incluir),
                     ]
                 )
@@ -271,7 +273,7 @@ class _ViewHandlers:
                         ),
                         ft.Text(
                             f"⚠ NC/NDB existentes: {len(ref_notas)} nota(s), S/ {total_soles:.2f}, {skus_afectados} SKU(s)",
-                            size=11,
+                            size=12,
                             color=ft.Colors.AMBER_400,
                         ),
                     ],
@@ -441,7 +443,7 @@ class _ViewHandlers:
 
     def _on_fp_desde_change(self, e):
         val = self.fp_desde.value
-        label = val.strftime("%d/%m/%Y") if val else "Sin filtro"
+        label = fecha_ui(val) if val else "Sin filtro"
         self.fecha_desde_fp.text = f"Desde: {label}"
         self._verificar_puede_ejecutar()
         if self.app.page:
@@ -449,7 +451,7 @@ class _ViewHandlers:
 
     def _on_fp_hasta_change(self, e):
         val = self.fp_hasta.value
-        label = val.strftime("%d/%m/%Y") if val else "Sin filtro"
+        label = fecha_ui(val) if val else "Sin filtro"
         self.fecha_hasta_fp.text = f"Hasta: {label}"
         self._verificar_puede_ejecutar()
         if self.app.page:
@@ -881,7 +883,11 @@ class _ViewHandlers:
                     self.stock_cliente_clear_btn.visible = True
                     self._verificar_puede_ejecutar()
             except Exception as ex:
-                self.app.show_snackbar(f"Error: {ex}", self.app.G360_ERROR)
+                from src.ui.mensajes import mensaje
+
+                self.app.show_snackbar(
+                    mensaje(ex, "consultar el stock del cliente"), self.app.G360_ERROR
+                )
             finally:
                 self.app.hide_loading()
                 if self.app.page:
@@ -1278,11 +1284,11 @@ class _ViewHandlers:
                     self.app.show_snackbar(f"Sin resultados: {detail}", self.app.G360_WARNING)
 
             except Exception as ex:
-                import traceback
+                from src.ui.mensajes import mensaje
 
-                traceback.print_exc()
-                self.app.show_snackbar(f"❌ Error: {str(ex)}", self.app.G360_ERROR)
-            finally:
+                self.app.show_snackbar(
+                    mensaje(ex, "cargar el detalle del cliente"), self.app.G360_ERROR
+                )
                 self.app.hide_loading()
                 if self.app.page:
                     self.app.page.update()
@@ -1622,8 +1628,11 @@ class _ViewHandlers:
                     os.startfile(str(target))
 
             except Exception as ex:
-                self.app.show_snackbar(f"\u274c Error: {ex}", self.app.G360_ERROR)
-            finally:
+                from src.ui.mensajes import mensaje
+
+                self.app.show_snackbar(
+                    mensaje(ex, "abrir el archivo"), self.app.G360_ERROR
+                )
                 self.app.hide_loading()
 
         threading.Thread(target=task, daemon=True).start()

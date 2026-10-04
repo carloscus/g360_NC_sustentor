@@ -1261,6 +1261,33 @@ def db_is_populated() -> bool:
 
 # ── Escritura (port de writer.rs) ───────────────────────────────────────────
 
+# Columnas de fecha de `ventas`. Todas se guardan en ISO (yyyy-mm-dd): el SQL
+# las compara como texto (ORDER BY, BETWEEN, MIN/MAX, substr), y eso solo da
+# orden cronologico con ISO.
+COLS_FECHA = ("fecha_orig", "fecha_ref", "fecha_venc", "fec_cargo")
+
+
+def _normaliza_fechas_venta(v: dict) -> dict:
+    """Devuelve el dict con las columnas de fecha en ISO.
+
+    Idempotente y no destructivo: una fecha que no se puede interpretar se
+    conserva tal cual, porque es preferible un dato raro a perder la fila.
+    """
+    from src.core.fechas import fecha_iso
+
+    salida = None
+    for col in COLS_FECHA:
+        valor = v.get(col)
+        if valor is None or valor == "":
+            continue
+        iso = fecha_iso(valor)
+        if iso and iso != valor:
+            if salida is None:
+                salida = dict(v)
+            salida[col] = iso
+    return salida if salida is not None else v
+
+
 INSERT_COLS = (
     "id_articulo,original_sku,nom_articulo,id_linea,nom_linea,id_grupo,nom_grupo,"
     "id_tipo,nom_tipo,id_familia,nom_familia,id_cliente,doc_cliente,nom_cliente,"
@@ -1306,6 +1333,43 @@ def insert_ventas(conn: sqlite3.Connection, ventas: list[dict], label: str | Non
         sql = f"INSERT INTO ventas ({INSERT_COLS}) VALUES ({placeholders})"
         cols = INSERT_COLS.split(",")
         for v in ventas:
+            v = _normaliza_fechas_venta(v)
+            mr = str(v.get("mes_ref", ""))
+            if len(mr) > 7:
+                v = dict(v, mes_ref=mr[:7])
+            conn.execute(sql, [v.get(c) for c in cols])
+    return len(ventas)
+
+
+def replace_folios(conn: sqlite3.Connection, ventas: list[dict]) -> int:
+    """Reemplaza SOLO los folios presentes en el lote (idempotente).
+
+    A diferencia de ``insert_ventas`` (que borra el día o el mes completo),
+    este borra por ``folio_unico``: permite aplicar un diff incremental donde
+    solo se re-fetchan los folios faltantes o recapturados, sin tocar las
+    líneas de los folios vecinos que no vinieron en la respuesta. Reejecutarlo
+    no duplica ni pierde filas. Devuelve n insertadas.
+    """
+    if not ventas:
+        return 0
+    folios = sorted({str(v.get("folio_unico") or "").strip() for v in ventas} - {""})
+    if not folios:
+        raise ValueError("replace_folios: el lote no trae folio_unico")
+    invalidate_lineas_cache()
+    invalidate_sucursales_cache()
+    invalidate_card_info_cache()
+    stats_cache_clear()
+    cols = INSERT_COLS.split(",")
+    sql = f"INSERT INTO ventas ({INSERT_COLS}) VALUES ({','.join('?' * len(cols))})"
+    with write_txn(conn):
+        for i in range(0, len(folios), 400):
+            lote = folios[i : i + 400]
+            conn.execute(
+                f"DELETE FROM ventas WHERE folio_unico IN ({','.join('?' * len(lote))})",
+                lote,
+            )
+        for v in ventas:
+            v = _normaliza_fechas_venta(v)
             mr = str(v.get("mes_ref", ""))
             if len(mr) > 7:
                 v = dict(v, mes_ref=mr[:7])
@@ -2267,7 +2331,10 @@ def distinct_sucursales(force: bool = False) -> list[dict]:
 #      un cambio recalcula una sola vez.
 #   2. serve-stale: vencido pero con datos previos, se sirven al instante y
 #      un refresco en background actualiza (el reset nunca bloquea).
-_CARD_INFO_CACHE: dict = {"ts": 0.0, "data": None}
+#   3. el cache recuerda de que DB salio: si el data dir cambia (reset de
+#      config, otro G360_DATA_DIR) los datos son de otra base y se descartan.
+#      Sin esto, serve-stale + el thread de refresco servian KPIs de otra DB.
+_CARD_INFO_CACHE: dict = {"ts": 0.0, "data": None, "path": None}
 _CARD_INFO_TTL = 300.0
 _CARD_INFO_REFRESH_BUSY = False
 
@@ -2301,6 +2368,15 @@ def _card_info(force: bool = False) -> dict:
 
     if force:
         return _cargar_card_info()
+
+    # Los datos cacheados son de otra base si el data dir cambio: hay que
+    # descartarlos del todo. Invalidar solo marca vencido (serve-stale), asi que
+    # sin este chequeo se servian KPIs de la DB anterior.
+    if _CARD_INFO_CACHE["data"] is not None and _CARD_INFO_CACHE["path"] != str(db_path()):
+        _CARD_INFO_CACHE["data"] = None
+        _CARD_INFO_CACHE["path"] = None
+        _CARD_INFO_CACHE["ts"] = 0.0
+
     data = _CARD_INFO_CACHE["data"]
     if data is not None:
         if (_t.time() - _CARD_INFO_CACHE["ts"]) < _CARD_INFO_TTL:
@@ -2442,6 +2518,7 @@ def _cargar_card_info() -> dict:
         "lineas_prod": lineas_prod,
         "resumen": " · ".join(partes),
     }
+    _CARD_INFO_CACHE["path"] = str(db_path())
     _CARD_INFO_CACHE["ts"] = _t.time()
     _CARD_INFO_CACHE["data"] = result
     return result
@@ -2852,10 +2929,17 @@ def auditar_campos_criticos(conn: sqlite3.Connection) -> list[dict]:
 def verify_integrity(conn: sqlite3.Connection) -> tuple[bool, list[tuple], list[tuple]]:
     """Revalida los checksums guardados vs el contenido real (agregando dias
     del mismo mes: mes_ref=label o label-*). Devuelve (ok, drifts, sin_checksum):
-    drifts=(mes, filas_esperadas, filas_reales, soles)."""
+    drifts=(mes, filas_esperadas, filas_reales, soles).
+
+    Compara contra ``total_filas``/``total_soles`` y no contra la cadena de
+    ``checksum``: los meses que bajan del productor traen su formato propio
+    (``printf('%08x-%08x-%08x-%08x', ...)``) y los que escribe
+    ``record_month_checksum`` traen ``filas:soles``. Validar el string hacia que
+    el productor marcara como drift un mes con las cifras correctas.
+    """
     stored = {
-        r[0]: (r[1], r[2])
-        for r in conn.execute("SELECT mes_ref, checksum, total_filas FROM mes_checksums")
+        r[0]: (int(r[1]), float(r[2]))
+        for r in conn.execute("SELECT mes_ref, total_filas, total_soles FROM mes_checksums")
     }
     drifts: list[tuple] = []
     sin: list[tuple] = []
@@ -2877,8 +2961,8 @@ def verify_integrity(conn: sqlite3.Connection) -> tuple[bool, list[tuple], list[
         if mes not in stored:
             sin.append((mes, n, tot))
             continue
-        chk, n_esperadas = stored[mes]
-        if chk != f"{n}:{tot}" or n_esperadas != n:
+        n_esperadas, tot_esperados = stored[mes]
+        if n_esperadas != n or abs(tot_esperados - tot) > 0.01:
             drifts.append((mes, n_esperadas, n, tot))
     return (len(drifts) == 0), drifts, sin
 

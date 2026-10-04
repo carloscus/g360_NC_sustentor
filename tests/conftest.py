@@ -5,6 +5,36 @@ import os
 import pytest
 
 
+@pytest.fixture(scope="session")
+def _data_dir_aislado(tmp_path_factory):
+    return tmp_path_factory.mktemp("g360_data")
+
+
+@pytest.fixture(autouse=True)
+def _aislar_db_real(_data_dir_aislado, request):
+    """Red de seguridad: ningun test debe tocar la DB real de produccion.
+
+    `data_dir()` cae a %APPDATA%\\g360-db-ventas\\data cuando G360_DATA_DIR no esta
+    seteado, asi que un test que olvide `tmp_db` abre la base de 2.5 GB. Se vio
+    justo en `test_coverage_summary`, que leia 2,815,148 filas de produccion y
+    fallaba por datos ajenos. Los tests que necesitan su propia DB siguen
+    sobrescribiendo G360_DATA_DIR con monkeypatch.
+
+    Los guards que SI auditan la base real se marcan con `@pytest.mark.real_db`
+    y quedan fuera del aislamiento.
+    """
+    if request.node.get_closest_marker("real_db"):
+        yield
+        return
+    previo = os.environ.get("G360_DATA_DIR")
+    os.environ["G360_DATA_DIR"] = str(_data_dir_aislado)
+    yield
+    if previo is None:
+        os.environ.pop("G360_DATA_DIR", None)
+    else:
+        os.environ["G360_DATA_DIR"] = previo
+
+
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
     """DB SQLite temporal aislada por test (via G360_DATA_DIR)."""
@@ -15,15 +45,23 @@ def tmp_db(tmp_path, monkeypatch):
 
     from src.core import ventas_db
 
-    ventas_db.reset_allowed_lines_cache()
-    ventas_db.invalidate_lineas_cache()
-    ventas_db.invalidate_sucursales_cache()
+    _reset_caches(ventas_db)
     ventas_db.init_db()
     ventas_db.init_estado()
     yield ventas_db
+    _reset_caches(ventas_db)
+
+
+def _reset_caches(ventas_db) -> None:
+    """Limpia TODOS los caches de modulo de ventas_db.
+
+    Faltaba `invalidate_card_info_cache`: sin el, `coverage_summary()` y las
+    cards devolvian el `card_info` cacheado de otro test (o de la DB real).
+    """
     ventas_db.reset_allowed_lines_cache()
     ventas_db.invalidate_lineas_cache()
     ventas_db.invalidate_sucursales_cache()
+    ventas_db.invalidate_card_info_cache()
 
 
 @pytest.fixture

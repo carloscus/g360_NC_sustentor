@@ -11,6 +11,7 @@ from openpyxl.utils.cell import column_index_from_string, coordinate_to_tuple
 
 from src.core import ventas_db
 from src.core.ventas_db_client import VentasDbClient
+from src.core.fechas import fecha_ui
 from src.ui import reporte_compras as rc
 
 
@@ -1682,8 +1683,8 @@ class TestFormato:
         assert rc._mes_label("2026-9") == "2026-09"
 
     def test_fecha_corta(self):
-        assert rc._fecha_corta("2026-09-05") == "05-09-2026"
-        assert rc._fecha_corta("2026-09-05 10:00:00") == "05-09-2026"
+        assert rc._fecha_corta("2026-09-05") == fecha_ui("2026-09-05")
+        assert rc._fecha_corta("2026-09-05 10:00:00") == fecha_ui("2026-09-05")
 
     def test_motivo_etiqueta_cerrada(self):
         assert rc._motivo("devolucion") == "DEVOLUCIÓN"
@@ -1974,7 +1975,9 @@ class TestResumenHoja:
         wb = self._wb(tmp_db, tmp_path, rango=("2026-09-01", "2026-10-31"))
         ws = wb["Resumen Ejecutivo"]
         textos = [c.value for r in ws.iter_rows() for c in r if isinstance(c.value, str)]
-        assert any("Rango: 01-09-2026 → 31-10-2026" in t for t in textos)
+        # La nota de rango se deriva del token de presentacion.
+        esperado = "Rango: " + fecha_ui("2026-09-01") + " \u2192 " + fecha_ui("2026-10-31")
+        assert any(esperado in t for t in textos)
 
     def test_indice_con_hipervinculos_internos(self, tmp_db, tmp_path):
         wb = TestXlsx5Hojas()._todo(tmp_db, tmp_path)

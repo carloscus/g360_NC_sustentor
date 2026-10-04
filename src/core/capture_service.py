@@ -361,12 +361,68 @@ class CaptureService:
         cfg.setdefault("intranet", {})
         cfg["intranet"]["user"] = user
         cfg["intranet"]["pass"] = password
+        cfg["last_verified"] = time.time()
         ventas_db.save_app_config(cfg)
 
     @staticmethod
     def has_credentials() -> bool:
         user, password = CaptureService.credentials()
         return bool(user and password)
+
+    # ── Token de la API Go ──────────────────────────────────────────
+
+    @staticmethod
+    def api_token() -> str:
+        cfg = ventas_db.load_app_config()
+        return str(cfg.get("api_token", "") or "")
+
+    @staticmethod
+    def save_api_token(token: str, user: str = "") -> None:
+        cfg = ventas_db.load_app_config()
+        cfg["api_token"] = token
+        if user:
+            cfg["api_user"] = user
+        cfg["api_token_time"] = time.time()
+        ventas_db.save_app_config(cfg)
+
+    @staticmethod
+    def is_api_token_valid(max_age_s: float = 86400.0) -> bool:
+        cfg = ventas_db.load_app_config()
+        if not cfg.get("api_token"):
+            return False
+        try:
+            age = time.time() - float(cfg.get("api_token_time", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return age < max_age_s
+
+    @staticmethod
+    def refresh_api_token_best_effort(user: str, password: str) -> str:
+        """Intenta login contra la API Go; nunca lanza. Devuelve sufijo de estado."""
+        try:
+            from src.core.api_auth import APIAuthClient, default_api_url
+        except Exception:
+            return ""
+        try:
+            result = APIAuthClient(default_api_url()).login(user, password)
+        except Exception:
+            return ""
+        if result.success:
+            CaptureService.save_api_token(result.token, result.user)
+            return f" · API conectada como {result.user}"
+        return f" · API no disponible ({result.message})"
+
+    @staticmethod
+    def verify_credentials_fresh(max_age_s: float = 86400.0) -> bool:
+        """True si hubo verificacion exitosa reciente (< max_age_s)."""
+        if not CaptureService.has_credentials():
+            return False
+        try:
+            cfg = ventas_db.load_app_config()
+            age = time.time() - float(cfg.get("last_verified", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return age < max_age_s
 
     # ── Descarga + parseo + insercion de un chunk ────────────────────
 

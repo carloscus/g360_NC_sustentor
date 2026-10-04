@@ -21,6 +21,7 @@ from datetime import datetime
 import flet as ft
 
 from src.core.g360_theme import G360Theme
+from src.core.fechas import fecha_ui
 from src.core.utils import resolve_output_path
 from src.ui.widgets import control_factory
 from src.ui.reporte_compras import (
@@ -98,22 +99,27 @@ class ReportePanel:
         return self._card
 
     def _build(self) -> ft.Container:
-        accent = self.app.G360_ACCENT
+        # Paleta propia de la sección: el reporte es una zona independiente y
+        # con el azul global se leía como otra pieza del flujo principal.
+        accent = G360Theme.section_accent_color()
         muted = G360Theme.text_muted_color()
 
         self._resumen = ft.Text("", size=10, color=muted, expand=True)
 
         def _fmt(d):
-            return d.strftime("%d/%m/%Y") if d else "todas"
+            return fecha_ui(d) if d else "todas"
 
         self.desde_label = control_factory.date_label(f"Desde: {_fmt(self.state['desde'])}")
         self.hasta_label = control_factory.date_label(f"Hasta: {_fmt(self.state['hasta'])}")
         self.vend_dd = control_factory.dropdown(
             "Vendedor (opcional)",
             icon=ft.Icons.PERSON_OUTLINED,
-            expand=True,
+            # Ancho fijo, no expand: con expand el dropdown se estira a todo el
+            # espacio libre de la card y queda mas ancho que el de Búsqueda, que
+            # usa WIDTH_FILTER. Eran el mismo control con dos medidas distintas.
+            width=control_factory.WIDTH_FILTER,
             search=True,
-            hint="Todos…",
+            hint="Todos los vendedores…",
             on_change=self._on_vendedor,
         )
         self.cli_chips = ft.Row(
@@ -125,19 +131,19 @@ class ReportePanel:
             on_click=lambda _: self._abrir_picker_clientes(),
         )
         self.nc_sw = ft.Switch(
-            label="Incluir NC/ND (neto)", value=True, label_style=ft.TextStyle(size=11)
+            label="Incluir NC/ND (neto)", value=True, label_style=ft.TextStyle(size=12)
         )
         self.btn_generar = ft.ElevatedButton(
             "Generar",
             icon=ft.Icons.PLAY_ARROW,
-            height=32,
-            style=ft.ButtonStyle(bgcolor=G360Theme.button_color(), color="white"),
+            height=control_factory.HEIGHT,
+            style=ft.ButtonStyle(bgcolor=accent, color="white"),
             on_click=self._generar,
         )
         self.btn_exportar = ft.ElevatedButton(
             "Exportar Excel",
             icon=ft.Icons.GRID_ON,
-            height=32,
+            height=control_factory.HEIGHT,
             style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_800, color="white"),
             on_click=self._exportar,
         )
@@ -170,12 +176,7 @@ class ReportePanel:
         titulo = ft.Row(
             [
                 ft.Icon(ft.Icons.INSIGHTS_OUTLINED, size=18, color=accent),
-                ft.Text(
-                    "Reporte de compras",
-                    size=13,
-                    weight=ft.FontWeight.W_700,
-                    color=G360Theme.text_primary_color(),
-                ),
+                G360Theme.card_title("Reporte de compras"),
             ],
             spacing=8,
         )
@@ -242,7 +243,7 @@ class ReportePanel:
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     # 3. Hojas a exportar
-                    ft.Text("Hojas a exportar:", size=11, color=G360Theme.text_muted_color()),
+                    ft.Text("Hojas a exportar:", size=12, color=G360Theme.text_muted_color()),
                     self._chips_row,
                     ft.Divider(height=4, color=G360Theme.border_subtle_color()),
                     # 4. Acciones
@@ -266,6 +267,10 @@ class ReportePanel:
             padding=16,
             border_radius=14,
             key="reportes_card",
+            # La separación de zona es de color, no de líneas: fondo velado y
+            # borde de 1px teñido (nada de border-left grueso).
+            bgcolor=G360Theme.section_surface_color(),
+            border_color=G360Theme.section_border_color(),
         )
         return card
 
@@ -274,7 +279,7 @@ class ReportePanel:
             def on_change(ev):
                 self.state[storage_key] = ev.control.value
                 label_ctl.value = (
-                    f"{side}: {ev.control.value.strftime('%d/%m/%Y')}"
+                    f"{side}: {fecha_ui(ev.control.value)}"
                     if ev.control.value
                     else f"{side}: todas"
                 )
@@ -358,11 +363,11 @@ class ReportePanel:
             desde, hasta = rango
             if desde:
                 self.state["desde"] = desde
-                self.desde_label.value = f"Desde: {desde.strftime('%d/%m/%Y')}"
+                self.desde_label.value = f"Desde: {fecha_ui(desde)}"
                 self.desde_label.color = G360Theme.accent_text_color()
             if hasta:
                 self.state["hasta"] = hasta
-                self.hasta_label.value = f"Hasta: {hasta.strftime('%d/%m/%Y')}"
+                self.hasta_label.value = f"Hasta: {fecha_ui(hasta)}"
                 self.hasta_label.color = G360Theme.accent_text_color()
         if not self._abierto:
             self._mostrar()  # primera apertura: carga vendedores
@@ -404,7 +409,7 @@ class ReportePanel:
                 label=ft.Text(f"{nom[:28]} ({_c_visible(cid)})", size=10),
                 on_delete=lambda _, c=cid: self._quitar_cliente(c),
                 delete_icon_color=G360Theme.error_color(),
-                bgcolor=ft.Colors.with_opacity(0.1, G360Theme.ACCENT_2),
+                bgcolor=ft.Colors.with_opacity(0.12, G360Theme.section_accent_color()),
                 padding=ft.padding.symmetric(horizontal=8, vertical=2),
             )
             for cid, nom in self.state["clientes"]
@@ -438,9 +443,9 @@ class ReportePanel:
             self._cargar_vendedores()
         for key, chip in self._chips.items():
             chip.selected = key in self.state["hojas"]
-        self.desde_label.value = f"Desde: {self.state['desde'].strftime('%d/%m/%Y')}"
+        self.desde_label.value = f"Desde: {fecha_ui(self.state['desde'])}"
         self.desde_label.color = G360Theme.accent_text_color()
-        self.hasta_label.value = f"Hasta: {hoy.strftime('%d/%m/%Y')}"
+        self.hasta_label.value = f"Hasta: {fecha_ui(hoy)}"
         self.hasta_label.color = G360Theme.accent_text_color()
         self.nc_sw.value = True
         self.status.value = ""
@@ -552,8 +557,8 @@ class ReportePanel:
         datos = self.state.get("datos") or {}
         clientes = self.state["clientes"]
         periodo = (
-            f"{self.state['desde'].strftime('%d/%m/%Y') if self.state['desde'] else 'inicio'}"
-            f" → {self.state['hasta'].strftime('%d/%m/%Y') if self.state['hasta'] else 'hoy'}"
+            f"{fecha_ui(self.state['desde']) if self.state['desde'] else 'inicio'}"
+            f" → {fecha_ui(self.state['hasta']) if self.state['hasta'] else 'hoy'}"
         )
         tot_soles = 0.0
         tot_cant = 0.0
@@ -564,7 +569,7 @@ class ReportePanel:
                 self.resultados.controls.append(
                     ft.Text(
                         f"{nombre or cid} ({_c_visible(cid)}) — sin compras en el rango",
-                        size=11,
+                        size=12,
                         color=G360Theme.text_muted_color(),
                     )
                 )
@@ -683,7 +688,9 @@ class ReportePanel:
                 if os.name == "nt":
                     os.startfile(str(out_dir))
             except Exception as ex:
-                app.show_snackbar(f"❌ Error: {ex}", app.G360_ERROR)
+                from src.ui.mensajes import mensaje
+
+                app.show_snackbar(mensaje(ex, "generar el reporte"), app.G360_ERROR)
             finally:
                 app.hide_loading()
                 self._set_busy(False)

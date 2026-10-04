@@ -160,21 +160,9 @@ def generar_historico_clasico(
         reclamados: conjunto de tuplas (factura_id, sku) incluidas en el
             Cálculo; esas filas se resaltan con relleno y leyenda.
     """
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Historico"
+    from src.core.fechas import fecha_ui
 
-    # ── Logo CIPSA: columna A, ocupando las filas 1-2 (1.80 × 2.00 cm) ──
-    logo_path = CIPSA_LOGO_PATH if CIPSA_LOGO_PATH.exists() else None
-    if logo_path:
-        try:
-            img = XlImage(str(logo_path))
-            img.width, img.height = 68, 76  # 1.80 cm × 2.00 cm @96 dpi
-            ws.add_image(img, "A1")
-        except Exception:
-            pass
-    ws.row_dimensions[1].height = 28
-    ws.row_dimensions[2].height = 28
+    wb = Workbook()
 
     # ── Classic fonts / styles (legacy ERP look) ──
     CLASSIC = "Arial"
@@ -200,86 +188,11 @@ def generar_historico_clasico(
     # del gris de notas para no confundir con crédito/débito).
     RECLAMO_FILL = exp_fill("FFF2CC")
 
-    today_str = datetime.now().strftime("%d/%m/%Y")
-    period_str = f"{fecha_desde or 'Sin definir'} al {fecha_hasta or 'Sin definir'}"
+    today_str = fecha_ui(datetime.now())
     operacion_label = _etiqueta_operacion(tipo_operacion)
-
-    # ── Report title / subtitle: B1/B2 (columna A reservada para el logo) ──
-    ws.merge_cells("B1:J1")
-    c = ws.cell(row=1, column=2, value="REPORTE DE PRECIOS — SEGMENTO HISTÓRICO DEL ERP")
-    c.font = TITLE_FONT
-    c.alignment = Alignment(horizontal="left", vertical="center")
-
-    ws.merge_cells("B2:J2")
-    c = ws.cell(row=2, column=2, value=f"LISTADO DE DOCUMENTOS DEL CLIENTE  ·  {operacion_label}")
-    c.font = SUB_FONT
-    c.alignment = Alignment(horizontal="left", vertical="center")
-
-    # ── Query header (the classic filter block of the ERP report) ──
-    metadata = [
-        ("CLIENTE", cliente_nombre or "—"),
-        ("RUC", cliente_ruc or "—"),
-        ("PERIODO", period_str),
-        ("OPERACION", operacion_label),
-        ("VENDEDOR", vendedor or "—"),
-        ("EXPEDIENTE", f"EXP-{_normalizar_exp_id(expediente_id)}" if expediente_id else "—"),
-        ("CRITERIO DE ORDEN", sort_mode.replace("_", " ").title() if sort_mode else "—"),
-        ("FECHA DE EXTRACCION", today_str),
-    ]
-    for i, (lbl, val) in enumerate(metadata):
-        r = 3 + i
-        c_lbl = ws.cell(row=r, column=1, value=f"{lbl}:")
-        c_lbl.font = LABEL_FONT
-        c_val = ws.cell(row=r, column=2, value=val)
-        c_val.font = VALUE_FONT
-        c_val.border = bottom_med
-
-    # ── Resumen superior (fila 11, libre): conteo y totales ─────────
-    from src.core.detector import _es_documento_nota  # noqa: E402 (lazy: evita ciclo de import)
-
-    n_hist = len(df_historial)
-    if "TIPO_CLASE" in df_historial.columns:
-        es_nota = df_historial["TIPO_CLASE"].astype(str).str.strip().str.lower() != "factura"
-    elif "TIPO_DOC" in df_historial.columns:
-        es_nota = df_historial["TIPO_DOC"].apply(_es_documento_nota)
-    else:
-        es_nota = pd.Series(False, index=df_historial.index)
-    nota_flags = list(es_nota)
-    n_not = sum(1 for f in nota_flags if f)
-    # Facturas = documentos distintos (no líneas): por DOC_ID si existe,
-    # si no por terna TIPO/SERIE/NUMERO.
-    fac_rows = df_historial[[not f for f in nota_flags]]
-    if "DOC_ID" in fac_rows.columns:
-        n_fac = int(fac_rows["DOC_ID"].astype(str).str.strip().nunique())
-    elif {"TIPO_DOC", "SERIE", "NUMERO"} <= set(fac_rows.columns):
-        n_fac = int(
-            fac_rows[["TIPO_DOC", "SERIE", "NUMERO"]]
-            .astype(str)
-            .agg(lambda r: "-".join(v.strip() for v in r), axis=1)
-            .nunique()
-        )
-    else:
-        n_fac = len(fac_rows)
-    tot_resumen = 0.0
-    if "SOLES" in df_historial.columns:
-        tot_resumen = float(pd.to_numeric(df_historial["SOLES"], errors="coerce").fillna(0).sum())
-    ws.merge_cells("A11:J11")
-    c = ws.cell(
-        row=11,
-        column=1,
-        value=(
-            f"RESUMEN: {n_hist} registro(s) · {n_fac} factura(s) · {n_not} nota(s) "
-            f"· Total S/ {tot_resumen:,.2f}"
-        ),
-    )
-    c.font = Font(name=CLASSIC, bold=True, size=9)
-    c.alignment = Alignment(horizontal="left", vertical="center")
-    nota_leyenda = " Filas sombreadas en gris: notas de crédito/débito." if n_not else ""
     reclamos = {(str(f).strip(), str(s).strip()) for f, s in (reclamados or set())}
-    n_reclamo = 0
 
-    # ── Grid (la tabla inicia en la columna A) ──
-    data_start = 12
+    # ── Columnas de la cuadrícula (compartida por todas las hojas) ──
     hist_cols = [
         {"header": "FECHA EMISION", "key": "FECHA", "width": 13, "align": "center", "kind": "date"},
         {"header": "TIPO", "key": "TIPO_DOC", "width": 9, "align": "center"},
@@ -298,125 +211,270 @@ def generar_historico_clasico(
         {"header": "SOLES", "key": "SOLES", "width": 13, "align": "right", "kind": "money"},
         {"header": "RUC CLIENTE", "key": "DOC_CLIENTE", "width": 14},
     ]
+    data_start = 12
 
-    hdr_row = data_start
-    for col_idx, cfg in enumerate(hist_cols, 1):
-        c = ws.cell(row=hdr_row, column=col_idx, value=cfg["header"])
-        c.font = HEADER_FONT
-        c.alignment = Alignment(horizontal=cfg.get("align", "left"), vertical="center")
-        c.border = thin
-        ws.column_dimensions[get_column_letter(col_idx)].width = cfg["width"]
+    def _escribir(ws, df, anio_hoja, periodo_str):
+        """Escribe una hoja completa del histórico clásico.
 
-    r = hdr_row + 1
-    tot_cant = 0.0
-    tot_soles = 0.0
-    n = len(df_historial)
-    for i, (_, row) in enumerate(df_historial.iterrows()):
-        es_nota_row = nota_flags[i] if i < len(nota_flags) else False
-        # Resaltado hacia el Cálculo: misma clave factura+SKU del resultado.
-        es_reclamo = False
-        if reclamos and not es_nota_row:
-            fac_id = (
-                f"{str(row.get('TIPO_DOC', '')).strip()[:1]}"
-                f"{str(row.get('SERIE', '')).strip()}-"
-                f"{str(row.get('NUMERO', '')).strip()}"
-            ).strip("-")
-            es_reclamo = (fac_id, str(row.get("CODIGO", "")).strip()) in reclamos
-            n_reclamo += 1 if es_reclamo else 0
-        for col_idx, cfg in enumerate(hist_cols, 1):
-            key = cfg.get("key", cfg["header"])
-            val = row.get(key, "")
-            c = ws.cell(row=r, column=col_idx)
-            c.font = BODY_FONT
-            c.border = thin
-            c.alignment = Alignment(
-                horizontal=cfg.get("align", "left"),
-                vertical="center",
-                wrap_text=(key == "ARTICULO"),
+        Todo lo que se muestra (resumen, totales, leyenda, print_area) se
+        calcula desde `df`, que es el subconjunto de ESA hoja.
+        """
+        # ── Logo CIPSA: columna A, ocupando las filas 1-2 (1.80 × 2.00 cm) ──
+        logo_path = CIPSA_LOGO_PATH if CIPSA_LOGO_PATH.exists() else None
+        if logo_path:
+            try:
+                img = XlImage(str(logo_path))
+                img.width, img.height = 68, 76  # 1.80 cm × 2.00 cm @96 dpi
+                ws.add_image(img, "A1")
+            except Exception:
+                pass
+        ws.row_dimensions[1].height = 28
+        ws.row_dimensions[2].height = 28
+
+        # ── Report title / subtitle: B1/B2 (columna A reservada para el logo) ──
+        ws.merge_cells("B1:J1")
+        c = ws.cell(row=1, column=2, value="REPORTE DE PRECIOS — SEGMENTO HISTÓRICO DEL ERP")
+        c.font = TITLE_FONT
+        c.alignment = Alignment(horizontal="left", vertical="center")
+
+        ws.merge_cells("B2:J2")
+        subtitulo = f"LISTADO DE DOCUMENTOS DEL CLIENTE  ·  {operacion_label}"
+        if anio_hoja is not None:
+            subtitulo = f"{subtitulo}  ·  AÑO {anio_hoja}"
+        c = ws.cell(row=2, column=2, value=subtitulo)
+        c.font = SUB_FONT
+        c.alignment = Alignment(horizontal="left", vertical="center")
+
+        # ── Query header (the classic filter block of the ERP report) ──
+        metadata = [
+            ("CLIENTE", cliente_nombre or "—"),
+            ("RUC", cliente_ruc or "—"),
+            ("PERIODO", periodo_str),
+            ("OPERACION", operacion_label),
+            ("VENDEDOR", vendedor or "—"),
+            ("EXPEDIENTE", f"EXP-{_normalizar_exp_id(expediente_id)}" if expediente_id else "—"),
+            ("CRITERIO DE ORDEN", sort_mode.replace("_", " ").title() if sort_mode else "—"),
+            ("FECHA DE EXTRACCION", today_str),
+        ]
+        for i, (lbl, val) in enumerate(metadata):
+            r = 3 + i
+            c_lbl = ws.cell(row=r, column=1, value=f"{lbl}:")
+            c_lbl.font = LABEL_FONT
+            c_val = ws.cell(row=r, column=2, value=val)
+            c_val.font = VALUE_FONT
+            c_val.border = bottom_med
+
+        # ── Resumen superior (fila 11, libre): conteo y totales ─────────
+        from src.core.detector import _es_documento_nota  # noqa: E402 (lazy: evita ciclo de import)
+        from src.core.fechas import a_fecha, excel_fmt_ui, fecha_ui
+
+        n_hist = len(df)
+        if "TIPO_CLASE" in df.columns:
+            es_nota = df["TIPO_CLASE"].astype(str).str.strip().str.lower() != "factura"
+        elif "TIPO_DOC" in df.columns:
+            es_nota = df["TIPO_DOC"].apply(_es_documento_nota)
+        else:
+            es_nota = pd.Series(False, index=df.index)
+        # OJO: lista posicional, alineada con las filas de ESTA hoja.
+        nota_flags = list(es_nota)
+        n_not = sum(1 for f in nota_flags if f)
+        fac_rows = df[[not f for f in nota_flags]]
+        if "DOC_ID" in fac_rows.columns:
+            n_fac = int(fac_rows["DOC_ID"].astype(str).str.strip().nunique())
+        elif {"TIPO_DOC", "SERIE", "NUMERO"} <= set(fac_rows.columns):
+            n_fac = int(
+                fac_rows[["TIPO_DOC", "SERIE", "NUMERO"]]
+                .astype(str)
+                .agg(lambda r: "-".join(v.strip() for v in r), axis=1)
+                .nunique()
             )
-            if es_nota_row:
-                c.fill = NOTA_FILL
-            elif es_reclamo:
-                c.fill = RECLAMO_FILL
-            kind = cfg.get("kind")
-            if kind == "date":
-                # Fidelidad ERP: la fecha llega como texto dd/mm/yyyy; si es
-                # datetime real se formatea explícitamente en dd/mm/yyyy.
-                if isinstance(val, datetime):
-                    c.value = val.strftime("%d/%m/%Y")
-                else:
-                    c.value = "" if val is None else str(val).strip()
-            elif kind == "int":
-                try:
-                    fv = float(val)
-                    tot_cant += fv
-                    c.value = int(fv)
-                    c.number_format = "#,##0"
-                except (TypeError, ValueError):
-                    c.value = "" if val is None else str(val)
-            elif kind == "price":
-                try:
-                    c.value = float(val)
-                    c.number_format = "#,##0.00000"
-                except (TypeError, ValueError):
-                    c.value = "" if val is None else str(val)
-            elif kind == "money":
-                try:
-                    fv = float(val)
-                    tot_soles += fv
-                    c.value = fv
-                    c.number_format = "#,##0.00"
-                except (TypeError, ValueError):
-                    c.value = "" if val is None else str(val)
-            else:
-                c.value = "" if val is None else str(val)[:60]
-        r += 1
-
-    # ── Totals row (classic double line) ──
-    t_row = r
-    c = ws.cell(row=t_row, column=6, value=f"TOTAL DE {n} REGISTRO(S)")
-    c.font = TOT_FONT
-    c.alignment = Alignment(horizontal="right")
-    c.border = top_med
-    for col_idx in range(1, 11):
-        if col_idx != 6:
-            ws.cell(row=t_row, column=col_idx).border = top_med
-    c_qty = ws.cell(row=t_row, column=7, value=int(tot_cant))
-    c_qty.font = TOT_FONT
-    c_qty.number_format = "#,##0"
-    c_qty.alignment = Alignment(horizontal="right")
-    c_mon = ws.cell(row=t_row, column=9, value=round(tot_soles, 2))
-    c_mon.font = TOT_FONT
-    c_mon.number_format = "#,##0.00"
-    c_mon.alignment = Alignment(horizontal="right")
-
-    note_row = t_row + 2
-    ws.merge_cells(f"A{note_row}:J{note_row}")
-    leyenda = nota_leyenda
-    if n_reclamo:
-        leyenda += (
-            f" Filas resaltadas en amarillo: líneas incluidas en el Cálculo ({n_reclamo} de {n})."
+        else:
+            n_fac = len(fac_rows)
+        tot_resumen = 0.0
+        if "SOLES" in df.columns:
+            tot_resumen = float(pd.to_numeric(df["SOLES"], errors="coerce").fillna(0).sum())
+        ws.merge_cells("A11:J11")
+        c = ws.cell(
+            row=11,
+            column=1,
+            value=(
+                f"RESUMEN: {n_hist} registro(s) · {n_fac} factura(s) · {n_not} nota(s) "
+                f"· Total S/ {tot_resumen:,.2f}"
+            ),
         )
-    ws.cell(
-        row=note_row,
-        column=1,
-        value=(
-            "Datos extractados directamente del ERP, sin calculos realizados en esta hoja. "
-            "Cruce el detalle con Calculo.xlsx e Informe.docx del expediente. "
-            f"Generado por G360 NC Sustentor el {today_str}.{leyenda}"
-        ),
-    ).font = Font(name=CLASSIC, size=8, italic=True, color=EXP_GRAY)
+        c.font = Font(name=CLASSIC, bold=True, size=9)
+        c.alignment = Alignment(horizontal="left", vertical="center")
+        nota_leyenda = " Filas sombreadas en gris: notas de crédito/débito." if n_not else ""
+        n_reclamo = 0
 
-    # ── Print setup ──
-    # Columna A a 15.00 (~110 px). Márgenes laterales simétricos 0.8" (~2.0 cm).
-    ws.column_dimensions["A"].width = 15
-    ws.page_margins.left = 0.8
-    ws.page_margins.right = 0.8
-    ws.print_area = f"A1:J{t_row}"
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToPage = True
-    ws.page_setup.fitToWidth = 1
-    ws.sheet_view.showGridLines = False
+        # ── Grid (la tabla inicia en la columna A) ──
+        hdr_row = data_start
+        for col_idx, cfg in enumerate(hist_cols, 1):
+            c = ws.cell(row=hdr_row, column=col_idx, value=cfg["header"])
+            c.font = HEADER_FONT
+            c.alignment = Alignment(horizontal=cfg.get("align", "left"), vertical="center")
+            c.border = thin
+            ws.column_dimensions[get_column_letter(col_idx)].width = cfg["width"]
+
+        # ¿Toda la columna FECHA es interpretable? Si sí se escriben fechas
+        # reales (Excel las ordena y filtra); si hay alguna ilegible, la
+        # columna cae a texto para no mezclar tipos.
+        # Sin columna FECHA no hay nada que escribir como fecha: se queda en
+        # texto (y no en None, que seria perder la celda).
+        fechas_reales = False
+        if "FECHA" in df.columns and len(df):
+            from src.core.fechas import a_fecha as _a_fecha
+
+            fechas_reales = all(
+                _a_fecha(v) is not None for v in df["FECHA"].tolist()
+            )
+
+        r = hdr_row + 1
+        tot_cant = 0.0
+        tot_soles = 0.0
+        n = len(df)
+        for i, (_, row) in enumerate(df.iterrows()):
+            es_nota_row = nota_flags[i] if i < len(nota_flags) else False
+            es_reclamo = False
+            if reclamos and not es_nota_row:
+                fac_id = (
+                    f"{str(row.get('TIPO_DOC', '')).strip()[:1]}"
+                    f"{str(row.get('SERIE', '')).strip()}-"
+                    f"{str(row.get('NUMERO', '')).strip()}"
+                ).strip("-")
+                es_reclamo = (fac_id, str(row.get("CODIGO", "")).strip()) in reclamos
+                n_reclamo += 1 if es_reclamo else 0
+            for col_idx, cfg in enumerate(hist_cols, 1):
+                key = cfg.get("key", cfg["header"])
+                val = row.get(key, "")
+                c = ws.cell(row=r, column=col_idx)
+                c.font = BODY_FONT
+                c.border = thin
+                c.alignment = Alignment(
+                    horizontal=cfg.get("align", "left"),
+                    vertical="center",
+                    wrap_text=(key == "ARTICULO"),
+                )
+                if es_nota_row:
+                    c.fill = NOTA_FILL
+                elif es_reclamo:
+                    c.fill = RECLAMO_FILL
+                kind = cfg.get("kind")
+                if kind == "date":
+                    original = "" if val is None else str(val).strip()
+                    if fechas_reales:
+                        # Fecha real: el formato lo pone Excel, y así la
+                        # columna ordena y filtra como fecha (era texto y no
+                        # ordenaba).
+                        c.value = a_fecha(val)
+                        c.number_format = excel_fmt_ui()
+                    else:
+                        # Con alguna fecha ilegible se escribe texto: se ve
+                        # igual y no se pierde el dato.
+                        c.value = fecha_ui(val) or original
+                elif kind == "int":
+                    try:
+                        fv = float(val)
+                        tot_cant += fv
+                        c.value = int(fv)
+                        c.number_format = "#,##0"
+                    except (TypeError, ValueError):
+                        c.value = "" if val is None else str(val)
+                elif kind == "price":
+                    try:
+                        c.value = float(val)
+                        c.number_format = "#,##0.00000"
+                    except (TypeError, ValueError):
+                        c.value = "" if val is None else str(val)
+                elif kind == "money":
+                    try:
+                        fv = float(val)
+                        tot_soles += fv
+                        c.value = fv
+                        c.number_format = "#,##0.00"
+                    except (TypeError, ValueError):
+                        c.value = "" if val is None else str(val)
+                else:
+                    c.value = "" if val is None else str(val)[:60]
+            r += 1
+
+        # ── Totals row (classic double line) ──
+        t_row = r
+        c = ws.cell(row=t_row, column=6, value=f"TOTAL DE {n} REGISTRO(S)")
+        c.font = TOT_FONT
+        c.alignment = Alignment(horizontal="right")
+        c.border = top_med
+        for col_idx in range(1, 11):
+            if col_idx != 6:
+                ws.cell(row=t_row, column=col_idx).border = top_med
+        c_qty = ws.cell(row=t_row, column=7, value=int(tot_cant))
+        c_qty.font = TOT_FONT
+        c_qty.number_format = "#,##0"
+        c_qty.alignment = Alignment(horizontal="right")
+        c_mon = ws.cell(row=t_row, column=9, value=round(tot_soles, 2))
+        c_mon.font = TOT_FONT
+        c_mon.number_format = "#,##0.00"
+        c_mon.alignment = Alignment(horizontal="right")
+
+        note_row = t_row + 2
+        ws.merge_cells(f"A{note_row}:J{note_row}")
+        leyenda = nota_leyenda
+        if n_reclamo:
+            leyenda += (
+                f" Filas resaltadas en amarillo: líneas incluidas en el Cálculo "
+                f"({n_reclamo} de {n})."
+            )
+        ws.cell(
+            row=note_row,
+            column=1,
+            value=(
+                "Datos extractados directamente del ERP, sin calculos realizados en esta hoja. "
+                "Cruce el detalle con Calculo.xlsx e Informe.docx del expediente. "
+                f"Generado por G360 NC Sustentor el {today_str}.{leyenda}"
+            ),
+        ).font = Font(name=CLASSIC, size=8, italic=True, color=EXP_GRAY)
+
+        # ── Print setup ──
+        # Columna A a 15.00 (~110 px). Márgenes laterales simétricos 0.8" (~2.0 cm).
+        ws.column_dimensions["A"].width = 15
+        ws.page_margins.left = 0.8
+        ws.page_margins.right = 0.8
+        ws.print_area = f"A1:J{t_row}"
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToPage = True
+        ws.page_setup.fitToWidth = 1
+        ws.sheet_view.showGridLines = False
+        # Cabecera fija: al partir por año las hojas son largas y sin esto se
+        # pierde el encabezado al hacer scroll.
+        ws.freeze_panes = f"A{hdr_row + 1}"
+
+    # ── Hojas: una por año calendar ──
+    # Con un solo año se mantiene la hoja única "Historico" de siempre.
+    periodo_global = f"{fecha_desde or 'Sin definir'} al {fecha_hasta or 'Sin definir'}"
+    grupos = _agrupar_por_anio(df_historial)
+    # Con un solo año se deja la hoja como "Historico", igual que siempre: el
+    # nombre por año solo tiene sentido cuando hay varias hojas.
+    una_sola = len(grupos) == 1
+    primera = True
+    for etiqueta, sub, anio_hoja in grupos:
+        ws = wb.active if primera else wb.create_sheet()
+        primera = False
+        ws.title = "Historico" if una_sola else etiqueta
+        if anio_hoja is None:
+            periodo = "Sin fecha interpretable"
+        elif len(grupos) == 1:
+            periodo = periodo_global
+        else:
+            # En la hoja de un año el periodo es el de ESE año, no el global:
+            # si no, cada hoja repetiría el rango completo y no se sabría qué
+            # contiene.
+            fechas = [d for d in (_a_fecha(v) for v in sub["FECHA"]) if d is not None]
+            periodo = (
+                f"{fecha_ui(min(fechas))} al {fecha_ui(max(fechas))}" if fechas else str(anio_hoja)
+            )
+        # En la hoja única no se marca el año: el nombre de la hoja ya lo dice
+        # y el caso de siempre tiene que quedar igual que antes.
+        _escribir(ws, sub, None if una_sola else anio_hoja, periodo)
 
     if ruta_salida is not None:
         out_path = Path(ruta_salida)
@@ -428,3 +486,57 @@ def generar_historico_clasico(
         out_path = out_dir / f"Historico_{expediente_id or ts}.xlsx"
     wb.save(str(out_path))
     return out_path
+
+
+# ── Partición por año ─────────────────────────────────────────────────────────
+# Excel limita el nombre de hoja a 31 caracteres y prohíbe []:*?/\. "2026" y
+# "Sin fecha" entran de sobra, pero el sanitizado se hace igual por si algún
+# día la etiqueta cambia.
+_INVALIDOS_SHEET = set(r"[]:*?/\'\"")
+_SIN_ANIO = "Sin fecha"
+
+
+def _nombre_seguro(texto: str, usados: set) -> str:
+    limpio = "".join(" " if ch in _INVALIDOS_SHEET else ch for ch in str(texto)).strip()
+    limpio = limpio[:31] or "Hoja"
+    cand = limpio
+    n = 2
+    while cand in usados:
+        sufijo = f" ({n})"
+        cand = limpio[: 31 - len(sufijo)] + sufijo
+        n += 1
+    usados.add(cand)
+    return cand
+
+
+def _agrupar_por_anio(df: pd.DataFrame):
+    """[(nombre_hoja, subconjunto, anio_o_None)] ordenado por año.
+
+    Las filas sin fecha interpretable van a su propia hoja en vez de
+    repartirse: descartarlas perdería histórico, y mezclarlas en un año
+    cualquiera haría el RESUMEN mentiroso.
+    """
+    if df is None or len(df) == 0:
+        return [("Historico", df if df is not None else pd.DataFrame(), None)]
+
+    if "FECHA" not in df.columns:
+        return [("Historico", df, None)]
+
+    from src.core.fechas import anio_de
+
+    anios = df["FECHA"].map(anio_de)
+    sin_anio = anios.isna()
+    partes = []
+    usados: set = set()
+    for anio in sorted(a for a in anios.dropna().unique()):
+        sub = df[anios == anio]
+        partes.append((_nombre_seguro(str(int(anio)), usados), sub, int(anio)))
+    if bool(sin_anio.any()):
+        partes.append((_nombre_seguro(_SIN_ANIO, usados), df[sin_anio], None))
+    return partes
+
+
+def _a_fecha(valor):
+    from src.core.fechas import a_fecha
+
+    return a_fecha(valor)

@@ -115,7 +115,9 @@ def _descargar_plantillas(page, app, dialog, checkboxes, claves):
             if os.name == "nt":
                 os.startfile(str(out_dir))
         except Exception as ex:
-            app.show_snackbar(f"\u274c Error: {ex}", app.G360_ERROR)
+            from src.ui.mensajes import mensaje
+
+            app.show_snackbar(mensaje(ex, "usar la plantilla"), app.G360_ERROR)
         finally:
             app.hide_loading()
 

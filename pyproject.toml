@@ -31,6 +31,9 @@ select = ["E9", "F"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "real_db: el test audita la base local real de produccion (no se aisla)",
+]
 
 [dependency-groups]
 dev = [

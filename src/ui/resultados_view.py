@@ -220,7 +220,7 @@ def render_resultado(
             content=ft.Row(
                 [
                     ft.Icon(ft.Icons.WARNING_OUTLINED, size=16, color=G360Theme.warning_color()),
-                    ft.Text(warn_msg, size=11, color=G360Theme.warning_color()),
+                    ft.Text(warn_msg, size=12, color=G360Theme.warning_color()),
                 ],
                 spacing=8,
                 wrap=True,
@@ -304,11 +304,11 @@ def _build_rebate_table(df):
         toggle = ft.Checkbox(value=True, label="")
         toggles[linea] = (toggle, monto_recon)
         cells = [
-            ft.DataCell(ft.Text(linea, size=9)),
-            ft.DataCell(ft.Text(f"S/ {monto_vendido:,.2f}", size=9)),
-            ft.DataCell(ft.Text(f"{pct_recon:.2f}%", size=9)),
-            ft.DataCell(ft.Text(f"S/ {monto_recon:,.2f}", size=9)),
-            ft.DataCell(ft.Text(f"S/ {monto_ncnd:,.2f}" if monto_ncnd else "S/ 0.00", size=9)),
+            ft.DataCell(ft.Text(linea, size=10)),
+            ft.DataCell(ft.Text(f"S/ {monto_vendido:,.2f}", size=10)),
+            ft.DataCell(ft.Text(f"{pct_recon:.2f}%", size=10)),
+            ft.DataCell(ft.Text(f"S/ {monto_recon:,.2f}", size=10)),
+            ft.DataCell(ft.Text(f"S/ {monto_ncnd:,.2f}" if monto_ncnd else "S/ 0.00", size=10)),
             ft.DataCell(toggle),
         ]
         rows.append(ft.DataRow(cells=cells))
@@ -318,7 +318,7 @@ def _build_rebate_table(df):
 
 def _cell(texto, color=None, bgcolor=None):
     """Crea un DataCell ligero — evita el overhead de Container cuando no requiere estilo."""
-    txt = ft.Text(texto, size=9, color=color or ft.Colors.ON_SURFACE)
+    txt = ft.Text(texto, size=10, color=color or ft.Colors.ON_SURFACE)
     if bgcolor:
         return ft.DataCell(ft.Container(content=txt, padding=4, bgcolor=bgcolor))
     return ft.DataCell(txt)
@@ -492,7 +492,7 @@ def _build_standard_table(
         estado_content = ft.Row(
             [
                 ft.Text(estado_icon, size=10, color=estado_color),
-                ft.Text(estado_txt, size=9, color=estado_color, weight=ft.FontWeight.W_600),
+                ft.Text(estado_txt, size=10, color=estado_color, weight=ft.FontWeight.W_600),
             ],
             spacing=4,
         )
@@ -577,7 +577,7 @@ def _build_alertas_panel(alertas):
             ft.Row(
                 [
                     ft.Icon(icono, size=14, color=color),
-                    ft.Text(f"{a.mensaje}", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(f"{a.mensaje}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                 ],
                 spacing=6,
             )
@@ -666,7 +666,7 @@ def _build_verification_panel(resultado, tipo_actual, alertas, accent_color, suc
                         ft.Icon(ft.Icons.VERIFIED_OUTLINED, size=16, color=success_color),
                         ft.Text(
                             "VERIFICACIÓN PRE-EXPORTACIÓN",
-                            size=11,
+                            size=12,
                             weight=ft.FontWeight.W_700,
                             color=ft.Colors.ON_SURFACE_VARIANT,
                         ),
@@ -762,7 +762,7 @@ def _build_nc_audit_panel(nc_alertas, accent_color):
                     ft.Icon(icon, size=14, color=color),
                     ft.Text(
                         f"{label} ({len(alertas_grupo)})",
-                        size=11,
+                        size=12,
                         weight=ft.FontWeight.W_600,
                         color=color,
                     ),
@@ -817,7 +817,7 @@ def _build_summary_panel(total_nc_str, skus_str, alertas_str, accent_color):
                     [
                         ft.Text(
                             "Total NC",
-                            size=11,
+                            size=12,
                             color=ft.Colors.ON_SURFACE_VARIANT,
                             weight=ft.FontWeight.W_500,
                         ),
@@ -839,7 +839,7 @@ def _build_summary_panel(total_nc_str, skus_str, alertas_str, accent_color):
                     [
                         ft.Text(
                             "SKU / Líneas",
-                            size=11,
+                            size=12,
                             color=ft.Colors.ON_SURFACE_VARIANT,
                             weight=ft.FontWeight.W_500,
                         ),
@@ -864,7 +864,7 @@ def _build_summary_panel(total_nc_str, skus_str, alertas_str, accent_color):
                     [
                         ft.Text(
                             "Alertas",
-                            size=11,
+                            size=12,
                             color=ft.Colors.ON_SURFACE_VARIANT,
                             weight=ft.FontWeight.W_500,
                         ),

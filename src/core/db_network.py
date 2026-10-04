@@ -661,12 +661,12 @@ def scan_network_for_db(
         if _check_share(ip):
             entries = _list_db_on_share(ip)
             results.extend(entries)
-            log.info(f"  Found DB at {ip}: {[e.path for e in entries]}")
+            log.debug(f"  Found DB at {ip}: {[e.path for e in entries]}")
 
         # Progress every 20 IPs
         if i % 20 == 0:
             elapsed = time.time() - total
-            log.info(f"  Scanned {i}/254 IPs ({elapsed:.1f}s)...")
+            log.debug(f"  Scanned {i}/254 IPs ({elapsed:.1f}s)...")
 
     return results
 

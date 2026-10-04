@@ -3,19 +3,24 @@ setlocal enabledelayedexpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
-REM Modo rapido: "run.bat fast" salta uv/Python/venv/sync/migracion/acceso-directo
-REM si el entorno ya existe. Uso diario: doble clic en launch.vbs (ya pasa fast).
-if /i not "%~1"=="fast" goto :fullstart
-if not exist ".venv\Scripts\python.exe" (
-    echo   Modo fast pedido pero no hay entorno; arranque completo...
-    goto :fullstart
-)
-goto :faststart
-:fullstart
-
-REM Log en APPDATA para evitar PermissionError cuando el bat tiene el archivo abierto
+REM Log en APPDATA para evitar PermissionError cuando el bat tiene el archivo abierto.
+REM OJO: esto va ANTES del salto a :faststart. Si %LOG_FILE% se define despues,
+REM el modo fast redireccionaria a ">>" vacio y el .bat muere con
+REM "The syntax of the command is incorrect" sin lanzar nada.
 set "LOG_FILE=%APPDATA%\g360-erp-nc-sustentor\run_log.txt"
 mkdir "%APPDATA%\g360-erp-nc-sustentor" >nul 2>&1
+
+REM Modo rapido: "run.bat fast" salta uv/Python/venv/sync/migracion/acceso-directo
+REM si el entorno ya existe. Uso diario: doble clic en launch.vbs (ya pasa fast).
+if /i "%~1"=="fast" goto :checkenv
+goto :fullstart
+
+:checkenv
+if exist ".venv\Scripts\python.exe" goto :faststart
+echo   Modo fast pedido pero no hay entorno; arranque completo...
+goto :fullstart
+
+:fullstart
 echo [%DATE% %TIME%] Inicio Reconocimiento Comercial - CIPSA > %LOG_FILE%
 echo.
 echo === Reconocimiento Comercial - CIPSA ===

@@ -38,10 +38,12 @@ class ReconocimientoView(_ViewHelpers, _ViewPanels, _ViewHandlers):
 
     def build(self):
         self._init_controls()
+        scroll = getattr(ft.ScrollMode, "AUTO", None)
+        scroll = getattr(scroll, "value", scroll) if scroll is not None else "auto"
         self.container = ft.Container(
             expand=True,
             padding=ft.padding.only(top=22, bottom=28, left=32, right=32),
-            content=ft.Column([], scroll=ft.ScrollMode.AUTO, spacing=15),
+            content=ft.Column([], scroll=scroll, spacing=15),
         )
         self._renderizar_ui()
         self._refrescar_card_db()

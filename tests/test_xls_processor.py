@@ -473,7 +473,7 @@ class TestParseCamposCompletos:
         assert v["id_guia"] == "G-1"
         assert v["nom_condicion_pago"] == "CONTADO"
         assert v["division"] == "CONSUMO MASIVO"
-        assert v["fec_cargo"] == "01/02/2024"
+        # `fec_cargo` llega en dd/mm/yyyy del ERP. Lo que se fija aca es que`n        # el write path lo normalice: el que decide el formato final es`n        # ventas_db._normaliza_fechas_venta, no el processor.`n        assert v["fec_cargo"] == "01/02/2024"  # ver test_normalizacion_ventas_db
 
     def test_orden_compra_sale_normalizada(self):
         out = parse_report_rows([self.HEADER44, self._fila44()], "2024-01")

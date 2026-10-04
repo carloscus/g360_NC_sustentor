@@ -12,6 +12,7 @@ Transporte: httpx puro con cookie jar (equivale a reqwest + cookie_store).
 """
 
 from __future__ import annotations
+from src.core.fechas import fecha_ui
 
 import csv
 import html as html_mod
@@ -201,7 +202,7 @@ class IntranetClient:
             return False, f"Sin acceso a la intranet: {e}"
         # Sonda: GET del reporte con rango de 1 día (no descarga nada pesado)
         ayer = date.today().toordinal() - 1
-        d = date.fromordinal(ayer).strftime("%d/%m/%Y")
+        d = fecha_ui(date.fromordinal(ayer))
         url = exp_url(d, d, "", "", "L0")
         try:
             resp = self._client.get(url, timeout=60.0)
@@ -481,7 +482,7 @@ class MonthRange:
     label: str
 
     def to_url_params(self) -> tuple[str, str]:
-        return (self.start.strftime("%d/%m/%Y"), self.end.strftime("%d/%m/%Y"))
+        return (fecha_ui(self.start), fecha_ui(self.end))
 
 
 def month_chunk(y: int, m: int) -> MonthRange:

@@ -12,7 +12,6 @@ import io
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date
 
 log = logging.getLogger(__name__)
 
@@ -160,19 +159,17 @@ def vendedor_corto(id_vendedor: str) -> str:
 
 
 def parse_date(s: str) -> str:
-    """Fechas dd/mm/yyyy o dd-mm-yyyy -> yyyy-mm-dd ('' si vacia)."""
-    s = (s or "").strip()
-    if not s:
-        return ""
-    for sep in ("/", "-"):
-        parts = s.split(sep)
-        if len(parts) == 3:
-            try:
-                d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-                return date(y, m, d).strftime("%Y-%m-%d")
-            except ValueError:
-                continue
-    return ""
+    """Normaliza cualquier fecha a ``yyyy-mm-dd`` ('' si no se puede).
+
+    Delega en `src.core.fechas` para no tener un segundo parser: antes este
+    solo aceptaba dd/mm/yyyy y dd-mm-yyyy, y una fila con fecha ISO devolvía
+    '' — que el llamador de la línea 483 convierte en `continue`, o sea la fila
+    entera se perdía en silencio. Ahora acepta ISO, dd/mm/yyyy, dd-mm-yyyy,
+    yyyy/mm/dd y cualquiera de esos con hora pegada.
+    """
+    from src.core.fechas import fecha_iso
+
+    return fecha_iso(s)
 
 
 # ── Derivados (port de derivar_campos) ──────────────────────────────────────
@@ -396,6 +393,8 @@ def parse_report_rows(rows: list[list[str]], label: str, file_source: str = "") 
         return clean_str(record[idx]) if idx is not None and idx < len(record) else ""
 
     mes_num = int(label[5:7]) if len(label) >= 7 and label[5:7].isdigit() else 0
+    sin_fecha = 0
+    _log = logging.getLogger(__name__)
     raw_rows: list[dict] = []
     for record in rows[header_idx + 1 :]:
         if not any(record):
@@ -481,6 +480,10 @@ def parse_report_rows(rows: list[list[str]], label: str, file_source: str = "") 
             "folio_unico": "",
         }
         if not v["fecha_orig"]:
+            # Descartar la fila es correcto (sin fecha no hay nada que
+            # indexar), pero no puede ser silencioso: antes se perdían filas
+            # sin dejar rastro. Se cuentan y se avisa por log.
+            sin_fecha += 1
             continue
         derivar_campos(v)
         raw_rows.append(v)
@@ -492,6 +495,14 @@ def parse_report_rows(rows: list[list[str]], label: str, file_source: str = "") 
     # sin factura igual es un documento real que afecta totales).
     for v in raw_rows:
         out.ventas.append(v)
+    if sin_fecha:
+        # Antes el descarte era invisible. Una fila sin fecha no se puede
+        # indexar, pero hay que saber cuantas son: si aparecen de golpe, el
+        # origen cambio de formato de fecha.
+        _log.warning(
+            "parse_report_rows: %d fila(s) descartada(s) por fecha ilegible", sin_fecha
+        )
+
     return out
 
 

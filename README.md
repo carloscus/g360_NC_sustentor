@@ -775,3 +775,20 @@ MIT License.
 **Autor**: Carlos Cusi
 **Desarrollo**: Con asistencia de herramientas de código IA (Vibe Code)
 **Powered by**: [g360-signature](https://github.com/carloscus/g360-signature)
+
+---
+
+## Cambios recientes (oct-2026)
+
+- **Sin Supabase**: eliminado `src/api/supabase_endpoint.py` (sin consumidores) y las
+  claves `supabase_*` de la config sanitizada del cartucho.
+- **Cliente API Go** (`src/core/`): `api_auth.py` (login → token HMAC contra
+  `POST /api/login`), `ventas_api_client.py` (rutas reales: `status`, `checksums`,
+  `folios`, `by-folios`, `data/{obj}`, `export/...`) y `sync_api.py` (diff de
+  folios: `frescura()` → `folios_faltantes()` → `fetch_faltantes()`).
+- **Login unificado**: el diálogo de credenciales verifica contra intranet y luego
+  obtiene el token del API (`CaptureService.refresh_api_token_best_effort`); el
+  token se guarda con timestamp y se revalida cada 24 h.
+- **Convención de fechas** (`src/core/fechas.py`): interno siempre ISO
+  `yyyy-mm-dd`; UI y reportes en `dd/mm/yyyy`. Para mostrar usar `fecha_ui()`,
+  no `strftime` directo.

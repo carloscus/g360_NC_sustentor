@@ -4,6 +4,7 @@ pedido/O-C/factura, botones documentales y geometría del card de búsqueda."""
 import flet as ft
 
 from src.core.g360_theme import G360Theme
+from src.core.fechas import fecha_ui
 from src.ui.reconocimiento_view import ReconocimientoView
 
 
@@ -141,8 +142,8 @@ def test_rango_fechas_se_preserva_entre_renders(tmp_db):
     view._renderizar_ui()
     assert view.busq_fd[0] == datetime(2026, 5, 1)
     assert view.busq_fh[0] == datetime(2026, 5, 31)
-    assert "01/05/2026" in view.busq_fd_label.value
-    assert "31/05/2026" in view.busq_fh_label.value
+    assert fecha_ui(datetime(2026, 5, 1)) in view.busq_fd_label.value
+    assert fecha_ui(datetime(2026, 5, 31)) in view.busq_fh_label.value
 
 
 def test_insumos_cargados_sobreviven_re_render(tmp_db):
