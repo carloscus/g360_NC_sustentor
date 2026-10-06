@@ -104,6 +104,71 @@ def _historial_para_auditoria(historial, documentos_historial: dict):
     return historial[keep].copy()
 
 
+def _limpiar_busqueda(vista):
+    """Limpia controles, chips y estado de la sección de búsqueda.
+
+    Función de módulo (no método) para ser invocable desde _reset_ui
+    aun cuando self sea un mock SimpleNamespace en los tests.
+    """
+    for attr, kw in [
+        ("busq_cli_chips", {"controls": [], "visible": False}),
+        ("busq_ped_chips", {"controls": [], "visible": False}),
+        ("busq_oc_chips", {"controls": [], "visible": False}),
+        ("busq_fac_chips", {"controls": [], "visible": False}),
+        ("busq_vend_dd", {"options": [], "value": None, "visible": False, "disabled": True}),
+        (
+            "busq_vend_status",
+            {
+                "value": "Historial aplicado. Busca un cliente para seleccionar otro fragmento.",
+                "visible": True,
+            },
+        ),
+        ("btn_pin_vend", {"visible": False}),
+        ("btn_pin_cli", {"visible": False}),
+        ("busq_doc_row", {"visible": False}),
+        (
+            "busq_doc_prompt",
+            {
+                "value": "Selecciona un cliente para filtrar por pedido, O/C o factura.",
+                "visible": True,
+            },
+        ),
+        (
+            "busq_status",
+            {"value": "Historial aplicado a este caso", "color": ft.Colors.ON_SURFACE_VARIANT},
+        ),
+        ("busq_badges", {"visible": False, "controls": []}),
+        ("busq_preview_tbl", {"visible": False}),
+        ("busq_exec_btn", {"visible": False, "disabled": True}),
+    ]:
+        ctrl = getattr(vista, attr, None)
+        if ctrl is not None:
+            for k, v in kw.items():
+                try:
+                    setattr(ctrl, k, v)
+                except Exception:
+                    pass
+    for attr in ("busq_doc_ped_btn", "busq_doc_oc_btn", "busq_doc_fac_btn"):
+        ctrl = getattr(vista, attr, None)
+        if ctrl is not None:
+            try:
+                ctrl.visible = False
+            except Exception:
+                pass
+    preview_rows = getattr(vista, "busq_preview_rows", None)
+    if preview_rows is not None:
+        try:
+            preview_rows.controls.clear()
+        except Exception:
+            pass
+    vista._sel_facturas = []
+    vista._sel_clientes = []
+    vista._sel_pedidos = []
+    vista._sel_ordenes = []
+    if hasattr(vista, "_detalle_docs"):
+        vista._detalle_docs.clear()
+
+
 class _ViewHandlers:
     def _on_tipo_change(self, e):
         valor = e.control.value if e is not None and hasattr(e, "control") else None
@@ -129,9 +194,7 @@ class _ViewHandlers:
         except Exception as ex:
             from src.ui.mensajes import mensaje
 
-            self.app.show_snackbar(
-                mensaje(ex, "pintar la pantalla"), color=self.app.G360_ERROR
-            )
+            self.app.show_snackbar(mensaje(ex, "pintar la pantalla"), color=self.app.G360_ERROR)
         self._verificar_puede_ejecutar()
         if self.container:
             self.container.update()
@@ -175,172 +238,12 @@ class _ViewHandlers:
         if self.app.page:
             self.app.page.update()
 
-    def _on_cliente_change_sf(self, e):
-        cliente = e.control.value
-        if cliente:
-            self._cargar_facturas_cliente_sf(cliente)
-        else:
-            self.factura_dropdown_sf.options = []
-            self.factura_dropdown_sf.value = None
-            self.skus_table_container.visible = False
-            self.alertas_nc_container_sf.visible = False
-        if self.app.page:
-            self.app.page.update()
-
-    def _on_factura_change_sf(self, e):
-        factura_id = e.control.value
-        if factura_id:
-            self._render_sku_table_sf(factura_id)
-            self._check_existing_notes_sf(factura_id)
-        else:
-            self.skus_table_container.visible = False
-            self.alertas_nc_container_sf.visible = False
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
-
-    def _cargar_clientes_dropdown_sf(self):
-        self.selector_sf.cargar_clientes(self.df_historial, self.vendedor_dropdown.value)
-
-    def _cargar_facturas_cliente_sf(self, cliente):
-        self.selector_sf.cargar_facturas(self.df_historial)
-
-    def _render_sku_table_sf(self, factura_id):
-        if self.df_historial is None or not factura_id:
-            self.skus_table_container.visible = False
-            return
-        tipo = factura_id[0]
-        resto = factura_id[1:]
-        serie, nro = resto.split("-", 1)
-        mask = (
-            (self.df_historial["TIPO_DOC"].astype(str).str.strip().str.upper().str.startswith(tipo))
-            & (self.df_historial["SERIE"].astype(str).str.strip() == serie)
-            & (self.df_historial["NUMERO"].astype(str).str.strip() == nro)
-        )
-        df_inv = self.df_historial[mask].copy()
-        if df_inv.empty:
-            self.skus_table_container.visible = False
-            return
-
-        self.skus_table_sf.rows.clear()
-        cols_req = ["CODIGO", "CANTIDAD", "PRECIO_UNITARIO"]
-        if not all(c in df_inv.columns for c in cols_req):
-            self.skus_table_container.visible = False
-            return
-
-        for _, row in df_inv.head(100).iterrows():
-            sku = str(row.get("CODIGO", ""))
-            articulo = str(row.get("ARTICULO", ""))[:30]
-            cant = int(row.get("CANTIDAD", 0))
-            pu = float(row.get("PRECIO_UNITARIO", 0))
-            total = cant * pu
-            incluir = ft.Checkbox(value=True)
-
-            self.skus_table_sf.rows.append(
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(ft.Text(sku, size=10)),
-                        ft.DataCell(ft.Text(articulo, size=10)),
-                        ft.DataCell(ft.Text(str(cant), size=10)),
-                        ft.DataCell(ft.Text(f"S/ {pu:.5f}", size=10)),
-                        ft.DataCell(ft.Text(f"S/ {total:.2f}", size=10)),
-                        ft.DataCell(incluir),
-                    ]
-                )
-            )
-
-        self.skus_table_container.visible = True
-
-    def _check_existing_notes_sf(self, factura_id):
-        if self.df_historial is None or not factura_id:
-            self.alertas_nc_container_sf.visible = False
-            return
-        try:
-            from src.core.detector import detectar_notas_en_historial, obtener_notas_de_factura
-
-            notas = detectar_notas_en_historial(self.df_historial)
-            ref_notas = obtener_notas_de_factura(notas, factura_id)
-            if ref_notas.empty:
-                self.alertas_nc_container_sf.visible = False
-                return
-            total_soles = abs(ref_notas["SOLES"].sum()) if "SOLES" in ref_notas.columns else 0
-            skus_afectados = ref_notas["CODIGO"].nunique() if "CODIGO" in ref_notas.columns else 0
-            items = [
-                ft.Row(
-                    [
-                        ft.Icon(
-                            ft.Icons.WARNING_AMBER_OUTLINED, size=16, color=ft.Colors.AMBER_400
-                        ),
-                        ft.Text(
-                            f"⚠ NC/NDB existentes: {len(ref_notas)} nota(s), S/ {total_soles:.2f}, {skus_afectados} SKU(s)",
-                            size=12,
-                            color=ft.Colors.AMBER_400,
-                        ),
-                    ],
-                    spacing=6,
-                ),
-            ]
-            for _, nr in ref_notas.head(5).iterrows():
-                items.append(
-                    ft.Text(
-                        f"  • {nr.get('DOC_NOTA', '')} | {nr.get('CODIGO', '')} | Cant: {nr.get('CANTIDAD', 0)} | S/ {abs(nr.get('SOLES', 0)):.2f}",
-                        size=10,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                    )
-                )
-            self.alertas_nc_container_sf.content = ft.Column(items, spacing=4)
-            self.alertas_nc_container_sf.bgcolor = ft.Colors.with_opacity(0.08, ft.Colors.AMBER_400)
-            self.alertas_nc_container_sf.border = ft.border.all(
-                1, ft.Colors.with_opacity(0.2, ft.Colors.AMBER_400)
-            )
-            self.alertas_nc_container_sf.visible = True
-        except ImportError:
-            self.alertas_nc_container_sf.visible = False
-
-    def _marcar_todas_sf(self, e):
-        for row in self.skus_table_sf.rows:
-            for cell in row.cells:
-                if isinstance(cell.content, ft.Checkbox):
-                    cell.content.value = True
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
-
-    def _desmarcar_todas_sf(self, e):
-        for row in self.skus_table_sf.rows:
-            for cell in row.cells:
-                if isinstance(cell.content, ft.Checkbox):
-                    cell.content.value = False
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
-
-    def _cargar_clientes_dropdown_df(self):
-        self.selector_df.cargar_clientes(self.df_historial, self.vendedor_dropdown.value)
-
-    def _on_cliente_change_df(self, e):
-        cliente = e.control.value
-        if cliente:
-            self._cargar_facturas_cliente_df(cliente)
-        else:
-            self.factura_dropdown_df.options = []
-            self.factura_dropdown_df.value = None
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
-
-    def _cargar_facturas_cliente_df(self, cliente):
-        self.selector_df.cargar_facturas(self.df_historial)
-
-    def _on_factura_change_ci(self, e):
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
-
-    def _on_factura_change_df(self, e):
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
+    # Handlers legacy eliminados: _on_*_sf, _on_*_ci, _on_*_df, _on_*_fp,
+    # _on_*_pb, _cargar_clientes_dropdown_* (todos referencian selector_*,
+    # cliente_dropdown_* y factura_dropdown_* que nunca se montaron).
+    # _render_sku_table_sf, _check_existing_notes_sf, _marcar_todas_sf,
+    # _desmarcar_todas_sf, _cargar_*_dropdown (referencian selector_* y
+    # dropdowns nunca montados).
 
     def _on_descuento_pct_change(self, e):
         self._verificar_puede_ejecutar()
@@ -351,11 +254,28 @@ class _ViewHandlers:
         if self.app.page:
             self.app.page.update()
 
-    def _cargar_clientes_dropdown_pb(self):
-        self.selector_pb.cargar_clientes(self.df_historial, self.vendedor_dropdown.value)
+    def _abrir_fp_desde(self, e):
+        if self.app.page and hasattr(self, "fp_desde"):
+            self.app.page.open(self.fp_desde)
 
-    def _on_cliente_change_pb(self, e):
-        self._actualizar_lineas()
+    def _abrir_fp_hasta(self, e):
+        if self.app.page and hasattr(self, "fp_hasta"):
+            self.app.page.open(self.fp_hasta)
+
+    def _on_fp_desde_change(self, e):
+        val = self.fp_desde.value if hasattr(self, "fp_desde") else None
+        label = fecha_ui(val) if val else "Sin filtro"
+        if hasattr(self, "fecha_desde_fp"):
+            self.fecha_desde_fp.text = f"Desde: {label}"
+        self._verificar_puede_ejecutar()
+        if self.app.page:
+            self.app.page.update()
+
+    def _on_fp_hasta_change(self, e):
+        val = self.fp_hasta.value if hasattr(self, "fp_hasta") else None
+        label = fecha_ui(val) if val else "Sin filtro"
+        if hasattr(self, "fecha_hasta_fp"):
+            self.fecha_hasta_fp.text = f"Hasta: {label}"
         self._verificar_puede_ejecutar()
         if self.app.page:
             self.app.page.update()
@@ -374,6 +294,12 @@ class _ViewHandlers:
         if self.app.page:
             self.app.page.update()
 
+    def _marcar_todas_sf(self, e):
+        pass
+
+    def _desmarcar_todas_sf(self, e):
+        pass
+
     def _invalidar_resultado_por_config(self, mensaje):
         """No permitir exportar un resultado calculado con checks anteriores."""
         self.resultado = None
@@ -388,9 +314,7 @@ class _ViewHandlers:
             self.app.page.update()
 
     def _on_cliente_change_pd(self, e):
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
+        pass
 
     def _quitar_sku_filter(self, e):
         """Boton clear del insumo Filtro SKU: libera path y re-habilita descuento global."""
@@ -405,7 +329,7 @@ class _ViewHandlers:
             self.app.page.update()
 
     def _cargar_clientes_dropdown_pd(self):
-        self.selector_pd.cargar_clientes(self.df_historial, self.vendedor_dropdown.value)
+        pass
 
     def _on_factura_selected(self, e):
         if self.app.page:
@@ -422,62 +346,7 @@ class _ViewHandlers:
         if self.app.page:
             self.app.page.update()
 
-    def _cargar_clientes_dropdown_ci(self):
-        self.selector_ci.cargar_clientes(self.df_historial, self.vendedor_dropdown.value)
-
-    def _cargar_facturas_cliente_ci(self, cliente):
-        self.selector_ci.cargar_facturas(self.df_historial)
-
-    def _abrir_fp_desde(self, e):
-        if self.app.page:
-            self.app.page.open(self.fp_desde)
-
-    def _abrir_fp_hasta(self, e):
-        if self.app.page:
-            self.app.page.open(self.fp_hasta)
-
-    def _on_cliente_change_fp(self, e):
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
-
-    def _on_fp_desde_change(self, e):
-        val = self.fp_desde.value
-        label = fecha_ui(val) if val else "Sin filtro"
-        self.fecha_desde_fp.text = f"Desde: {label}"
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
-
-    def _on_fp_hasta_change(self, e):
-        val = self.fp_hasta.value
-        label = fecha_ui(val) if val else "Sin filtro"
-        self.fecha_hasta_fp.text = f"Hasta: {label}"
-        self._verificar_puede_ejecutar()
-        if self.app.page:
-            self.app.page.update()
-
     def _on_vendedor_change(self, e):
-        for dd in [
-            self.cliente_dropdown_sf,
-            self.cliente_dropdown_ci,
-            self.cliente_dropdown_df,
-            self.cliente_dropdown_fp,
-            self.cliente_dropdown_pb,
-            self.cliente_dropdown_pd,
-        ]:
-            dd.value = None
-        for dd in [self.factura_dropdown_sf, self.factura_dropdown_ci, self.factura_dropdown_df]:
-            dd.options = []
-            dd.value = None
-        self.skus_table_container.visible = False
-        self.alertas_nc_container_sf.visible = False
-        self._cargar_clientes_dropdown_sf()
-        self._cargar_clientes_dropdown_ci()
-        self._cargar_clientes_dropdown_df()
-        self._cargar_clientes_dropdown_fp()
-        self._cargar_clientes_dropdown_pb()
-        self._cargar_clientes_dropdown_pd()
         if self._tipo_incluye("rebate_volumen"):
             self._actualizar_lineas()
         self._verificar_puede_ejecutar()
@@ -549,7 +418,7 @@ class _ViewHandlers:
             self.vendedor_dropdown.value = None
 
     def _cargar_clientes_dropdown_fp(self):
-        self.selector_fp.cargar_clientes(self.df_historial, self.vendedor_dropdown.value)
+        pass
 
     def _on_linea_toggle(self, e):
         self._verificar_puede_ejecutar()
@@ -569,15 +438,23 @@ class _ViewHandlers:
             self.app.page.update()
 
     def _agregar_insumo(self, ruta: str):
-        """Agrega un archivo XLSX y lo asigna al insumo correspondiente del caso.
-
-        Clasifica por nombre de archivo; si no reconoce el nombre, lo asigna
-        al primer insumo requerido pendiente del caso actual.
-        """
+        """Agrega un archivo XLSX y lo asigna al insumo correspondiente del caso."""
         from pathlib import Path
         from src.ui.catalog import CATALOGO
 
         name = Path(ruta).name
+        tipo = self._clasificar_archivo_insumo(ruta, name)
+        labels = self._etiquetas_insumo(tipo)
+        self._asignar_insumo(tipo, ruta)
+        self._actualizar_ui_insumo(tipo, name, labels, ruta)
+        self._renderizar_lista_insumos()
+        self._verificar_puede_ejecutar()
+
+    def _clasificar_archivo_insumo(self, ruta: str, name: str) -> str:
+        """Determina qué tipo de insumo representa el archivo basado en su nombre."""
+        from pathlib import Path
+        from src.ui.catalog import CATALOGO
+
         lower = name.lower()
         caso = CATALOGO.get(self.tipo_actual)
         needs = [i for i in (caso.insumos if caso else ()) if i != "historico"]
@@ -589,36 +466,29 @@ class _ViewHandlers:
             "mecanica": lambda: self.requerimientos_paths,
         }
 
-        # FPE: todo archivo externo es un requerimiento del evento (SKU +
-        # cantidad + descuento) y entra al slot de requerimientos; el gate
-        # de ejecución exige ese slot, así que el routing no depende del
-        # nombre del archivo.
+        # FPE: todo archivo externo es un requerimiento del evento.
         if self._tipo_incluye("feria_preventa"):
-            tipo = "mecanica"
-        # VRS: el archivo combinado (SKU + CANTIDAD + PRECIO_BASE) es el insumo
-        # principal y el 2º archivo es el override de cantidades. El nombre
-        # no decide el slot (la plantilla oficial dice "cantidad"), así que
-        # se reparte por orden de carga.
-        elif self._tipo_incluye("diferencia_stock"):
-            tipo = "lista_precios" if not self.lista_path else "cantidad"
-        elif "lista" in lower or "precio" in lower or "condicion" in lower:
-            tipo = "lista_precios"
-        elif "sku" in lower or "filtro" in lower:
-            tipo = "sku"
-        elif "stock" in lower or "cantidad" in lower:
-            tipo = "cantidad"
-        elif "descuento" in lower or "%" in lower or "rebate" in lower:
-            tipo = "porcentaje"
-        else:
-            tipo = None
-        if tipo is None:
-            for cand in ("lista_precios", "sku", "cantidad", "porcentaje", "mecanica"):
-                if cand in needs and not (asignado[cand]() if cand in asignado else None):
-                    tipo = cand
-                    break
-        if tipo is None:
-            tipo = "extra"
+            return "mecanica"
+        # VRS: distribuye por orden de carga (lista → cantidad).
+        if self._tipo_incluye("diferencia_stock"):
+            return "lista_precios" if not self.lista_path else "cantidad"
+        # Match por nombre del archivo.
+        if "lista" in lower or "precio" in lower or "condicion" in lower:
+            return "lista_precios"
+        if "sku" in lower or "filtro" in lower:
+            return "sku"
+        if "stock" in lower or "cantidad" in lower:
+            return "cantidad"
+        if "descuento" in lower or "%" in lower or "rebate" in lower:
+            return "porcentaje"
+        # Fallback: primer slot libre.
+        for cand in ("lista_precios", "sku", "cantidad", "porcentaje", "mecanica"):
+            if cand in needs and not (asignado[cand]() if cand in asignado else None):
+                return cand
+        return "extra"
 
+    def _etiquetas_insumo(self, tipo: str) -> dict:
+        """Retorna el mapeo tipo → label visible para los insumos del caso actual."""
         labels = {
             "lista_precios": "Lista precios",
             "sku": "Filtro SKU",
@@ -634,34 +504,56 @@ class _ViewHandlers:
             }
         if self._tipo_incluye("feria_preventa"):
             labels["mecanica"] = "Requerimientos"
-        if tipo == "lista_precios":
-            self.lista_path = ruta
-            self.lbl_lista.value = f"✓ {name}"
-            self.lbl_lista.color = self.app.G360_SUCCESS
-        elif tipo == "sku":
-            self.sku_filter_path = ruta
-            self.lbl_sku_filter.value = f"✓ {name}"
-            self.lbl_sku_filter.color = self.app.G360_SUCCESS
-            self.sku_filter_clear_btn.visible = True
-        elif tipo == "cantidad":
-            self.stock_cliente_path = ruta
-            self.lbl_stock_cliente.value = f"✓ {name}"
-            self.lbl_stock_cliente.color = self.app.G360_SUCCESS
-            self.stock_cliente_clear_btn.visible = True
-        elif tipo == "porcentaje":
-            self.desc_file_path = ruta
-            self.lbl_desc_file.value = f"✓ {name}"
-            self.lbl_desc_file.color = self.app.G360_SUCCESS
-        elif tipo == "mecanica":
-            if Path(ruta) not in self.requerimientos_paths:
-                self.requerimientos_paths.append(Path(ruta))
-            self._actualizar_lista_requerimientos()
-        # El % global de DO es la alternativa al archivo por SKU: al cargar
-        # un archivo el campo se deshabilita. Va DESPUÉS de la cadena para
-        # no cortarla (antes un `if` aquí impedia asignar cantidad/porcentaje).
+        return labels
+
+    def _asignar_insumo(self, tipo: str, ruta: str):
+        """Asigna la ruta al atributo correspondiente según el tipo de insumo."""
+        asignaciones = {
+            "lista_precios": lambda: setattr(self, "lista_path", ruta),
+            "sku": lambda: setattr(self, "sku_filter_path", ruta),
+            "cantidad": lambda: setattr(self, "stock_cliente_path", ruta),
+            "porcentaje": lambda: setattr(self, "desc_file_path", ruta),
+            "mecanica": lambda: self._agregar_requerimiento(ruta),
+        }
+        fn = asignaciones.get(tipo)
+        if fn:
+            fn()
+
+    def _agregar_requerimiento(self, ruta: str):
+        """Añade un path a requerimientos_paths si aún no está."""
+        from pathlib import Path
+
+        if Path(ruta) not in self.requerimientos_paths:
+            self.requerimientos_paths.append(Path(ruta))
+        self._actualizar_lista_requerimientos()
+
+    def _actualizar_ui_insumo(self, tipo: str, name: str, labels: dict, ruta: str):
+        """Actualiza los labels y botones de UI tras asignar un insumo."""
+        lbl_map = {
+            "lista_precios": ("lbl_lista", "lista_path"),
+            "sku": ("lbl_sku_filter", "sku_filter_path"),
+            "cantidad": ("lbl_stock_cliente", "stock_cliente_path"),
+            "porcentaje": ("lbl_desc_file", "desc_file_path"),
+        }
+        if tipo in lbl_map:
+            lbl_attr, _ = lbl_map[tipo]
+            lbl = getattr(self, lbl_attr, None)
+            if lbl:
+                lbl.value = f"✓ {name}"
+                lbl.color = self.app.G360_SUCCESS
+        # Botones clear
+        clear_map = {
+            "sku": "sku_filter_clear_btn",
+            "cantidad": "stock_cliente_clear_btn",
+        }
+        if tipo in clear_map:
+            btn = getattr(self, clear_map[tipo], None)
+            if btn:
+                btn.visible = True
+        # DO: deshabilitar % global al cargar archivo
         if self._tipo_incluye("descuento_precio"):
             self.descuento_pct.disabled = True
-
+        # Registrar para preview
         self._insumo_files.append(
             {
                 "ruta": ruta,
@@ -671,8 +563,6 @@ class _ViewHandlers:
                 "preview_loading": True,
             }
         )
-        self._renderizar_lista_insumos()
-        self._verificar_puede_ejecutar()
 
     def _quitar_insumo(self, e, ruta: str):
         """Quita un archivo de la lista y libera su insumo asignado."""
@@ -736,8 +626,29 @@ class _ViewHandlers:
             return
         self.df_historial = df
         self._hist_fragmento = self._fragmento_stats(df)
+        self._actualizar_historial_label(df)
+        self._recargar_dropdowns_fragmento()
+        self._renderizar_ui()
+        self._auto_seleccionar_unicos()
+        self._refrescar_card_db()
+        self._verificar_puede_ejecutar()
+        # Limpiar estado de búsqueda para que la reconstrucción no repita badges/preview
+        self._busq_df = None
+        _limpiar_busqueda(self)
+        if self.app.page:
+            self.app.page.update()
+        self.app.show_snackbar(
+            f"Historial aplicado: {len(df):,} filas — completa insumos y ejecuta",
+            self.app.G360_SUCCESS,
+        )
+
+    def _actualizar_historial_label(self, df):
+        """Actualiza el label del historial con la cantidad de filas aplicadas."""
         self.lbl_historial.value = f"✓ SQLite ({len(df):,} filas)"
         self.lbl_historial.color = self.app.G360_SUCCESS
+
+    def _recargar_dropdowns_fragmento(self):
+        """Recarga los dropdowns legacy y líneas tras aplicar un fragmento."""
         try:
             self._cargar_facturas_dropdown()
             self._cargar_vendedores_dropdown()
@@ -751,106 +662,9 @@ class _ViewHandlers:
             self._actualizar_rango_fechas_fp()
         except Exception:
             pass
-        self._renderizar_ui()
-        self._auto_seleccionar_unicos()
-        self._refrescar_card_db()
-        self._verificar_puede_ejecutar()
-        # Limpiar estado de búsqueda para que la reconstrucción no repita badges/preview
-        self._busq_df = None
-        self._sel_facturas = []
-        self._sel_clientes = []
-        self._sel_pedidos = []
-        self._sel_ordenes = []
-        if hasattr(self, "_detalle_docs"):
-            self._detalle_docs.clear()
-        # Limpiar UI visual de la card DATOS DEL CASO
-        if hasattr(self, "busq_cli_chips"):
-            self.busq_cli_chips.controls.clear()
-            self.busq_cli_chips.visible = False
-        if hasattr(self, "busq_ped_chips"):
-            self.busq_ped_chips.controls.clear()
-            self.busq_ped_chips.visible = False
-        if hasattr(self, "busq_oc_chips"):
-            self.busq_oc_chips.controls.clear()
-            self.busq_oc_chips.visible = False
-        if hasattr(self, "busq_fac_chips"):
-            self.busq_fac_chips.controls.clear()
-            self.busq_fac_chips.visible = False
-        if hasattr(self, "busq_vend_dd"):
-            self.busq_vend_dd.options.clear()
-            self.busq_vend_dd.value = None
-            self.busq_vend_dd.visible = False
-            self.busq_vend_dd.disabled = True
-        if hasattr(self, "busq_vend_status"):
-            self.busq_vend_status.value = (
-                "Historial aplicado. Busca un cliente para seleccionar otro fragmento."
-            )
-            self.busq_vend_status.visible = True
-        if hasattr(self, "btn_pin_vend"):
-            self.btn_pin_vend.visible = False
-        if hasattr(self, "btn_pin_cli"):
-            self.btn_pin_cli.visible = False
-        if hasattr(self, "busq_doc_row"):
-            self.busq_doc_row.visible = False
-        if hasattr(self, "busq_doc_prompt"):
-            self.busq_doc_prompt.value = (
-                "Selecciona un cliente para filtrar por pedido, O/C o factura."
-            )
-            self.busq_doc_prompt.visible = True
-        for attr in ("busq_doc_ped_btn", "busq_doc_oc_btn", "busq_doc_fac_btn"):
-            if hasattr(self, attr):
-                getattr(self, attr).visible = False
-        # Resetear status y badges
-        if hasattr(self, "busq_status"):
-            self.busq_status.value = "Historial aplicado a este caso"
-            self.busq_status.color = ft.Colors.ON_SURFACE_VARIANT
-        if hasattr(self, "busq_badges"):
-            self.busq_badges.visible = False
-            self.busq_badges.controls.clear()
-        if hasattr(self, "busq_preview_tbl"):
-            self.busq_preview_tbl.visible = False
-            if hasattr(self, "busq_preview_rows"):
-                self.busq_preview_rows.controls.clear()
-        if hasattr(self, "busq_exec_btn"):
-            self.busq_exec_btn.visible = False
-            self.busq_exec_btn.disabled = True
-        if self.app.page:
-            self.app.page.update()
-        self.app.show_snackbar(
-            f"Historial aplicado: {len(df):,} filas — completa insumos y ejecuta",
-            self.app.G360_SUCCESS,
-        )
 
     def _auto_seleccionar_unicos(self):
-        """Si el fragmento tiene 1 cliente/1 factura, preseleccionarlos en la UI."""
-        try:
-            opts = self.cliente_dropdown_sf.options
-            if opts and len(opts) == 1:
-                self.cliente_dropdown_sf.value = opts[0].key
-                self.selector_sf.cargar_facturas(self.df_historial)
-                fopts = self.factura_dropdown_sf.options
-                if fopts and len(fopts) == 1:
-                    self.factura_dropdown_sf.value = fopts[0].key
-                    self._render_sku_table_sf(fopts[0].key)
-                    self._check_existing_notes_sf(fopts[0].key)
-            opts_ci = self.cliente_dropdown_ci.options
-            if opts_ci and len(opts_ci) == 1:
-                self.cliente_dropdown_ci.value = opts_ci[0].key
-                self.selector_ci.cargar_facturas(self.df_historial)
-                fopts = self.factura_dropdown_ci.options
-                if fopts and len(fopts) == 1:
-                    self.factura_dropdown_ci.value = fopts[0].key
-            opts_df = self.cliente_dropdown_df.options
-            if opts_df and len(opts_df) == 1:
-                self.cliente_dropdown_df.value = opts_df[0].key
-                self.selector_df.cargar_facturas(self.df_historial)
-                fopts = self.factura_dropdown_df.options
-                if fopts and len(fopts) == 1:
-                    self.factura_dropdown_df.value = fopts[0].key
-            if self.app.page:
-                self.app.page.update()
-        except Exception:
-            pass
+        """Sin legacy: sin dropdowns manuales, nada que preseleccionar."""
 
     def _quitar_stock_cliente(self, e):
         self.stock_cliente_path = None
@@ -897,79 +711,14 @@ class _ViewHandlers:
 
     @safe_handler
     def _verificar_puede_ejecutar(self):
+        """Habilita el botón de ejecutar si todos los insumos requeridos están presentes."""
         if not self.app.page:
             return
         cfg = self._caso_de_tipo()
-        necesita_lista = self._insumo_necesita("lista_precios", cfg)
-        puede = self.df_historial is not None
-        if necesita_lista:
-            puede = puede and self.lista_path is not None
-        if cfg.get("strategy") == "feria_preventa":
-            puede = puede and len(self.requerimientos_paths) > 0
-        # La seleccion de cliente/factura vive en el fragmento de busqueda
-        # (USAR COMO HISTORIAL); no se exigen dropdowns manuales.
-        fragmento = self._hist_fragmento is not None
-        if self.tipo_actual == "ANF":
-            puede = puede and fragmento and self._hist_fragmento.get("facturas", 0) == 1
-        if self.tipo_actual == "DO":
-            try:
-                tiene_pct = float(self.descuento_pct.value or "0") > 0
-            except ValueError:
-                tiene_pct = False
-            puede = puede and (
-                self.desc_file_path is not None or self.sku_filter_path is not None or tiene_pct
-            )
-        if self.tipo_actual == "CMV":
-            try:
-                meta_val = float(self.meta_monto.value or "0")
-                pct_val = float(self.rebate_pct.value or "0")
-                puede = puede and meta_val > 0 and pct_val > 0
-            except ValueError:
-                puede = False
+        puede = self._historial_disponible()
+        puede = puede and self._insumos_especificos_disponibles(cfg)
         self.btn_ejecutar.disabled = not puede
-        if puede:
-            self.lbl_ejecutar_hint.value = "Datos e insumos listos. Puedes ejecutar el cálculo."
-            self.lbl_ejecutar_hint.color = G360Theme.ok_color()
-        elif self.df_historial is None:
-            self.lbl_ejecutar_hint.value = (
-                "En Datos del caso, busca y aplica un fragmento del historial."
-            )
-            self.lbl_ejecutar_hint.color = G360Theme.warning_color()
-        elif necesita_lista and not self.lista_path:
-            if self._tipo_incluye("diferencia_stock"):
-                self.lbl_ejecutar_hint.value = (
-                    "Carga el archivo por SKU: CANTIDAD, PRECIO_BASE y descuentos."
-                )
-            else:
-                self.lbl_ejecutar_hint.value = (
-                    "Falta cargar la lista de precios requerida por este caso."
-                )
-            self.lbl_ejecutar_hint.color = G360Theme.warning_color()
-        elif self.tipo_actual == "ANF" and (
-            not fragmento or self._hist_fragmento.get("facturas", 0) != 1
-        ):
-            self.lbl_ejecutar_hint.value = (
-                "Anulación requiere exactamente una factura en el historial."
-            )
-            self.lbl_ejecutar_hint.color = G360Theme.warning_color()
-        elif self.tipo_actual == "DO":
-            self.lbl_ejecutar_hint.value = (
-                "Indica un descuento o agrega el archivo de porcentaje/SKU."
-            )
-            self.lbl_ejecutar_hint.color = G360Theme.warning_color()
-        elif self.tipo_actual == "CMV":
-            self.lbl_ejecutar_hint.value = (
-                "Completa una meta y un porcentaje de rebate mayores que cero."
-            )
-            self.lbl_ejecutar_hint.color = G360Theme.warning_color()
-        elif cfg.get("strategy") == "feria_preventa" and not self.requerimientos_paths:
-            self.lbl_ejecutar_hint.value = (
-                "Agrega el archivo de requerimientos de la feria/preventa."
-            )
-            self.lbl_ejecutar_hint.color = G360Theme.warning_color()
-        else:
-            self.lbl_ejecutar_hint.value = "Completa los insumos requeridos por este caso."
-            self.lbl_ejecutar_hint.color = G360Theme.warning_color()
+        self._actualizar_hint_ejecucion(puede, cfg)
         try:
             self.btn_ejecutar.update()
             self.lbl_ejecutar_hint.update()
@@ -978,322 +727,439 @@ class _ViewHandlers:
         if self.app and self.app.page:
             self.app.page.update()
 
+    def _historial_disponible(self):
+        """El historial debe estar cargado para cualquier cálculo."""
+        return self.df_historial is not None
+
+    def _insumos_especificos_disponibles(self, cfg):
+        """Validaciones específicas por tipo de caso."""
+        necesita_lista = self._insumo_necesita("lista_precios", cfg)
+        puede = self.df_historial is not None
+        if necesita_lista:
+            puede = puede and self.lista_path is not None
+        if cfg.get("strategy") == "feria_preventa":
+            puede = puede and len(self.requerimientos_paths) > 0
+        if self.tipo_actual == "ANF":
+            puede = puede and self._hist_fragmento is not None
+            puede = puede and self._hist_fragmento.get("facturas", 0) == 1
+        if self.tipo_actual == "DO":
+            tiene_pct = self._descuento_pct_valido()
+            puede = puede and (
+                self.desc_file_path is not None or self.sku_filter_path is not None or tiene_pct
+            )
+        if self.tipo_actual == "CMV":
+            vals_ok = self._cmv_vals_positivos()
+            puede = puede and vals_ok
+        return puede
+
+    def _descuento_pct_valido(self):
+        """El campo de porcentaje de descuento tiene un valor numérico > 0."""
+        try:
+            return float(self.descuento_pct.value or "0") > 0
+        except ValueError:
+            return False
+
+    def _cmv_vals_positivos(self):
+        """Meta y porcentaje de CMV deben ser numéricos > 0."""
+        try:
+            meta = float(self.meta_monto.value or "0")
+            pct = float(self.rebate_pct.value or "0")
+            return meta > 0 and pct > 0
+        except ValueError:
+            return False
+
+    def _actualizar_hint_ejecucion(self, puede, cfg):
+        """Actualiza el label de hint según el estado de validación."""
+        if puede:
+            self.lbl_ejecutar_hint.value = "Datos e insumos listos. Puedes ejecutar el cálculo."
+            self.lbl_ejecutar_hint.color = G360Theme.ok_color()
+            return
+        self.lbl_ejecutar_hint.color = G360Theme.warning_color()
+        if self.df_historial is None:
+            self.lbl_ejecutar_hint.value = (
+                "En Datos del caso, busca y aplica un fragmento del historial."
+            )
+        elif self._insumo_necesita("lista_precios", cfg) and not self.lista_path:
+            if self._tipo_incluye("diferencia_stock"):
+                self.lbl_ejecutar_hint.value = (
+                    "Carga el archivo por SKU: CANTIDAD, PRECIO_BASE y descuentos."
+                )
+            else:
+                self.lbl_ejecutar_hint.value = (
+                    "Falta cargar la lista de precios requerida por este caso."
+                )
+        elif self.tipo_actual == "ANF" and (
+            self._hist_fragmento is None or self._hist_fragmento.get("facturas", 0) != 1
+        ):
+            self.lbl_ejecutar_hint.value = (
+                "Anulación requiere exactamente una factura en el historial."
+            )
+        elif self.tipo_actual == "DO":
+            self.lbl_ejecutar_hint.value = (
+                "Indica un descuento o agrega el archivo de porcentaje/SKU."
+            )
+        elif self.tipo_actual == "CMV":
+            self.lbl_ejecutar_hint.value = (
+                "Completa una meta y un porcentaje de rebate mayores que cero."
+            )
+        elif cfg.get("strategy") == "feria_preventa" and not self.requerimientos_paths:
+            self.lbl_ejecutar_hint.value = (
+                "Agrega el archivo de requerimientos de la feria/preventa."
+            )
+        else:
+            self.lbl_ejecutar_hint.value = "Completa los insumos requeridos por este caso."
+
     @safe_handler
     def _ejecutar(self, e):
         self.app.show_loading("Ejecutando reconocimiento...")
+        threading.Thread(target=self._ejecutar_tarea, daemon=True).start()
 
-        def task():
-            try:
-                from src.ui.config_builder import build_config, build_datos_exp
+    def _ejecutar_tarea(self):
+        """Tarea principal ejecutada en hilo: configuración → pipeline → enrichment → display."""
+        try:
+            exp = self._construir_expediente()
+            if exp is None:
+                return
+            self._ejecutar_pipeline(exp)
+            self._enriquecer_resultado(exp)
+            self._mostrar_resultado_post_ejecucion(exp)
+        except Exception as ex:
+            from src.ui.mensajes import mensaje
 
-                # Map catalog case + modalidad → legacy tipo for config_builder compat
-                legacy_tipo = self._legacy_tipo()
-                estrategia, variante = ESTRATEGIA_POR_TIPO.get(legacy_tipo, ("", ""))
+            self.app.show_snackbar(
+                mensaje(ex, "cargar el detalle del cliente"), self.app.G360_ERROR
+            )
+            self.app.hide_loading()
+            if self.app.page:
+                self.app.page.update()
 
-                ui = self._collect_ui_values()
-                config = build_config(legacy_tipo, ui)
-                if legacy_tipo in (
-                    "diferencia_precio",
-                    "diferencia_stock",
-                    "diferencia_cantidad",
-                    "descuento_precio",
-                    "feria_preventa",
-                ) and not config.get("documentos_historial", {}).get("facturas", {}).get(
-                    "usar", True
-                ):
-                    self.app.show_snackbar(
-                        "Este cálculo requiere Facturas: Usar; activa el check para continuar.",
-                        self.app.G360_WARNING,
-                    )
-                    return
-                datos_exp = build_datos_exp(legacy_tipo, self.df_historial, config, ui)
+    def _construir_expediente(self):
+        """Construye el ExpedienteComercial desde la UI: config → validación → datos → condiciones."""
+        from src.ui.config_builder import build_config, build_datos_exp
 
-                exp = ExpedienteComercial(
-                    nombre=(
-                        CATALOGO.get(self.tipo_actual) or SimpleNamespace(label=self.tipo_actual)
-                    ).label,
-                    familia=(
-                        CATALOGO.get(self.tipo_actual) or SimpleNamespace(label=self.tipo_actual)
-                    ).label,
-                    estrategia=estrategia,
-                    variante=variante,
-                    datos=datos_exp,
-                    contexto=PipelineContext(
-                        config=config,
-                        antecedentes=self.antecedentes.value or "",
-                        observaciones=self.observaciones.value or "",
-                    ),
-                )
+        legacy_tipo = self._legacy_tipo()
+        estrategia, variante = ESTRATEGIA_POR_TIPO.get(legacy_tipo, ("", ""))
+        ui = self._collect_ui_values()
+        config = build_config(legacy_tipo, ui)
 
-                condiciones = []
-                lt = self._legacy_tipo()
-                cfg = TIPO_CONFIG.get(lt, {})
-                if cfg.get("necesita_lista", False) and self.lista_path:
-                    cond_df = read_erp_file(self.lista_path)
-                    condiciones.append(cond_df)
-                if lt in ("diferencia_cantidad", "diferencia_stock") and self.stock_cliente_path:
-                    # Override opcional de cantidades (SKU + CANTIDAD):
-                    # condiciones[1] del motor CantidadDeterminada. El
-                    # archivo combinado de condiciones[0] manda si no hay
-                    # este. `diferencia_cantidad` es alias oculto de VRS.
-                    condiciones.append(read_erp_file(self.stock_cliente_path))
-                if self.tipo_actual == "DO" and self.desc_file_path:
-                    cond_df = read_erp_file(self.desc_file_path)
-                    condiciones.append(cond_df)
-                exp.condiciones = condiciones
+        if self._requiere_facturas_activas(legacy_tipo) and not config.get(
+            "documentos_historial", {}
+        ).get("facturas", {}).get("usar", True):
+            self.app.show_snackbar(
+                "Este cálculo requiere Facturas: Usar; activa el check para continuar.",
+                self.app.G360_WARNING,
+            )
+            return None
 
-                pipeline = Pipeline()
-                exp = pipeline.ejecutar(exp)
-                self.resultado = exp
+        datos_exp = build_datos_exp(legacy_tipo, self.df_historial, config, ui)
+        tipo_info = CATALOGO.get(self.tipo_actual) or SimpleNamespace(label=self.tipo_actual)
+        exp = ExpedienteComercial(
+            nombre=tipo_info.label,
+            familia=tipo_info.label,
+            estrategia=estrategia,
+            variante=variante,
+            datos=datos_exp,
+            contexto=PipelineContext(
+                config=config,
+                antecedentes=self.antecedentes.value or "",
+                observaciones=self.observaciones.value or "",
+            ),
+        )
+        exp.condiciones = self._construir_condiciones(legacy_tipo)
+        return exp
 
-                # Generate exp_id for audit evidence file naming
-                if exp.resultado and exp.resultado.dataframe is not None:
-                    df_res = exp.resultado.dataframe
-                    cliente_id = ""
-                    for col in ("COD_CLIENTE", "id_cliente"):
-                        if col in df_res.columns:
-                            vals = df_res[col].dropna().unique()
-                            if len(vals) > 0:
-                                cliente_id = str(vals[0]).strip()
-                                break
-                    doc_ref = ui.get("factura_ci") or ui.get("factura_df") or ""
-                    serie, nro = "", ""
-                    if doc_ref and "-" in doc_ref:
-                        parte, nro = doc_ref.rsplit("-", 1)
-                        serie = parte[1:] if len(parte) > 1 else parte
-                    if cliente_id and serie and nro:
-                        exp.exp_id = build_expediente_id(self.tipo_actual, cliente_id, serie, nro)
+    def _requiere_facturas_activas(self, legacy_tipo):
+        """Tipos de cálculo que exigen Facturas: Usar = true."""
+        return legacy_tipo in (
+            "diferencia_precio",
+            "diferencia_stock",
+            "diferencia_cantidad",
+            "descuento_precio",
+            "feria_preventa",
+        )
 
-                if exp.resultado and not exp.resultado.dataframe.empty:
-                    df_res = exp.resultado.dataframe
-                    from src.core.document_classifier import resumen_global
+    def _construir_condiciones(self, legacy_tipo):
+        """Arma la lista de DataFrames de condiciones según el tipo y los insumos cargados."""
+        condiciones = []
+        cfg = TIPO_CONFIG.get(legacy_tipo, {})
+        if cfg.get("necesita_lista", False) and self.lista_path:
+            condiciones.append(read_erp_file(self.lista_path))
+        if legacy_tipo in ("diferencia_cantidad", "diferencia_stock") and self.stock_cliente_path:
+            # Override opcional de cantidades (SKU + CANTIDAD).
+            # Condiciones[0] del motor CantidadDeterminada; este archivo manda si existe.
+            condiciones.append(read_erp_file(self.stock_cliente_path))
+        if self.tipo_actual == "DO" and self.desc_file_path:
+            condiciones.append(read_erp_file(self.desc_file_path))
+        return condiciones
 
-                    historial_visible = _historial_para_auditoria(
-                        self.df_historial, config.get("documentos_historial", {})
-                    )
-                    solo_ncnd = (
-                        historial_visible[
-                            historial_visible["TIPO_CLASE"].astype(str).str.lower() != "factura"
-                        ]
-                        if (
-                            historial_visible is not None
-                            and "TIPO_CLASE" in historial_visible.columns
+    def _ejecutar_pipeline(self, exp):
+        """Ejecuta el pipeline y almacena el resultado."""
+        pipeline = Pipeline()
+        self.resultado = pipeline.ejecutar(exp)
+        self._asignar_exp_id(self.resultado)
+
+    def _asignar_exp_id(self, exp):
+        """Genera y asigna exp_id a partir del primer cliente, serie y número detectados."""
+        if not exp.resultado or exp.resultado.dataframe is None:
+            return
+        df_res = exp.resultado.dataframe
+        cliente_id = ""
+        for col in ("COD_CLIENTE", "id_cliente"):
+            if col in df_res.columns:
+                vals = df_res[col].dropna().unique()
+                if len(vals) > 0:
+                    cliente_id = str(vals[0]).strip()
+                    break
+        if not cliente_id:
+            return
+        ui_exp = self._collect_ui_values()
+        doc_ref = ui_exp.get("factura_ci") or ui_exp.get("factura_df") or ""
+        serie, nro = "", ""
+        if doc_ref and "-" in doc_ref:
+            parte, nro = doc_ref.rsplit("-", 1)
+            serie = parte[1:] if len(parte) > 1 else parte
+        if cliente_id and serie and nro:
+            exp.exp_id = build_expediente_id(self.tipo_actual, cliente_id, serie, nro)
+
+    def _enriquecer_resultado(self, exp):
+        """Añade metadatos de enriquecimiento: exp_id, NC/ND, AL12 y auditoría."""
+        if not exp.resultado or exp.resultado.dataframe.empty:
+            return
+        df_res = exp.resultado.dataframe
+        from src.ui.config_builder import build_config
+
+        legacy_tipo = self._legacy_tipo()
+        ui = self._collect_ui_values()
+        config = build_config(legacy_tipo, ui)
+
+        self._enriquecer_nc_nd(exp, df_res, config)
+        self._enriquecer_al12(exp, df_res, config)
+        self._enriquecer_auditoria_nc(exp, df_res, config, ui)
+        self._señalizar_facturas_con_notas(exp)
+
+    def _enriquecer_nc_nd(self, exp, df_res, config):
+        """Añade resumen NC/ND y columnas auxiliares al dataframe de resultado."""
+        from src.core.document_classifier import resumen_global
+
+        historial_visible = _historial_para_auditoria(
+            self.df_historial, config.get("documentos_historial", {})
+        )
+        solo_ncnd = (
+            historial_visible[historial_visible["TIPO_CLASE"].astype(str).str.lower() != "factura"]
+            if historial_visible is not None and "TIPO_CLASE" in historial_visible.columns
+            else historial_visible
+        )
+        if not solo_ncnd.empty and "CODIGO" in solo_ncnd.columns and "SKU" in df_res.columns:
+            skus_procesados = set(df_res["SKU"].astype(str).str.strip())
+            solo_ncnd = solo_ncnd[solo_ncnd["CODIGO"].astype(str).str.strip().isin(skus_procesados)]
+        full_resumen = resumen_global(solo_ncnd)
+        if full_resumen:
+            exp.resultado.metricas["nc_detalle"] = full_resumen
+
+        if historial_visible is None or "NC_ASOCIADAS" not in historial_visible.columns:
+            return
+        hay_notas = bool(historial_visible["TIPO_CLASE"].astype(str).str.lower() != "factura").any()
+        if not hay_notas:
+            return
+
+        doc_to_nc = dict(
+            zip(
+                historial_visible["DOC_ID"],
+                historial_visible["NC_ASOCIADAS"].apply(lambda x: ", ".join(x) if x else ""),
+            )
+        )
+        factura_col = (
+            "FACTURAS"
+            if "FACTURAS" in df_res.columns
+            else "FACTURA"
+            if "FACTURA" in df_res.columns
+            else None
+        )
+        if factura_col:
+            df_res["NC_EXISTENTE"] = df_res[factura_col].apply(
+                lambda v: mapear_nc_existente(v, doc_to_nc)
+            )
+
+    def _enriquecer_al12(self, exp, df_res, config):
+        """Cruza NC/NDB por (factura, SKU) y añade alertas AL12 sin modificar el expediente."""
+        if config.get("_reconciliar_nc_factura_sku"):
+            return
+        from src.core.detector import detectar_notas_en_historial, resumen_notas_por_factura
+        from src.core.nc_auditor import CreditNoteAuditor as _CNA
+        from src.domain import BusinessAlert as _BA12
+        from src.domain import generar_texto_alerta as _gta12
+
+        historial_visible = _historial_para_auditoria(
+            self.df_historial, config.get("documentos_historial", {})
+        )
+        historial_para_notas = (
+            historial_visible if historial_visible is not None else self.df_historial.iloc[0:0]
+        )
+        _resumen_nc = resumen_notas_por_factura(detectar_notas_en_historial(historial_para_notas))
+        _resumen_norm = {
+            fac: {_CNA._norm_sku(s): info for s, info in data.get("skus", {}).items()}
+            for fac, data in _resumen_nc.items()
+        }
+        _num_a_docs = self._mapear_num_a_docs()
+        if not _resumen_norm:
+            return
+
+        _al12_vistas = set()
+
+        def _al12_row(_df, _fac_col, _ale_col, _anexar_alerta=True):
+            if _fac_col is None or _ale_col not in _df.columns or "SKU" not in _df.columns:
+                return
+            for _idx, _fila in _df.iterrows():
+                _sku_raw = str(_fila.get("SKU", "")).strip()
+                _sku = _CNA._norm_sku(_fila.get("SKU", ""))
+                if not _sku:
+                    continue
+                _segs = []
+                for _fac in expandir_facturas(_fila.get(_fac_col, ""), _num_a_docs):
+                    _info = _resumen_norm.get(_fac, {}).get(_sku)
+                    if _info and _info.get("docs"):
+                        _segs.append(_gta12("AL12", factura=_fac, docs=_info["docs"], sku=_sku_raw))
+                if not _segs:
+                    continue
+                _al12 = " | ".join(_segs)
+                _base = str(_fila.get(_ale_col, "") or "")
+                if not _base.strip() or _base.strip().upper() == "OK":
+                    _df.at[_idx, _ale_col] = _al12
+                elif "AL12" not in _base:
+                    _df.at[_idx, _ale_col] = f"{_base} | {_al12}"
+                if _anexar_alerta and _al12 not in _al12_vistas:
+                    _al12_vistas.add(_al12)
+                    exp.resultado.alertas.append(
+                        _BA12(
+                            codigo="AL12",
+                            tipo="warning",
+                            severidad="media",
+                            sku=_sku_raw,
+                            mensaje=_al12,
+                            motor=exp.estrategia if exp.estrategia else "N/A",
                         )
-                        else historial_visible
                     )
-                    if (
-                        not solo_ncnd.empty
-                        and "CODIGO" in solo_ncnd.columns
-                        and "SKU" in df_res.columns
-                    ):
-                        skus_procesados = set(df_res["SKU"].astype(str).str.strip())
-                        solo_ncnd = solo_ncnd[
-                            solo_ncnd["CODIGO"].astype(str).str.strip().isin(skus_procesados)
-                        ]
-                    full_resumen = resumen_global(solo_ncnd)
-                    if full_resumen:
-                        exp.resultado.metricas["nc_detalle"] = full_resumen
-                    hay_notas_visibles = (
-                        historial_visible is not None
-                        and "TIPO_CLASE" in historial_visible.columns
-                        and bool(
-                            (
-                                historial_visible["TIPO_CLASE"].astype(str).str.lower() != "factura"
-                            ).any()
-                        )
-                    )
-                    if (
-                        historial_visible is not None
-                        and "NC_ASOCIADAS" in historial_visible.columns
-                        and hay_notas_visibles
-                    ):
-                        doc_to_nc = dict(
-                            zip(
-                                historial_visible["DOC_ID"],
-                                historial_visible["NC_ASOCIADAS"].apply(
-                                    lambda x: ", ".join(x) if x else ""
-                                ),
-                            )
-                        )
 
-                        def _map_nc_existente(factura_val):
-                            return mapear_nc_existente(factura_val, doc_to_nc)
+        from src.ui.config_builder import build_config
 
-                        factura_col = (
-                            "FACTURAS"
-                            if "FACTURAS" in df_res.columns
-                            else "FACTURA"
-                            if "FACTURA" in df_res.columns
-                            else None
-                        )
-                        if factura_col:
-                            df_res["NC_EXISTENTE"] = df_res[factura_col].apply(_map_nc_existente)
-                    # AL12: cruce NC/NDB por (factura, SKU) con cantidades
-                    # FAE. Solo informativa: se anexa a la ALERTA sin
-                    # excluir la fila del expediente.
-                    from src.core.detector import (
-                        detectar_notas_en_historial,
-                        resumen_notas_por_factura,
-                    )
-                    from src.core.nc_auditor import CreditNoteAuditor as _CNA
-                    from src.domain import BusinessAlert as _BA12
-                    from src.domain import generar_texto_alerta as _gta12
+        legacy_tipo = self._legacy_tipo()
+        ui = self._collect_ui_values()
+        cfg = build_config(legacy_tipo, ui)
+        if cfg.get("_reconciliar_nc_factura_sku"):
+            return
 
-                    historial_para_notas = (
-                        historial_visible
-                        if historial_visible is not None
-                        else self.df_historial.iloc[0:0]
-                    )
-                    _resumen_nc = resumen_notas_por_factura(
-                        detectar_notas_en_historial(historial_para_notas)
-                    )
-                    _resumen_norm = {
-                        fac: {_CNA._norm_sku(s): info for s, info in data.get("skus", {}).items()}
-                        for fac, data in _resumen_nc.items()
-                    }
-                    _num_a_docs = {}
-                    if self.df_historial is not None and not self.df_historial.empty:
-                        for _, _hr in self.df_historial.iterrows():
-                            _nro = str(_hr.get("NUMERO", "")).strip()
-                            if not _nro:
-                                continue
-                            _doc = (
-                                f"{str(_hr.get('TIPO_DOC', '')).strip()[:1]}"
-                                f"{str(_hr.get('SERIE', '')).strip()}-"
-                                f"{_nro}"
-                            ).strip("-")
-                            for _key in {_nro, _nro.lstrip("0")}:
-                                _lst = _num_a_docs.setdefault(_key, [])
-                                if _doc not in _lst:
-                                    _lst.append(_doc)
-                    _al12_vistas = set()
+        factura_col = (
+            "FACTURAS"
+            if "FACTURAS" in df_res.columns
+            else "FACTURA"
+            if "FACTURA" in df_res.columns
+            else None
+        )
+        _al12_row(df_res, factura_col, "ALERTA")
+        _df_x = exp.resultado.get_excel() if hasattr(exp.resultado, "get_excel") else None
+        if _df_x is not None and _df_x is not df_res and not _df_x.empty:
+            _fx_col = next(
+                (c for c in ("FACTURAS", "FACTURA", "Facturas (qty)") if c in _df_x.columns), None
+            )
+            _al_col = next((c for c in ("ALERTA", "Alerta") if c in _df_x.columns), None)
+            if _fx_col and _al_col:
+                _al12_row(_df_x, _fx_col, _al_col, _anexar_alerta=False)
 
-                    def _al12_row(_df, _fac_col, _ale_col, _anexar_alerta=True):
-                        if (
-                            _fac_col is None
-                            or _ale_col not in _df.columns
-                            or "SKU" not in _df.columns
-                        ):
-                            return
-                        for _idx, _fila in _df.iterrows():
-                            _sku_raw = str(_fila.get("SKU", "")).strip()
-                            _sku = _CNA._norm_sku(_fila.get("SKU", ""))
-                            if not _sku:
-                                continue
-                            _segs = []
-                            for _fac in expandir_facturas(_fila.get(_fac_col, ""), _num_a_docs):
-                                _info = _resumen_norm.get(_fac, {}).get(_sku)
-                                if _info and _info.get("docs"):
-                                    _segs.append(
-                                        _gta12(
-                                            "AL12", factura=_fac, docs=_info["docs"], sku=_sku_raw
-                                        )
-                                    )
-                            if not _segs:
-                                continue
-                            _al12 = " | ".join(_segs)
-                            _base = str(_fila.get(_ale_col, "") or "")
-                            if not _base.strip() or _base.strip().upper() == "OK":
-                                _df.at[_idx, _ale_col] = _al12
-                            elif "AL12" not in _base:
-                                _df.at[_idx, _ale_col] = f"{_base} | {_al12}"
-                            if _anexar_alerta and _al12 not in _al12_vistas:
-                                _al12_vistas.add(_al12)
-                                exp.resultado.alertas.append(
-                                    _BA12(
-                                        codigo="AL12",
-                                        tipo="warning",
-                                        severidad="media",
-                                        sku=_sku_raw,
-                                        mensaje=_al12,
-                                        motor=exp.estrategia if exp.estrategia else "N/A",
-                                    )
-                                )
+    def _mapear_num_a_docs(self):
+        """Convierte NUMERO → lista de formas documentales (para expansión de facturas AL12)."""
+        _num_a_docs = {}
+        if self.df_historial is None or self.df_historial.empty:
+            return _num_a_docs
+        for _, _hr in self.df_historial.iterrows():
+            _nro = str(_hr.get("NUMERO", "")).strip()
+            if not _nro:
+                continue
+            _doc = (
+                f"{str(_hr.get('TIPO_DOC', '')).strip()[:1]}"
+                f"{str(_hr.get('SERIE', '')).strip()}-"
+                f"{_nro}"
+            ).strip("-")
+            for _key in {_nro, _nro.lstrip("0")}:
+                _lst = _num_a_docs.setdefault(_key, [])
+                if _doc not in _lst:
+                    _lst.append(_doc)
+        return _num_a_docs
 
-                    if _resumen_norm and not config.get("_reconciliar_nc_factura_sku"):
-                        _al12_row(df_res, factura_col, "ALERTA")
-                        _df_x = (
-                            exp.resultado.get_excel()
-                            if hasattr(exp.resultado, "get_excel")
-                            else None
-                        )
-                        if _df_x is not None and _df_x is not df_res and not _df_x.empty:
-                            _fx_col = next(
-                                (
-                                    c
-                                    for c in ("FACTURAS", "FACTURA", "Facturas (qty)")
-                                    if c in _df_x.columns
-                                ),
-                                None,
-                            )
-                            _al_col = next(
-                                (c for c in ("ALERTA", "Alerta") if c in _df_x.columns), None
-                            )
-                            if _fx_col and _al_col:
-                                _al12_row(_df_x, _fx_col, _al_col, _anexar_alerta=False)
-                    from src.core.nc_auditor import CreditNoteAuditor
+    def _enriquecer_auditoria_nc(self, exp, df_res, config, ui):
+        """Ejecuta CreditNoteAuditor y fusiona resultados en el dataframe."""
+        from src.core.nc_auditor import CreditNoteAuditor
 
-                    audit_historial = historial_visible
-                    nc_alertas = CreditNoteAuditor().auditar(
-                        audit_historial,
-                        df_res,
-                        documentos_historial=config.get("documentos_historial"),
-                        modalidad=ui.get("modalidad", "individual"),
-                    )
-                    exp.resultado.metricas["nc_alertas"] = nc_alertas
-                    _df_x = (
-                        exp.resultado.get_excel() if hasattr(exp.resultado, "get_excel") else None
-                    )
-                    CreditNoteAuditor.combinar_auditoria(df_res, nc_alertas)
-                    if _df_x is not None and _df_x is not df_res:
-                        CreditNoteAuditor.combinar_auditoria(_df_x, nc_alertas)
+        historial_visible = _historial_para_auditoria(
+            self.df_historial, config.get("documentos_historial", {})
+        )
+        nc_alertas = CreditNoteAuditor().auditar(
+            historial_visible,
+            df_res,
+            documentos_historial=config.get("documentos_historial"),
+            modalidad=ui.get("modalidad", "individual"),
+        )
+        exp.resultado.metricas["nc_alertas"] = nc_alertas
+        CreditNoteAuditor.combinar_auditoria(df_res, nc_alertas)
+        _df_x = exp.resultado.get_excel() if hasattr(exp.resultado, "get_excel") else None
+        if _df_x is not None and _df_x is not df_res:
+            CreditNoteAuditor.combinar_auditoria(_df_x, nc_alertas)
 
-                    if (
-                        historial_visible is not None
-                        and "TIPO_CLASE" in historial_visible.columns
-                        and not config.get("_reconciliar_nc_factura_sku")
-                    ):
-                        notas_df = historial_visible[historial_visible["TIPO_CLASE"] != "factura"]
-                        if not notas_df.empty:
-                            facturas_con_nc = notas_df["FACTURA_REF"].dropna().unique()
-                            if len(facturas_con_nc) > 0:
-                                from src.domain import BusinessAlert
+    def _señalizar_facturas_con_notas(self, exp):
+        """Añade una alerta de primer nivel si hay facturas con NC/ND en el historial."""
+        from src.core.g360_theme import G360Theme
+        from src.domain import BusinessAlert
 
-                                exp.resultado.alertas.insert(
-                                    0,
-                                    BusinessAlert(
-                                        tipo="warning",
-                                        severidad="baja",
-                                        mensaje=f"Facturas con NC/ND existentes en el rango: "
-                                        f"{', '.join(sorted(facturas_con_nc)[:5])}"
-                                        f"{'...' if len(facturas_con_nc) > 5 else ''}. "
-                                        f"Evaluar ajustes manuales.",
-                                        motor=exp.estrategia if exp.estrategia else "N/A",
-                                    ),
-                                )
+        if self.df_historial is None:
+            return
+        ui_sn = self._collect_ui_values()
+        historial_visible = _historial_para_auditoria(
+            self.df_historial, ui_sn.get("historial_config", {})
+        )
+        if historial_visible is None or "TIPO_CLASE" not in historial_visible.columns:
+            return
+        legacy_tipo = self._legacy_tipo()
+        from src.ui.config_builder import build_config
 
-                if exp.resultado and not exp.resultado.dataframe.empty:
-                    self._mostrar_resultado()
-                else:
-                    alertas_ordenadas = sorted(
-                        exp.alertas or [],
-                        key=lambda a: 0 if a.tipo == "error" else 1 if a.tipo == "warning" else 2,
-                    )
-                    alert_msgs = [a.mensaje for a in alertas_ordenadas][:3]
-                    detail = " | ".join(alert_msgs) if alert_msgs else "Sin alertas"
-                    self.app.show_snackbar(f"Sin resultados: {detail}", self.app.G360_WARNING)
+        cfg = build_config(legacy_tipo, ui_sn)
+        if cfg.get("_reconciliar_nc_factura_sku"):
+            return
+        notas_df = historial_visible[historial_visible["TIPO_CLASE"] != "factura"]
+        if notas_df.empty:
+            return
+        facturas_con_nc = notas_df["FACTURA_REF"].dropna().unique()
+        if len(facturas_con_nc) == 0:
+            return
+        preview = ", ".join(sorted(facturas_con_nc)[:5])
+        suffix = "..." if len(facturas_con_nc) > 5 else ""
+        exp.resultado.alertas.insert(
+            0,
+            BusinessAlert(
+                tipo="warning",
+                severidad="baja",
+                mensaje=(
+                    f"Facturas con NC/ND existentes en el rango: {preview}{suffix}. "
+                    f"Evaluar ajustes manuales."
+                ),
+                motor=exp.estrategia if exp.estrategia else "N/A",
+            ),
+        )
 
-            except Exception as ex:
-                from src.ui.mensajes import mensaje
-
-                self.app.show_snackbar(
-                    mensaje(ex, "cargar el detalle del cliente"), self.app.G360_ERROR
-                )
-                self.app.hide_loading()
-                if self.app.page:
-                    self.app.page.update()
-
-        threading.Thread(target=task, daemon=True).start()
+    def _mostrar_resultado_post_ejecucion(self, exp):
+        """Muestra tabs multi-cliente o advertencia según el resultado."""
+        if exp.resultado and not exp.resultado.dataframe.empty:
+            self._agrupar_resultado_por_cliente(exp)
+            self._mostrar_resultado()
+        else:
+            alertas_ordenadas = sorted(
+                exp.alertas or [],
+                key=lambda a: 0 if a.tipo == "error" else 1 if a.tipo == "warning" else 2,
+            )
+            alert_msgs = [a.mensaje for a in alertas_ordenadas][:3]
+            detail = " | ".join(alert_msgs) if alert_msgs else "Sin alertas"
+            self.app.show_snackbar(f"Sin resultados: {detail}", self.app.G360_WARNING)
+        self.app.hide_loading()
+        if self.app.page:
+            self.app.page.update()
 
     def _omitir_activo(self):
         chk = getattr(self, "chk_omitir_sin_dif", None)
@@ -1302,6 +1168,72 @@ class _ViewHandlers:
     def _nd_activo(self):
         chk = getattr(self, "chk_gen_nd", None)
         return bool(chk is not None and chk.value)
+
+    def _agrupar_resultado_por_cliente(self, exp):
+        """Agrupar resultado por cliente para vista multi-cliente.
+
+        Guarda en:
+          - self._resultado_por_cliente: {cid: resultado_clonado}
+          - self._resultado_clientes_order: lista de ids en orden alfabético
+          - self._resultado_global: el resultado original completo
+        """
+        import copy
+
+        df = exp.resultado.dataframe
+        if df is None or df.empty:
+            self._resultado_por_cliente = {}
+            self._resultado_clientes_order = []
+            self._resultado_global = exp
+            return
+
+        # Detectar columna de cliente
+        cid_col = None
+        for col in ("COD_CLIENTE", "id_cliente"):
+            if col in df.columns:
+                cid_col = col
+                break
+        if cid_col is None:
+            self._resultado_por_cliente = {}
+            self._resultado_clientes_order = []
+            self._resultado_global = exp
+            return
+
+        # Agrupar por cliente, orden alfabético por nombre
+        nombre_col = None
+        for col in ("CLIENTE", "nom_cliente"):
+            if col in df.columns:
+                nombre_col = col
+                break
+
+        grupos = {}
+        for cid, grp in df.groupby(cid_col):
+            cid_str = str(cid).strip()
+            grupos[cid_str] = grp
+
+        # Ordenar por nombre si disponible, sino por id
+        def _key(cid):
+            if nombre_col and cid in grupos:
+                nombres = grupos[cid][nombre_col].dropna().unique()
+                if len(nombres) > 0:
+                    return str(nombres[0]).strip().upper()
+            return cid.upper()
+
+        self._resultado_clientes_order = sorted(grupos.keys(), key=_key)
+        self._resultado_por_cliente = {}
+        self._resultado_global = exp
+
+        for cid in self._resultado_clientes_order:
+            grp_df = grupos[cid]
+            # Clonar resultado con DF filtrado
+            try:
+                clon = copy.copy(exp)
+                if clon.resultado:
+                    clon.resultado = copy.copy(exp.resultado)
+                if clon.resultado and clon.resultado.dataframe is not None:
+                    clon.resultado.dataframe = grp_df.copy()
+                self._resultado_por_cliente[cid] = clon
+            except Exception:
+                pass
 
     def _resultado_efectivo(self):
         """Resultado para pantalla aplicando las OPCIONES DE CÁLCULO.
@@ -1337,12 +1269,30 @@ class _ViewHandlers:
             return
         self._mostrar_resultado()
 
-    def _mostrar_resultado(self):
+    def _mostrar_resultado(self, cliente_id=None):
+        """Renderiza el resultado. Si hay múltiples clientes, usa tabs.
+
+        cliente_id: si se pasa, renderiza solo ese cliente (para tabs).
+        Si es None y hay múltiples clientes, muestra el primer tab.
+        """
         from src.ui.resultados_view import render_resultado
 
         if not self.resultado or not self.resultado.resultado:
             return
 
+        multi_cliente = (
+            getattr(self, "_resultado_por_cliente", None) and len(self._resultado_por_cliente) > 1
+        )
+
+        if multi_cliente and cliente_id is None:
+            self._renderizar_tabs_resultado()
+            return
+
+        if multi_cliente and cliente_id:
+            self._actualizar_tab_resultado(cliente_id)
+            return
+
+        # Single client path
         vista = self._resultado_efectivo()
         if vista is None:
             self.app.show_snackbar(
@@ -1360,7 +1310,14 @@ class _ViewHandlers:
             marcar_nd=self._nd_activo() and not self._omitir_activo(),
         )
 
-        # ── Update always-relevant labels ──
+        self._renderizar_panel_compartido(result)
+        self.resultados_container.content = self._result_summary
+        self.resultados_container.visible = True
+        self.btn_expediente.disabled = False
+
+    def _renderizar_panel_compartido(self, result):
+        """Renderiza las piezas comunes entre single-client y multi-client tabs."""
+        # Labels globales
         self.lbl_total_nc.value = result["total_nc"]
         self.lbl_skus.value = result["skus_label"]
         self.lbl_alertas_count.value = result["alertas_label"]
@@ -1369,7 +1326,7 @@ class _ViewHandlers:
             self.resultados_container.visible = False
             return
 
-        # ── Toggles (rebate) ──
+        # Toggles (rebate)
         if result["aplicar_toggles"]:
             self.aplicar_toggles = result["aplicar_toggles"]
             for linea, (cb, _) in self.aplicar_toggles.items():
@@ -1387,20 +1344,17 @@ class _ViewHandlers:
 
                 cb.on_change = _make_on_toggle(linea)
 
-        # ── Table: rebuild columns + initial rows ──
+        # Tabla
         self.resultados_table.columns.clear()
         self.resultados_table.rows.clear()
-        columns, rows = result["table_columns"], result["table_rows"]
-        for col in columns:
+        for col in result["table_columns"]:
             self.resultados_table.columns.append(col)
-        for row in rows:
+        for row in result["table_rows"]:
             self.resultados_table.rows.append(row)
-
-        # ── Column header tap → sort (API Flet: DataColumn.on_sort) ──
         for col in self.resultados_table.columns:
             col.on_sort = lambda e: self._ordenar_por(getattr(e.control, "data", None))
 
-        # ── Lazy load button ──
+        # Lazy load
         lazy = result.get("lazy_info", {})
         if lazy.get("has_more", False):
             self._result_load_more_btn.text = f"Ver más ({lazy['shown_rows']}/{lazy['total_rows']})"
@@ -1408,11 +1362,180 @@ class _ViewHandlers:
         else:
             self._result_load_more_btn.visible = False
 
-        # ── CSV & Audit buttons ──
-        has_data = len(rows) > 0
-        self._result_audit_btn.visible = has_data
+        # Audit button
+        self._result_audit_btn.visible = len(result["table_rows"]) > 0
 
-        # ── Warning banner ──
+        # Warning banner
+        self._renderizar_banner_warning(result)
+
+        # Alertas
+        self._renderizar_alertas_cliente(result)
+
+        # Panel completo
+        self._rearmar_result_summary(result)
+
+    def _renderizar_tabs_resultado(self):
+        """Renderiza tabs por cliente cuando hay múltiples."""
+        clientes = getattr(self, "_resultado_clientes_order", [])
+        if not clientes:
+            return
+
+        badge = self._construir_badge_clientes(clientes)
+        tabs = self._construir_tabs(clientes)
+
+        self._result_tabs_container = ft.Column(
+            [
+                ft.Row([badge], alignment=ft.MainAxisAlignment.END),
+                tabs,
+            ],
+            spacing=8,
+            expand=True,
+        )
+        self._result_tabs = tabs
+        self._result_clientes = clientes
+
+        self.resultados_container.content = self._result_tabs_container
+        self.resultados_container.visible = True
+        self.btn_expediente.disabled = False
+
+        if clientes:
+            self._actualizar_tab_resultado(clientes[0])
+
+    def _construir_badge_clientes(self, clientes):
+        """Badge que muestra la cantidad de clientes en el resultado."""
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(
+                        ft.Icons.EMOJI_PEOPLE_OUTLINED, size=14, color=G360Theme.accent_color()
+                    ),
+                    ft.Text(
+                        f"{len(clientes)} cliente(s)",
+                        size=12,
+                        weight=ft.FontWeight.W_600,
+                        color=G360Theme.accent_color(),
+                    ),
+                ],
+                spacing=4,
+            ),
+            padding=ft.padding.symmetric(horizontal=10, vertical=4),
+            bgcolor=G360Theme.accent_soft_color(0.15),
+            border_radius=G360Theme.RADIUS_CHIP,
+        )
+
+    def _construir_tabs(self, clientes):
+        """Construye el widget ft.Tabs con placeholders de carga por cliente."""
+        import flet as ft
+
+        def _on_tab_change(e):
+            idx = e.control.selected_index
+            if idx >= 0 and idx < len(clientes):
+                self._actualizar_tab_resultado(clientes[idx])
+
+        loading_state = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.ProgressRing(width=14, height=14, stroke_width=2),
+                            ft.Text(
+                                "Cargando…",
+                                size=11,
+                                color=G360Theme.text_muted_color(),
+                            ),
+                        ],
+                        spacing=6,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                ],
+                expand=True,
+            ),
+            expand=True,
+        )
+
+        return ft.Tabs(
+            selected_index=0,
+            on_change=_on_tab_change,
+            animation_duration=200,
+            tabs=[ft.Tab(text=cid, content=loading_state) for cid in clientes],
+        )
+
+    def _actualizar_tab_resultado(self, cliente_id):
+        """Refresca el contenido de un tab específico."""
+        vista = self._obtener_vista_cliente(cliente_id)
+        if vista is None:
+            return
+
+        from src.ui.resultados_view import render_resultado
+
+        result = render_resultado(
+            vista,
+            self.tipo_actual,
+            self.df_historial,
+            self.app.G360_ACCENT,
+            self.app.G360_SUCCESS,
+            marcar_nd=self._nd_activo() and not self._omitir_activo(),
+        )
+
+        if result["content"] is None:
+            return
+
+        self._renderizar_labels_cliente(result)
+        self._renderizar_tabla_cliente(result)
+        self._renderizar_lazy_load(result)
+        self._renderizar_banner_warning(result)
+        self._renderizar_alertas_cliente(result)
+        self._rearmar_result_summary(result)
+        self._insertar_en_tab(cliente_id)
+
+    def _obtener_vista_cliente(self, cliente_id):
+        """Retorna el expediente clonado con el DF del cliente y las opciones de cálculo aplicadas, o None."""
+        por_cli = getattr(self, "_resultado_por_cliente", {})
+        if cliente_id not in por_cli:
+            return None
+        exp_cli = por_cli[cliente_id]
+        if not exp_cli.resultado or exp_cli.resultado.dataframe.empty:
+            return None
+        vista = exp_cli
+        if self._omitir_activo():
+            try:
+                from src.ui.expediente_service import _clonar_sin_diferencia
+
+                vista = _clonar_sin_diferencia(exp_cli)
+            except Exception:
+                vista = exp_cli
+        if vista is None or not vista.resultado or vista.resultado.dataframe.empty:
+            return None
+        return vista
+
+    def _renderizar_labels_cliente(self, result):
+        """Actualiza los labels globales con los totales del cliente actual."""
+        self.lbl_total_nc.value = result["total_nc"]
+        self.lbl_skus.value = result["skus_label"]
+        self.lbl_alertas_count.value = result["alertas_label"]
+
+    def _renderizar_tabla_cliente(self, result):
+        """Renderiza columnas, filas y handlers de ordenamiento en la tabla."""
+        self.resultados_table.columns.clear()
+        self.resultados_table.rows.clear()
+        for col in result["table_columns"]:
+            self.resultados_table.columns.append(col)
+        for row in result["table_rows"]:
+            self.resultados_table.rows.append(row)
+        for col in self.resultados_table.columns:
+            col.on_sort = lambda e, c=col: self._ordenar_por(getattr(e.control, "data", None))
+
+    def _renderizar_lazy_load(self, result):
+        """Controla la visibilidad y texto del botón 'ver más' según lazy_info."""
+        lazy = result.get("lazy_info", {})
+        if lazy.get("has_more", False):
+            self._result_load_more_btn.text = f"Ver más ({lazy['shown_rows']}/{lazy['total_rows']})"
+            self._result_load_more_btn.visible = True
+        else:
+            self._result_load_more_btn.visible = False
+
+    def _renderizar_banner_warning(self, result):
+        """Muestra u oculta el banner de warning del expediente."""
         warn = result.get("expediente_warning")
         if warn:
             self._result_warn_row.controls.clear()
@@ -1421,50 +1544,76 @@ class _ViewHandlers:
         else:
             self._result_warn_row.visible = False
 
-        # ── Alertas panel ──
+    def _renderizar_alertas_cliente(self, result):
+        """Muestra u oculta el contenedor de alertas con su contenido."""
         if result["alertas_visible"] and result["alertas_content"]:
             self.alertas_container.content = result["alertas_content"]
             self.alertas_container.visible = True
         else:
             self.alertas_container.visible = False
 
-        # ── Build or reuse the stable panel structure ──
-        self._rearmar_result_summary(result)
-        self.resultados_container.content = self._result_summary
-        self.resultados_container.visible = True
-        self.btn_expediente.disabled = False
+    def _insertar_en_tab(self, cliente_id):
+        """Inserta el contenido renderizado en el tab correspondiente y refresca la página."""
+        import flet as ft
+
+        if not hasattr(self, "_result_tabs") or not self._result_tabs:
+            return
+        idx = getattr(self, "_resultado_clientes_order", []).index(cliente_id)
+        tab_content = ft.Container(
+            content=self._result_summary,
+            padding=ft.padding.only(top=8),
+        )
+        self._result_tabs.controls[idx].content = tab_content
+        try:
+            if self.app.page:
+                self.app.page.update()
+        except Exception:
+            pass
+
+    def _extraer_componentes_resultado(self, content):
+        """Extrae los componentes estáticos del panel renderizado por nombres.
+
+        El content de render_resultado tiene estructura fija; esta función lo
+        mapea a claves legibles para evitar acceso por índices mágicos.
+        """
+        controls = content.controls if content is not None else []
+        return {
+            "header": controls[0] if len(controls) > 0 else None,
+            "summary_cards": controls[1] if len(controls) > 1 else None,
+            "audit_panel": controls[2] if len(controls) > 2 else None,
+            "divider1": controls[3] if len(controls) > 3 else None,
+            "legend": controls[4] if len(controls) > 4 else None,
+            "divider2": controls[5] if len(controls) > 5 else None,
+            "divider3": controls[7] if len(controls) > 7 else None,
+            "verification": controls[8] if len(controls) > 8 else None,
+        }
 
     def _rearmar_result_summary(self, result):
         """Arma el panel de resultados actualizando las piezas variables.
 
         Reusa la estructura estable (tabla, avisos, carga perezosa y botones)
-        para evitar duplicados: cada control variable del contenido renderizado
-        se ubica en un índice fijo dentro de _result_summary.
+        para evitar duplicados. Los componentes estáticos provienen del
+        contenido renderizado y se reconstruyen con los placeholders dinámicos.
         """
         content = result["content"]
-        n = len(content.controls)
-        header = content.controls[0]
-        summary_cards = content.controls[1]
-        audit_panel = content.controls[2] if n > 2 else None
-        divider1 = content.controls[3] if n > 3 else None
-        legend = content.controls[4] if n > 4 else None
-        divider2 = content.controls[5] if n > 5 else None
-        divider3 = content.controls[7] if n > 7 else None
-        verification = content.controls[8] if n > 8 else None
+        if content is None:
+            return
+
+        parts = self._extraer_componentes_resultado(content)
 
         self._result_summary = ft.Column(
             [
-                header,
-                summary_cards,
-                audit_panel,
-                divider1,
-                legend,
-                divider2,
+                parts["header"],
+                parts["summary_cards"],
+                parts["audit_panel"],
+                parts["divider1"],
+                parts["legend"],
+                parts["divider2"],
                 self._result_table_wrap,
                 self._result_warn_row,
                 self._result_load_more_row,
-                divider3,
-                verification,
+                parts["divider3"],
+                parts["verification"],
                 self._result_btn_row,
             ],
             spacing=10,
@@ -1542,100 +1691,97 @@ class _ViewHandlers:
         if not self.resultado or not self.resultado.resultado:
             return
         self.app.show_loading("Generando Expediente...")
+        threading.Thread(target=self._tarea_generar_expediente, daemon=True).start()
 
-        def task():
-            try:
-                from src.ui.expediente_service import generar_expediente
+    def _tarea_generar_expediente(self):
+        """Tarea en hilo: resuelve datos, genera expedientes y notifica."""
+        try:
+            from src.ui.expediente_service import generar_expediente
 
-                # Resolve cliente from appropriate dropdown based on caso
-                cliente_map = {
-                    "DC": self.cliente_dropdown_pd,
-                    "DO": self.cliente_dropdown_df,
-                    "VRS": self.cliente_dropdown_fp,
-                    "FPE": self.cliente_dropdown_fp,
-                    "PROM": self.cliente_dropdown_pb,
-                    "ANF": self.cliente_dropdown_ci,
-                    "CMV": self.cliente_dropdown_pb,
-                    "DF": self.cliente_dropdown_fp,
-                }
-                dd = cliente_map.get(self.tipo_actual)
-                cliente_value = dd.value if dd and dd.value else ""
-                # Fallback: extraer clientes del historial ya cargado (los dropdowns legacy
-                # quedan vacios cuando el fragmento se aplico desde la busqueda segmentada).
-                if (
-                    not cliente_value
-                    and self.df_historial is not None
-                    and not self.df_historial.empty
-                ):
-                    for col in ("CLIENTE", "nom_cliente"):
-                        if col in self.df_historial.columns:
-                            nombres = sorted(
-                                {
-                                    str(v).strip()
-                                    for v in self.df_historial[col].dropna().unique()
-                                    if str(v).strip()
-                                }
-                            )
-                            if nombres:
-                                cliente_value = ", ".join(nombres)
-                            break
-                vendedor_key = self.vendedor_dropdown.value or ""
-                vendedor_display = vendedor_key
-                if vendedor_key:
-                    for opt in self.vendedor_dropdown.options:
-                        if opt.key == vendedor_key:
-                            vendedor_display = opt.text or vendedor_key
-                            break
-                if not vendedor_key:
-                    vid = getattr(self, "_search_vend_id", None)
-                    vnom = getattr(self, "_search_vend_nom", None) or ""
-                    if not vnom and vid and hasattr(self, "busq_vend_dd"):
-                        vnom = next(
-                            (o.text for o in self.busq_vend_dd.options if o.key == vid), vid or ""
-                        )
-                    vendedor_key = vid or ""
-                    vendedor_display = vnom or vid or ""
+            cliente_value = self._resolver_cliente_expediente()
+            vendedor_key, vendedor_display = self._resolver_vendedor_expediente()
 
-                exp_dirs = generar_expediente(
-                    resultado=self.resultado,
-                    tipo_actual=self.tipo_actual,
-                    modalidad=self.modalidad_actual,
-                    historico_config=self._leer_historico_config(),
-                    df_historial=self.df_historial,
-                    cliente_value=cliente_value,
-                    vendedor_value=vendedor_key,
-                    vendedor_display=vendedor_display,
-                    antecedentes=self.antecedentes.value or "",
-                    observaciones=self.observaciones.value or "",
-                    desktop_path=self.app._get_desktop_path(),
-                    omitir_sin_diferencia=self.chk_omitir_sin_dif.value,
-                    generar_nota_debito=self.chk_gen_nd.value,
-                )
+            exp_dirs = generar_expediente(
+                resultado=self.resultado,
+                tipo_actual=self.tipo_actual,
+                modalidad=self.modalidad_actual,
+                historico_config=self._leer_historico_config(),
+                df_historial=self.df_historial,
+                cliente_value=cliente_value,
+                vendedor_value=vendedor_key,
+                vendedor_display=vendedor_display,
+                antecedentes=self.antecedentes.value or "",
+                observaciones=self.observaciones.value or "",
+                desktop_path=self.app._get_desktop_path(),
+                omitir_sin_diferencia=self.chk_omitir_sin_dif.value,
+                generar_nota_debito=self.chk_gen_nd.value,
+            )
 
-                if len(exp_dirs) == 1:
-                    self.app.show_snackbar(
-                        f"✅ Expediente generado: {exp_dirs[0].name}",
-                        self.app.G360_SUCCESS,
+            self._mostrar_notificacion_generacion(exp_dirs)
+            self._abrir_carpeta_expediente(exp_dirs)
+        except Exception as ex:
+            from src.ui.mensajes import mensaje
+
+            self.app.show_snackbar(mensaje(ex, "abrir el archivo"), self.app.G360_ERROR)
+            self.app.hide_loading()
+
+    def _resolver_cliente_expediente(self):
+        """Resuelve el valor del cliente desde el dropdown o del historial."""
+        # Dropdowns legacy (DC, DO, VRS, FPE, PROM, ANF, CMV, DF no usan dropdown).
+        cliente_value = ""
+        if not cliente_value and self.df_historial is not None and not self.df_historial.empty:
+            for col in ("CLIENTE", "nom_cliente"):
+                if col in self.df_historial.columns:
+                    nombres = sorted(
+                        {
+                            str(v).strip()
+                            for v in self.df_historial[col].dropna().unique()
+                            if str(v).strip()
+                        }
                     )
-                else:
-                    self.app.show_snackbar(
-                        f"✅ {len(exp_dirs)} expedientes generados (uno por cliente) en "
-                        f"{exp_dirs[0].parent.name}",
-                        self.app.G360_SUCCESS,
-                    )
-                if os.name == "nt":
-                    target = exp_dirs[0] if len(exp_dirs) == 1 else exp_dirs[0].parent
-                    os.startfile(str(target))
+                    if nombres:
+                        cliente_value = ", ".join(nombres)
+                    break
+        return cliente_value
 
-            except Exception as ex:
-                from src.ui.mensajes import mensaje
+    def _resolver_vendedor_expediente(self):
+        """Resuelve key y display del vendedor desde dropdown o búsqueda."""
+        vendedor_key = self.vendedor_dropdown.value or ""
+        vendedor_display = vendedor_key
+        if vendedor_key:
+            for opt in self.vendedor_dropdown.options:
+                if opt.key == vendedor_key:
+                    vendedor_display = opt.text or vendedor_key
+                    break
+        if not vendedor_key:
+            vid = getattr(self, "_search_vend_id", None)
+            vnom = getattr(self, "_search_vend_nom", None) or ""
+            if not vnom and vid and hasattr(self, "busq_vend_dd"):
+                vnom = next((o.text for o in self.busq_vend_dd.options if o.key == vid), vid or "")
+            vendedor_key = vid or ""
+            vendedor_display = vnom or vid or ""
+        return vendedor_key, vendedor_display
 
-                self.app.show_snackbar(
-                    mensaje(ex, "abrir el archivo"), self.app.G360_ERROR
-                )
-                self.app.hide_loading()
+    def _mostrar_notificacion_generacion(self, exp_dirs):
+        """Muestra snackbar de éxito con la cantidad de expedientes generados."""
+        if len(exp_dirs) == 1:
+            self.app.show_snackbar(
+                f"✅ Expediente generado: {exp_dirs[0].name}",
+                self.app.G360_SUCCESS,
+            )
+        else:
+            self.app.show_snackbar(
+                f"✅ {len(exp_dirs)} expedientes generados (uno por cliente) en "
+                f"{exp_dirs[0].parent.name}",
+                self.app.G360_SUCCESS,
+            )
 
-        threading.Thread(target=task, daemon=True).start()
+    def _abrir_carpeta_expediente(self, exp_dirs):
+        """Abre la carpeta del expediente en el explorador (Windows)."""
+        if os.name == "nt":
+            target = exp_dirs[0] if len(exp_dirs) == 1 else exp_dirs[0].parent
+            os.startfile(str(target))
+        self.app.hide_loading()
 
     def reset(self):
         """Limpia todos los inputs y cache del view."""
@@ -1650,72 +1796,79 @@ class _ViewHandlers:
         self.app.show_snackbar("✅ App reseteado", self.app.G360_SUCCESS)
 
     def _reset_ui(self):
-        # Reset general: limpia Y colapsa la card de reportes (la card
-        # tiene su propio Limpiar que solo limpia y la deja abierta).
+        # Reset general: limpia Y colapsa la card de reportes.
         if hasattr(self, "reporte_panel"):
             self.reporte_panel.limpiar(colapsar=True)
-        if hasattr(self, "cliente_dropdown_pd"):
-            self.cliente_dropdown_pd.value = None
-        if hasattr(self, "cliente_dropdown_ci"):
-            self.cliente_dropdown_ci.value = None
-        if hasattr(self, "factura_dropdown_ci"):
-            self.factura_dropdown_ci.value = None
-        if hasattr(self, "factura_dropdown"):
-            self.factura_dropdown.options = []
-            self.factura_dropdown.value = None
-        if hasattr(self, "vendedor_dropdown"):
-            self.vendedor_dropdown.value = None
-        if hasattr(self, "modalidad_radio"):
-            self.modalidad_radio.value = MODALIDAD_INDIVIDUAL
-
-        if hasattr(self, "mecanica_dropdown"):
-            self.mecanica_dropdown.value = "12+1"
-        if hasattr(self, "mecanica_personalizada"):
-            self.mecanica_personalizada.value = ""
-            self.mecanica_personalizada.visible = False
-        if hasattr(self, "fecha_desde"):
-            self.fecha_desde.value = ""
-        if hasattr(self, "fecha_hasta"):
-            self.fecha_hasta.value = ""
-        if hasattr(self, "_periodo_row"):
-            self._periodo_row.visible = False
-        if hasattr(self, "observaciones"):
-            self.observaciones.value = ""
-        if hasattr(self, "lbl_historial"):
-            self.lbl_historial.value = "Ninguno"
-        if hasattr(self, "lbl_lista"):
-            self.lbl_lista.value = "Ninguno"
-        if hasattr(self, "lbl_requerimientos_count"):
-            self.lbl_requerimientos_count.value = "Ninguno"
-        if hasattr(self, "lbl_requerimientos_list"):
-            self.lbl_requerimientos_list.controls.clear()
-        if hasattr(self, "cliente_dropdown_df"):
-            self.cliente_dropdown_df.value = None
-        if hasattr(self, "factura_dropdown_df"):
-            self.factura_dropdown_df.options = []
-            self.factura_dropdown_df.value = None
-        if hasattr(self, "cliente_dropdown_pb"):
-            self.cliente_dropdown_pb.value = None
-        if hasattr(self, "descuento_pct"):
-            self.descuento_pct.value = ""
-            self.descuento_pct.disabled = False
-        if hasattr(self, "lbl_sku_filter"):
-            self.lbl_sku_filter.value = "Ninguno"
-        if hasattr(self, "sku_filter_clear_btn"):
-            self.sku_filter_clear_btn.visible = False
+        # Controles básicos
+        for attr, kw in [
+            ("vendedor_dropdown", {"value": None}),
+            ("modalidad_radio", {"value": MODALIDAD_INDIVIDUAL}),
+            ("mecanica_dropdown", {"value": "12+1"}),
+            ("mecanica_personalizada", {"value": "", "visible": False}),
+            ("fecha_desde", {"value": ""}),
+            ("fecha_hasta", {"value": ""}),
+            ("_periodo_row", {"visible": False}),
+            ("observaciones", {"value": ""}),
+        ]:
+            ctrl = getattr(self, attr, None)
+            if ctrl is not None:
+                for k, v in kw.items():
+                    try:
+                        setattr(ctrl, k, v)
+                    except Exception:
+                        pass
+        # Insumos
+        for attr, val in [
+            ("lbl_lista", "Ninguno"),
+            ("lbl_sku_filter", "Ninguno"),
+            ("lbl_stock_cliente", "Ninguno"),
+            ("lbl_historial", "Ninguno"),
+        ]:
+            ctrl = getattr(self, attr, None)
+            if ctrl is not None:
+                try:
+                    ctrl.value = val
+                except Exception:
+                    pass
+        for attr in ("sku_filter_clear_btn", "stock_cliente_clear_btn"):
+            ctrl = getattr(self, attr, None)
+            if ctrl is not None:
+                try:
+                    ctrl.visible = False
+                except Exception:
+                    pass
+        req_list = getattr(self, "lbl_requerimientos_list", None)
+        if req_list is not None:
+            try:
+                req_list.controls.clear()
+            except Exception:
+                pass
+        req_count = getattr(self, "lbl_requerimientos_count", None)
+        if req_count is not None:
+            try:
+                req_count.value = "Ninguno"
+            except Exception:
+                pass
+        desc_pct = getattr(self, "descuento_pct", None)
+        if desc_pct is not None:
+            try:
+                desc_pct.value = ""
+                desc_pct.disabled = False
+            except Exception:
+                pass
+        self.lista_path = None
         self.sku_filter_path = None
-        if hasattr(self, "lbl_stock_cliente"):
-            self.lbl_stock_cliente.value = "Ninguno"
-        if hasattr(self, "stock_cliente_clear_btn"):
-            self.stock_cliente_clear_btn.visible = False
         self.stock_cliente_path = None
+        self.desc_file_path = None
+        self.requerimientos_paths = []
+        # Limpiar búsqueda (función de módulo: invocable aun con mocks)
+        _limpiar_busqueda(self)
+        # Estado del tipo
         if hasattr(self, "tipo_dropdown"):
             if self._legacy_tipo() != "diferencia_precio":
                 self.tipo_dropdown.value = "DC"
                 self._on_tipo_change(None)
             else:
-                # Mismo caso (DC): evita el re-render completo (card DB +
-                # layout). Replica solo la parte de estado de _on_tipo_change.
                 self.tipo_dropdown.value = "DC"
                 self.tipo_actual = "DC"
                 caso_data = self._caso_de_tipo()

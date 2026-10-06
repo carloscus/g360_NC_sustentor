@@ -395,7 +395,6 @@ from src.ui.catalog import (
     ORDEN_CASOS,
     HistorialConfig,
 )
-from src.ui.widgets.cliente_factura_selector import ClienteFacturaSelector
 from src.ui.widgets import control_factory
 
 
@@ -465,20 +464,18 @@ class _ViewPanels:
         # Historico config checkboxes (ETapa B)
         self.historico_incluir_ctrls: dict[str, ft.Checkbox] = {}
         self.historico_calc_ctrls: dict[str, ft.Checkbox] = {}
-        self.factura_dropdown = control_factory.dropdown(
-            "Seleccionar Factura",
-            width=control_factory.WIDTH_FILTER,
-            on_change=self._on_factura_selected,
-        )
-
-        self.selector_ci = ClienteFacturaSelector(
-            suffix="ci",
-            on_cliente_change=self._on_cliente_change_ci,
-            on_factura_change=self._on_factura_change_ci,
-            show_factura=True,
-        )
-        self.cliente_dropdown_ci = self.selector_ci.cliente_dropdown
-        self.factura_dropdown_ci = self.selector_ci.factura_dropdown
+        # Sin selectores legacy: la selección vive en el fragmento aplicado
+        # (_sel_clientes/_sel_facturas vía pickers). Los ClienteFacturaSelector
+        # (ci/pd/fp/sf/df/pb) nunca se montaron al layout y se eliminaron.
+        # Se mantiene un stub de `factura_dropdown` para no romper _collect_ui_values.
+        self.factura_dropdown = control_factory.dropdown("Seleccionar Factura", width=0)
+        # Placeholders para atributos que handler antiguos aún referencian.
+        for _suf in ("ci", "df", "fp", "sf", "pb", "pd"):
+            setattr(self, f"selector_{_suf}", None)
+            setattr(self, f"cliente_dropdown_{_suf}", None)
+            if _suf in ("ci", "df"):
+                setattr(self, f"factura_dropdown_{_suf}", None)
+        self.alertas_nc_container_sf = ft.Container(visible=False)
 
         self.fecha_desde = control_factory.text_field(
             "Desde (dd-mm-aaaa)", width=control_factory.WIDTH_DATE
@@ -524,12 +521,7 @@ class _ViewPanels:
             on_change=self._on_vendedor_change,
         )
 
-        self.selector_pd = ClienteFacturaSelector(
-            suffix="pd",
-            on_cliente_change=self._on_cliente_change_pd,
-            show_factura=False,
-        )
-        self.cliente_dropdown_pd = self.selector_pd.cliente_dropdown
+        self.selector_pd = None  # placeholder eliminado (legacy)
         self.fecha_desde_pd = control_factory.text_field(
             "Desde (dd-mm-aaaa)", width=control_factory.WIDTH_DATE
         )
@@ -614,13 +606,7 @@ class _ViewPanels:
         default_min = _dt.datetime(2020, 1, 1)
         default_max = _dt.datetime(2030, 12, 31)
 
-        self.selector_fp = ClienteFacturaSelector(
-            suffix="fp",
-            on_cliente_change=self._on_cliente_change_fp,
-            show_factura=False,
-            use_build_options=False,
-        )
-        self.cliente_dropdown_fp = self.selector_fp.cliente_dropdown
+        self.selector_fp = None  # placeholder eliminado (legacy)
         self.fp_desde = ft.DatePicker(
             on_change=self._on_fp_desde_change,
             first_date=default_min,
@@ -644,14 +630,7 @@ class _ViewPanels:
             style=ft.ButtonStyle(padding=ft.padding.symmetric(horizontal=14)),
         )
 
-        self.selector_sf = ClienteFacturaSelector(
-            suffix="sf",
-            on_cliente_change=self._on_cliente_change_sf,
-            on_factura_change=self._on_factura_change_sf,
-            show_factura=True,
-        )
-        self.cliente_dropdown_sf = self.selector_sf.cliente_dropdown
-        self.factura_dropdown_sf = self.selector_sf.factura_dropdown
+        self.selector_sf = None  # placeholder eliminado (legacy)
         self.alertas_nc_container_sf = ft.Container(
             visible=False,
             padding=12,
@@ -660,26 +639,14 @@ class _ViewPanels:
             border=ft.border.all(1, G360Theme.border_subtle_color()),
         )
 
-        self.selector_df = ClienteFacturaSelector(
-            suffix="df",
-            on_cliente_change=self._on_cliente_change_df,
-            on_factura_change=self._on_factura_change_df,
-            show_factura=True,
-        )
-        self.cliente_dropdown_df = self.selector_df.cliente_dropdown
-        self.factura_dropdown_df = self.selector_df.factura_dropdown
+        self.selector_df = None  # placeholder eliminado (legacy)
         self.descuento_pct = control_factory.text_field(
             "% Descuento",
             width=control_factory.WIDTH_FIELD,
             keyboard=ft.KeyboardType.NUMBER,
             on_change=self._on_descuento_pct_change,
         )
-        self.selector_pb = ClienteFacturaSelector(
-            suffix="pb",
-            on_cliente_change=self._on_cliente_change_pb,
-            show_factura=False,
-        )
-        self.cliente_dropdown_pb = self.selector_pb.cliente_dropdown
+        self.selector_pb = None  # placeholder eliminado (legacy)
 
         self.linea_checkboxes: dict[str, ft.Checkbox] = {}
         self.linea_checkbox_container = ft.Container(
@@ -1868,18 +1835,12 @@ class _ViewPanels:
             status.color = G360Theme.text_muted_color()
             page.update()
 
-        li_cont = ft.Column(scroll=ft.ScrollMode.AUTO, spacing=1, tight=True, height=300)
+        # Lista en Wrap (2 columnas) para aprovechar el ancho del modal
+        li_cont = ft.Wrap(
+            scroll=ft.ScrollMode.AUTO, spacing=4, run_spacing=4, height=340, expand=True
+        )
         li_cont.controls.append(
-            ft.Row(
-                [
-                    ft.ProgressRing(width=16, height=16, stroke_width=2),
-                    ft.Text(
-                        "Cargando líneas de la DB…", size=12, color=G360Theme.text_muted_color()
-                    ),
-                ],
-                spacing=8,
-                alignment=ft.MainAxisAlignment.CENTER,
-            )
+            ft.Text("Cargando líneas…", size=12, color=G360Theme.text_muted_color())
         )
 
         def _crear_checkbox(key: str, etiqueta: str, sufijo: str, activa: bool):
@@ -1892,7 +1853,8 @@ class _ViewPanels:
             cajas.clear()
             li_cont.controls.clear()
             for key, etiqueta, sufijo in entradas:
-                li_cont.controls.append(_crear_checkbox(key, etiqueta, sufijo, sufijo in activas))
+                cb = _crear_checkbox(key, etiqueta, sufijo, sufijo in activas)
+                li_cont.controls.append(cb)
             actualizar_suma()
 
         def _formar_entradas() -> None:
@@ -1950,24 +1912,47 @@ class _ViewPanels:
                 return
             cfg2 = ventas_db.load_app_config()
             cfg2["allowed_lines"] = sel
+            cfg2["actividad_desde"] = f"{anio_dd.value or '2021'}-01-01"
             ventas_db.save_app_config(cfg2)
             activas.clear()
             activas.update(sel)
-            status.value = f"✓ Guardados {len(sel)} códigos aprobados"
+            piso_nuevo = ventas_db.set_actividad_anio(anio_dd.value)
+            anio_nuevo = piso_nuevo[:4]
+            es_default = (
+                set(sel) == {str(x).upper() for x in ventas_db.DEFAULT_ALLOWED_LINES}
+                and anio_nuevo == ventas_db.DEFAULT_ACTIVIDAD_DESDE[:4]
+            )
+            origen = "por defecto" if es_default else "personalizado"
+            status.value = f"✓ Guardados {len(sel)} códigos + ventas desde {anio_nuevo} ({origen})"
             status.color = self.app.G360_SUCCESS
             page.update()
+            _refrescar_preview(anio_nuevo)
+            try:
+                self._cargar_vendedores_dropdown()
+            except Exception:
+                pass
 
         def restaurar(_):
             cfg2 = ventas_db.load_app_config()
             cfg2.pop("allowed_lines", None)
+            cfg2.pop("actividad_desde", None)
             ventas_db.save_app_config(cfg2)
             activas.clear()
             activas.update(str(x).upper() for x in ventas_db.allowed_lines())
             for _key, (cb, sufijo) in cajas.items():
                 cb.value = sufijo in activas
-            status.value = f"Restauradas las {len(ventas_db.allowed_lines())} líneas por defecto"
+            anio_dd.value = ventas_db.DEFAULT_ACTIVIDAD_DESDE[:4]
+            status.value = (
+                f"Restauradas las {len(ventas_db.allowed_lines())} líneas "
+                f"y ventas desde 2021 (por defecto)"
+            )
             status.color = self.app.G360_ACCENT
             actualizar_suma()
+            _refrescar_preview(anio_dd.value)
+            try:
+                self._cargar_vendedores_dropdown()
+            except Exception:
+                pass
 
         def agregar(valor):
             cod = (valor or "").strip().upper()
@@ -2149,7 +2134,7 @@ class _ViewPanels:
                 oc_list.controls.append(
                     ft.Row(
                         [
-                            ft.Text(f"{cid} · {norm} ({p['filas']} filas)", size=12,  expand=True),
+                            ft.Text(f"{cid} · {norm} ({p['filas']} filas)", size=12, expand=True),
                             ft.TextButton(
                                 "Confirmar",
                                 on_click=lambda _, c=cid, n=norm: _resolver(c, n, "confirmado"),
@@ -2424,71 +2409,6 @@ class _ViewPanels:
 
         from src.core import ventas_db
         from src.core.db_network import get_db_info_quick
-
-        def descargar_base_canonica(_):
-            """Descarga la base canónica exportada por la API y valida antes de reemplazar.
-
-            Flujo: export_list() → latest → export_base_canonica(name) →
-            archivo temporal → mismo camino de validación/reemplazo que el
-            archivo local (mismo botón comp_box/btn_reemplazar).
-            """
-            status.value = "Listando bases en el servidor…"
-            status.color = self.app.G360_ACCENT
-            _safe_update(page)
-
-            def worker():
-                try:
-                    from src.core.api_auth import default_api_url
-                    from src.core.capture_service import CaptureService
-                    from src.core.ventas_api_client import VentaAPIClient
-
-                    token = CaptureService.api_token()
-                    if not (token and CaptureService.is_api_token_valid()):
-                        status.value = (
-                            "Sin token contra la API: abrí «Actualizar hoy» e iniciá "
-                            "sesión una vez; queda guardado 24h."
-                        )
-                        status.color = self.app.G360_WARNING
-                        _safe_update(page)
-                        return
-                    cli = VentaAPIClient(base_url=default_api_url(), api_token=token)
-                    try:
-                        listing = cli.export_list()
-                        snaps = listing.get("snapshots") or []
-                        if not snaps:
-                            status.value = (
-                                "El servidor no exportó aún ninguna base canónica "
-                                "(no hay base_canonica_*.db en export/)."
-                            )
-                            status.color = self.app.G360_WARNING
-                            _safe_update(page)
-                            return
-                        elegir = snaps[0]
-                        nombre = elegir.get("nombre") or elegir.get("Nombre")
-                        status.value = f"Descargando {nombre}…"
-                        _safe_update(page)
-                        data = cli.export_base_canonica(name=nombre)
-                    finally:
-                        cli.close()
-                    if not data:
-                        status.value = "Descarga vacía."
-                        status.color = self.app.G360_ERROR
-                        _safe_update(page)
-                        return
-                    tmp = ventas_db.data_dir() / "export" / "descargada_base_canonica.db"
-                    tmp.parent.mkdir(parents=True, exist_ok=True)
-                    tmp.write_bytes(data)
-                    mb = len(data) / (1024 * 1024)
-                    status.value = f"✓ {nombre} descargado ({mb:.1f} MB). Validando…"
-                    status.color = self.app.G360_SUCCESS
-                    _safe_update(page)
-                    _validar_archivo(str(tmp))
-                except Exception as ex:
-                    status.value = f"✗ Descarga falló: {ex}"
-                    status.color = self.app.G360_ERROR
-                    _safe_update(page)
-
-            threading.Thread(target=worker, daemon=True).start()
 
         elegida: dict = {"ruta": None, "info": None}
 
@@ -2996,7 +2916,8 @@ class _ViewPanels:
             hint_text="\\\\servidor\\compartido\\historial.db",
             height=40,
             expand=True,
-            text_size=12, )
+            text_size=12,
+        )
 
         db_info_text = ft.Text("Cargando...", size=10, color=G360Theme.text_muted_color())
 
@@ -3028,41 +2949,6 @@ class _ViewPanels:
                             db_info_text,
                         ],
                         spacing=4,
-                        tight=True,
-                    ),
-                    bgcolor=G360Theme.surface_variant_color(),
-                    border_radius=12,
-                    padding=ft.padding.symmetric(horizontal=12, vertical=10),
-                    border=ft.border.all(1, G360Theme.border_subtle_color()),
-                ),
-                ft.Container(height=4),
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            G360Theme.section_header(
-                                ft.Icons.CLOUD_DOWNLOAD_OUTLINED, "DEL SERVIDOR"
-                            ),
-                            ft.Container(height=4),
-                            ft.Text(
-                                "Sin cartucho a mano: descarga la base canónica que "
-                                "la API exportó (online). Útil si pasaron meses sin "
-                                "actualizar o quieres una copia limpia.",
-                                size=10,
-                                color=G360Theme.text_muted_color(),
-                            ),
-                            ft.Container(height=6),
-                            ft.ElevatedButton(
-                                "Descargar base canónica del servidor…",
-                                height=32,
-                                icon=ft.Icons.CLOUD_DOWNLOAD_OUTLINED,
-                                on_click=descargar_base_canonica,
-                                style=ft.ButtonStyle(
-                                    bgcolor=G360Theme.with_opacity(0.15, self.app.G360_ACCENT),
-                                    color=self.app.G360_ACCENT,
-                                ),
-                            ),
-                        ],
-                        spacing=0,
                         tight=True,
                     ),
                     bgcolor=G360Theme.surface_variant_color(),
@@ -3579,9 +3465,7 @@ class _ViewPanels:
                                 weight=ft.FontWeight.W_700,
                                 color=color,
                             ),
-                            ft.Text(
-                                label, size=12, color=G360Theme.text_muted_color()
-                            ),
+                            ft.Text(label, size=12, color=G360Theme.text_muted_color()),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         spacing=G360Theme.SPACE_XS,
@@ -3630,7 +3514,6 @@ class _ViewPanels:
             )
 
             self.card_db_kpis.controls = _fila_kpis
-            self.card_db_kpis.update()
 
             if incompletos:
                 status_text = f"⚠ {len(incompletos)} mes(es) incompleto(s)"
@@ -3645,27 +3528,36 @@ class _ViewPanels:
                 status_text = f"Datos: {rango_ui(fmin, fmax, '  ')}"
                 status_color = ft.Colors.ON_SURFACE_VARIANT
 
+            # Asignar valores ANTES de los .update(): si la pagina no esta
+            # montada (build sincrono inicial) los .update() levantan
+            # AssertionError y el estado queda asignado en el control.
             self.card_db_status.value = status_text
             self.card_db_status.color = status_color
-
-            alerts = []
-            if incompletos:
-                alerts.append(f"Incompletos: {', '.join(incompletos[:4])}")
-            if huecos:
-                alerts.append(f"Ausentes: {', '.join(huecos[:4])}")
-            self.card_db_alerta.value = " · ".join(alerts) if alerts else ""
-            self.card_db_alerta.color = (
-                G360Theme.warning_color() if alerts else ft.Colors.TRANSPARENT
+            self.card_db_alerta.value = (
+                " · ".join(
+                    a
+                    for a in [
+                        f"Incompletos: {', '.join(incompletos[:4])}" if incompletos else None,
+                        f"Ausentes: {', '.join(huecos[:4])}" if huecos else None,
+                    ]
+                    if a
+                )
+                or ""
             )
-
+            self.card_db_alerta.color = (
+                G360Theme.warning_color() if (incompletos or huecos) else ft.Colors.TRANSPARENT
+            )
             self.btn_config.visible = True
             self.btn_actualizar_hoy.visible = True
 
-            self.card_db_kpis.update()
-            self.card_db_status.update()
-            self.card_db_alerta.update()
-            self.btn_config.update()
-            self.btn_actualizar_hoy.update()
+            try:
+                self.card_db_kpis.update()
+                self.card_db_status.update()
+                self.card_db_alerta.update()
+                self.btn_config.update()
+                self.btn_actualizar_hoy.update()
+            except Exception:
+                pass  # controles sin montar: se pintan al abrir
             log.debug("refresh ok status=%s kpis=%s", status_text, len(self.card_db_kpis.controls))
         except AssertionError:
             # Flet lanza esto al pedir update() de un control que todavia no
@@ -4131,6 +4023,9 @@ class _ViewPanels:
                 for cid, nom in self._sel_clientes
             ]
             self.busq_cli_chips.visible = bool(self._sel_clientes)
+            btn_rep = getattr(self, "busq_btn_reporte", None)
+            if btn_rep is not None:
+                btn_rep.disabled = not bool(self._sel_clientes)
             self.busq_ped_chips.controls = [
                 ft.Chip(
                     label=ft.Text(f"Pedido · {pid}", size=10),
@@ -4935,6 +4830,34 @@ class _ViewPanels:
                 ),
             )
 
+        # Puente Búsqueda → Reportes: manda la multi-selección a la card de
+        # reportes sin re-pickear clientes (el feature que esperaba `expandir`).
+        def _abrir_reporte_desde_busqueda(_):
+            if not self._sel_clientes:
+                self.app.show_snackbar(
+                    "Selecciona al menos un cliente para abrir el reporte de compras",
+                    self.app.G360_WARNING,
+                )
+                return
+            fd = self.busq_fd[0] if getattr(self, "busq_fd", None) else None
+            fh = self.busq_fh[0] if getattr(self, "busq_fh", None) else None
+            # El panel guarda datetime en su state (convención desde su init):
+            # date → datetime a medianoche.
+            fd_dt = datetime.combine(fd, datetime.min.time()) if fd else None
+            fh_dt = datetime.combine(fh, datetime.min.time()) if fh else None
+            self.reporte_panel.expandir(
+                clientes=list(self._sel_clientes),
+                vendedor=self._search_vend_id or None,
+                rango=(fd_dt, fh_dt) if fd_dt or fh_dt else None,
+            )
+
+        self.busq_btn_reporte = G360Theme.ghost_button(
+            "Reporte de compras",
+            icon=ft.Icons.BAR_CHART_OUTLINED,
+            on_click=_abrir_reporte_desde_busqueda,
+        )
+        self.busq_btn_reporte.disabled = not bool(self._sel_clientes)
+
         # Cargar vendedores con actividad real (>100 ventas ≈ vendedores de campo)
         def _merge_pinned_vendedores(vends: list, pinned_ids: set[str]):
             """Anexa los vendedores anclados que no superan el umbral de ventas."""
@@ -5179,7 +5102,7 @@ class _ViewPanels:
                 self.busq_oc_chips,
                 self.busq_fac_chips,
                 ft.Row(
-                    [self.busq_btn, self.busq_exec_btn],
+                    [self.busq_btn, self.busq_btn_reporte, self.busq_exec_btn],
                     spacing=8,
                     alignment=ft.MainAxisAlignment.END,
                     wrap=True,
@@ -5317,35 +5240,16 @@ class _ViewPanels:
         btn_verificar.on_click = on_verify
 
     def _actualizar_hoy(self, e):
-        """Un clic: abre el modal unificado de sincronización desde la API Go.
+        """Un clic: actualización incremental por intranet hasta hoy.
 
-        El modal orquesta login intranet → check de frescura → sync incremental.
-        Mantiene fallback a XLS/intranet disponible en Configuración → Fuentes.
+        Sin API: delega al flujo intranet (`_iniciar_descarga`), que descarga
+        día por día desde la última fecha con datos (con overlap de ingresos
+        tardíos) y respeta días cerrados. El modal `ApiSyncModal` se eliminó.
         """
         page = self.app.page
         if page is None:
             return
-
-        from src.ui.components.api_sync_modal import ApiSyncModal
-
-        modal = ApiSyncModal(app=self.app, page=page)
-
-        def _on_result(res):
-            if res.error:
-                self.app.show_snackbar(f"Sync falló: {res.error[:100]}", self.app.G360_ERROR)
-            elif res.filas > 0:
-                self.app.show_snackbar(
-                    f"✓ {res.filas:,} filas actualizadas en {res.segundos:.0f}s",
-                    self.app.G360_SUCCESS,
-                )
-                self._refrescar_card_db()
-            else:
-                self.app.show_snackbar(
-                    "Tu DB ya está al día con la API", ft.Colors.ON_SURFACE_VARIANT
-                )
-                self._refrescar_card_db()
-
-        modal.open(on_result=_on_result)
+        self._iniciar_descarga(page)
 
     def _iniciar_descarga(self, page):
         """Inicia la descarga desde el ultimo dato hasta hoy (post-login)."""
@@ -5546,16 +5450,6 @@ class _ViewPanels:
             on_click=None,
             tooltip="Copia el historial.db actualizado de la DB fuente (g360-db-ventas)",
         )
-        btn_sync_api = ft.TextButton(
-            "☁ Actualizar desde API",
-            on_click=None,
-            tooltip=(
-                "Actualiza los últimos 90 días desde la API de ventas "
-                "(g360-ventas-api) y los escribe en la DB local. Si la API está "
-                "apagada, despierta WSL automáticamente. No necesita la DB fuente "
-                "ni descargar el XLS por intranet."
-            ),
-        )
         dd_anyos = ft.Dropdown(
             label="Ventana",
             dense=True,
@@ -5589,7 +5483,7 @@ class _ViewPanels:
                 ft.Row([user_input, pass_input], spacing=8),
                 login_status,
                 btn_conectar,
-                ft.Row([btn_sync_db, btn_sync_api], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Row([btn_sync_db], alignment=ft.MainAxisAlignment.CENTER),
                 ft.Row(
                     [dd_anyos, btn_sync_parcial], alignment=ft.MainAxisAlignment.CENTER, spacing=8
                 ),
@@ -5997,25 +5891,8 @@ class _ViewPanels:
 
             threading.Thread(target=run, daemon=True).start()
 
-        def sincronizar_api(_):
-            """Sync incremental desde la API Go hacia la DB local.
-
-            Despierta WSL/API si hace falta, detecta los días desfasados por
-            checksum (filas + soles) y baja solo esos días. Reemplaza folio por
-            folio, así que no toca la DB fuente ni pasa por la descarga del XLS.
-            """
-            from src.core.api_auth import default_api_url
-
-            _correr_sync_api(
-                status=login_status,
-                btn_sync=btn_sync_api,
-                app=self.app,
-                page=page,
-                api_url=default_api_url(),
-                set_busy=set_busy,
-                al_actualizar=_datos_nuevos,
-                registrar=append_log,
-            )
+        # Sin API: `sincronizar_api` se eliminó (el backend queda en cuarentena,
+        # sin entry points en la UI).
 
         def _datos_nuevos(_res):
             """Refresca la UI solo si el sync trajo filas nuevas."""
@@ -6069,7 +5946,6 @@ class _ViewPanels:
 
         btn_conectar.on_click = conectar
         btn_sync_db.on_click = sincronizar
-        btn_sync_api.on_click = sincronizar_api
         btn_sync_parcial.on_click = cargar_parcial
         pass_input.on_submit = conectar
         btn_update.on_click = confirmar_actualizar

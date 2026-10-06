@@ -8,8 +8,10 @@ Modo WAL + busy_timeout para convivir con lectores concurrentes.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -42,7 +44,37 @@ from src.core.ventas_db_config import (  # noqa: F401  (re-exportado p/ compatib
 
 # ── Schema (port fiel de schema.rs) ─────────────────────────────────────────
 
-CREATE_TABLE_VENTAS = """
+# ── Invariante de fechas en la tabla ─────────────────────────────────────────
+# Definición única: la usan el CREATE TABLE (bases nuevas) y la migración que
+# reconstruye las existentes. Si divergen, una base acepta lo que la otra no.
+#
+# Por qué un CHECK y no solo el código que normaliza: mientras la invariante
+# dependa de que todo camino de escritura la recuerde, es una convención. Con el
+# CHECK es una propiedad de la base, y las 45 comparaciones de texto sobre
+# fecha_orig quedan garantizadas sin tocar ninguna.
+GLOB_ISO = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"
+
+
+def chk_fecha(col: str, admite_vacia: bool) -> str:
+    """CHECK de una columna de fecha en ISO yyyy-mm-dd.
+
+    `COALESCE(date(c), '')` no es cosmético: `date('2024-13-01')` devuelve NULL
+    y en un CHECK un NULL cuenta como SATISFECHO, así que sin el COALESCE
+    dejaría pasar basura. Con él, un NULL se vuelve '' y no iguala al valor.
+
+    El GLOB solo fija la forma; el `date()` agrega el calendario (rechaza
+    2023-02-29, que SQLite normaliza a 2023-03-01).
+
+    admite_vacia: `fec_cargo` viene 97% vacío del ERP (solo lo completa en parte
+    de las notas de crédito) y `fecha_ref`/`fecha_venc` admiten NULL.
+    """
+    base = f"{col} GLOB '{GLOB_ISO}' AND COALESCE(date({col}), '') = {col}"
+    if admite_vacia:
+        return f"CHECK ({col} IS NULL OR {col} = '' OR ({base}))"
+    return f"CHECK ({base})"
+
+
+CREATE_TABLE_VENTAS = f"""
 CREATE TABLE IF NOT EXISTS ventas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     id_articulo TEXT NOT NULL, original_sku TEXT, nom_articulo TEXT,
@@ -56,8 +88,9 @@ CREATE TABLE IF NOT EXISTS ventas (
     cantidad REAL NOT NULL, soles REAL NOT NULL, dolares REAL, precio_unitario REAL,
     cantidad_fae REAL,
     anho INTEGER NOT NULL, mes INTEGER NOT NULL,
-    fecha_orig TEXT NOT NULL,
-    fecha_ref TEXT, fecha_venc TEXT,
+    fecha_orig TEXT NOT NULL {chk_fecha("fecha_orig", False)},
+    fecha_ref TEXT {chk_fecha("fecha_ref", True)},
+    fecha_venc TEXT {chk_fecha("fecha_venc", True)},
     cod_sucursal TEXT, nom_sucursal TEXT,
     departamento TEXT, provincia TEXT, distrito TEXT,
     id_vendedor TEXT, nom_vendedor TEXT,
@@ -77,7 +110,7 @@ CREATE TABLE IF NOT EXISTS ventas (
     nom_condicion_pago TEXT,
     estado_linea TEXT,
     division TEXT,
-    fec_cargo TEXT,
+    fec_cargo TEXT {chk_fecha("fec_cargo", True)},
     id_guia TEXT
 )
 """
@@ -365,6 +398,26 @@ TABLAS_LOCALES_TOLERADAS = frozenset(
     {"agg_cliente_mes", "nc_asociadas", "oc_archivos", "day_checksums"}
 )
 
+# Prefijo de las tablas de auditoria que crean las herramientas de migracion
+# (migrar_fechas_iso, agregar_indice_capturado_en): dejan registro de que filas
+# tocaron y cuando, para que la operacion sea reversible y auditable.
+#
+# Van por PREFIJO y no por nombre fijo a proposito: el numero de migraciones
+# crece con el tiempo y una lista de nombres se desactualiza en silencio. Con
+# este patron, `migrar_fechas_iso` creo `_migracion_fec_cargo`,
+# `_migracion_fecha_ref` y `_migracion_fecha_venc`, y el siguiente script nuevo
+# queda cubierto sin tocar nada.
+#
+# Sin esto, esas tablas hacian fallar `verificar_contrato` y con ella
+# `init_db()`: la app no arrancaba con "tabla extra no tolerada" en una base
+# perfectamente valida. Se reportan aparte (`tablas_auditoria`) para que sigan
+# siendo visibles sin romper el gate.
+PREFIJO_TABLAS_AUDITORIA = "_migracion_"
+
+
+def _es_auditoria(nombre: str) -> bool:
+    return nombre.startswith(PREFIJO_TABLAS_AUDITORIA)
+
 
 class ContratoDBError(Exception):
     """El archivo no cumple el contrato de forma del cartucho."""
@@ -374,8 +427,8 @@ def verificar_contrato(conn: sqlite3.Connection | None = None) -> dict:
     """Compara el archivo contra CONTRACTO_TABLAS + CONTRACTO_VERSION.
 
     Returns {ok, version_ok, version, tablas_faltantes, columnas_difieren,
-    tablas_extra_no_toleradas, tablas_locales}. Solo lectura. Las tablas
-    locales toleradas se reportan pero no rompen el ok.
+    tablas_extra_no_toleradas, tablas_locales, tablas_auditoria}. Solo lectura.
+    Las locales y las de auditoria se reportan pero no rompen el ok.
     """
     cerrar = conn is None
     if conn is None:
@@ -388,6 +441,7 @@ def verificar_contrato(conn: sqlite3.Connection | None = None) -> dict:
                 "columnas_difieren": {},
                 "tablas_extra_no_toleradas": [],
                 "tablas_locales": [],
+                "tablas_auditoria": [],
                 "detalle": "no existe historial.db",
             }
         conn = connect(readonly=True)
@@ -406,10 +460,17 @@ def verificar_contrato(conn: sqlite3.Connection | None = None) -> dict:
             esperadas = CONTRACTO_TABLAS[t]
             if actuales != esperadas:
                 difieren[t] = {"esperadas": len(esperadas), "actuales": len(actuales)}
-        extras = sorted(
-            t for t in tablas if t not in CONTRACTO_TABLAS and t not in TABLAS_LOCALES_TOLERADAS
-        )
+        auditoria = sorted(t for t in tablas if _es_auditoria(t))
         locales = sorted(t for t in tablas if t in TABLAS_LOCALES_TOLERADAS)
+        # Las de auditoria se toleratean pero NO se reportan como locales: son
+        # rastro de una operacion concreta, no una cache derivable del schema.
+        extras = sorted(
+            t
+            for t in tablas
+            if t not in CONTRACTO_TABLAS
+            and t not in TABLAS_LOCALES_TOLERADAS
+            and not _es_auditoria(t)
+        )
         version_ok = version == CONTRACTO_VERSION
         ok = version_ok and not faltantes and not difieren and not extras
         detalle = []
@@ -426,6 +487,7 @@ def verificar_contrato(conn: sqlite3.Connection | None = None) -> dict:
             "columnas_difieren": difieren,
             "tablas_extra_no_toleradas": extras,
             "tablas_locales": locales,
+            "tablas_auditoria": auditoria,
             "detalle": "; ".join(detalle),
         }
     finally:
@@ -582,6 +644,15 @@ CREATE_INDEXES = [
     # Tienda real = (cliente, sucursal): el filtro y el % por tienda van
     # siempre por el par (el código solo se repite entre clientes).
     "CREATE INDEX IF NOT EXISTS idx_venta_cliente_sucursal ON ventas(id_cliente, cod_sucursal);",
+    # MAX(capturado_en) es la consulta de frescura que usa el cliente para
+    # medir el desfase del snapshot. Sin índice es un escaneo de ~2.8M de filas
+    # (47s medido); con él pasa a COVERING INDEX y baja a milisegundos.
+    "CREATE INDEX IF NOT EXISTS idx_venta_capturado_en ON ventas(capturado_en);",
+    # Índice COVERING del GROUP BY de checksums mensuales: con soles/dolares/
+    # cantidad dentro, el `GROUP BY mes_ref` se resuelve sobre el índice sin
+    # ir a la tabla fila por fila. Medido: 36.23s -> 0.92s, +0 MB de archivo.
+    "CREATE INDEX IF NOT EXISTS idx_venta_mes_checksum "
+    "ON ventas(mes_ref, soles, COALESCE(dolares,0), cantidad);",
 ]
 
 CREATE_VIEWS = [
@@ -845,12 +916,14 @@ CREATE_VIEWS = [
     # activas. Reduce el dropdown de clientes de escanear 1.5M filas a ~30K
     # -> rango largo cae de 3.3s a <20ms. Regenerar con
     # refresh_agg_cliente_mes() tras cada captura. Granularidad mensual.
+    # nom_vendedor alimenta el dropdown de vendedores (ver fetch_vendedores).
     """
     CREATE TABLE IF NOT EXISTS agg_cliente_mes (
       id_cliente TEXT NOT NULL,
       id_vendedor TEXT,
       nom_cliente TEXT,
       doc_cliente TEXT,
+      nom_vendedor TEXT,
       mes TEXT NOT NULL,
       n_docs INTEGER NOT NULL,
       PRIMARY KEY (id_cliente, id_vendedor, mes)
@@ -958,6 +1031,53 @@ CREATE_VIEWS = [
 
 _local = threading.local()
 
+# Registro de TODAS las conexiones abiertas, no solo las del hilo actual.
+#
+# `threading.local` no alcanza: los refrescos en background (`refresh_lineas_async`,
+# `refresh_sucursales_async`, `refresh_card_info_async`) abren su propia conexion
+# read-only en SU hilo. `cerrar_conexiones()` solo limpiaba el local del hilo que
+# la llamaba, asi que esos hilos seguian con el `.db` abierto y en Windows el
+# rename del archivo fallaba con WinError 32 (PermissionError), sin relacion
+# aparente con el codigo de test.
+#
+# Se guardan en un dict por id() y no en un WeakSet porque `sqlite3.Connection`
+# no soporta weak references (TypeError: cannot create weak reference). El
+# registro se vacia en cada `cerrar_todas_las_conexiones` y las conexiones vivas se
+# re-registran en su proximo `get_conn()`/`get_read_conn()`.
+_LOCK_CONEXIONES = threading.Lock()
+_CONEXIONES_POR_ID: dict[int, sqlite3.Connection] = {}
+
+
+def _registrar(conn: sqlite3.Connection) -> sqlite3.Connection:
+    with _LOCK_CONEXIONES:
+        _CONEXIONES_POR_ID[id(conn)] = conn
+    return conn
+
+
+def cerrar_todas_las_conexiones() -> int:
+    """Cierra las conexiones de TODOS los hilos. Devuelve cuantas cerro.
+
+    Necesario antes de reemplazar el archivo de la DB en Windows: cualquier
+    conexion viva mantiene el lock del `.db` y de sus sidecars `-wal`/`-shm`, y el
+    rename falla con WinError 32. Los hilos de refresco en background son la
+    fuente habitual de conexiones que sobreviven.
+    """
+    with _LOCK_CONEXIONES:
+        candidatas = list(_CONEXIONES_POR_ID.items())
+    cerradas = 0
+    for cid, conn in candidatas:
+        try:
+            conn.close()
+            cerradas += 1
+        except Exception:
+            pass
+    # Poda: se vacia el registro. Las conexiones que el GC ya habia liberado
+    # desaparecen solas; las que quedaron abiertas y en uso se re-registran en su
+    # proximo `get_conn()`/`get_read_conn()`.
+    with _LOCK_CONEXIONES:
+        _CONEXIONES_POR_ID.clear()
+    return cerradas
+
 
 def connect(readonly: bool = False) -> sqlite3.Connection:
     """Conexion SQLite por-hilo. readonly usa mode=ro (nunca bloquea el writer)."""
@@ -974,7 +1094,7 @@ def connect(readonly: bool = False) -> sqlite3.Connection:
     if not readonly:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
-    return conn
+    return _registrar(conn)
 
 
 def _viva(conn: sqlite3.Connection | None) -> bool:
@@ -1006,6 +1126,31 @@ def get_conn() -> sqlite3.Connection:
         conn = connect(readonly=False)
         _local.conn_rw = (conn, current)
     return conn
+
+
+def cerrar_conexiones() -> None:
+    """Cierra y expulsa las conexiones cacheadas de ESTE hilo y de los demas.
+
+    Hace falta tras reemplazar el archivo de la base (restore de backup, import
+    de cartucho, reinicio de tests). Una conexion cacheada al path viejo sigue
+    tomando los locks de los sidecars `-wal`/`-shm` aunque el `.db` ya no sea
+    ese, y la conexion nueva se come un "database is locked" que no explica nada.
+
+    Cierra tambien las de otros hilos (ver `cerrar_todas_las_conexiones`): los
+    refrescos en background tienen sus propias conexiones y en Windows dejan el
+    `.db` tomado, lo que hace fallar el rename con WinError 32.
+    """
+    for attr in ("conn_rw", "conn_ro"):
+        entry = getattr(_local, attr, None)
+        if not entry:
+            continue
+        conn = entry[0] if isinstance(entry, tuple) else entry
+        try:
+            conn.close()
+        except Exception:
+            pass
+        setattr(_local, attr, None)
+    cerrar_todas_las_conexiones()
 
 
 def get_read_conn() -> sqlite3.Connection:
@@ -1139,6 +1284,8 @@ def init_db(conn: sqlite3.Connection | None = None) -> Path:
         # La forma la define la canónica; acá no se parchea.
         # agg_cliente_mes: poblar solo si esta vacia y hay datos (evita el
         # rebuild de ~5s en cada arranque; las capturas lo refrescan luego).
+        # Si se agregó la columna nom_vendedor, hay que reconstruir una vez
+        # para rellenarla (los ALTER dejan NULL).
         try:
             n_ventas = conn.execute("SELECT COUNT(*) FROM ventas").fetchone()[0]
             n_agg = conn.execute("SELECT COUNT(*) FROM agg_cliente_mes").fetchone()[0]
@@ -1148,6 +1295,13 @@ def init_db(conn: sqlite3.Connection | None = None) -> Path:
         if n_ventas and not n_agg:
             try:
                 refresh_agg_cliente_mes(conn)
+            except Exception:
+                conn.rollback()
+        else:
+            try:
+                if n_ventas and ensure_agg_vendedor_col(conn):
+                    conn.commit()
+                    refresh_agg_cliente_mes(conn)
             except Exception:
                 conn.rollback()
     finally:
@@ -1205,6 +1359,7 @@ def refresh_agg_cliente_mes(conn: sqlite3.Connection | None = None) -> int:
     Alimenta el dropdown de clientes: n_docs = COUNT(DISTINCT doc) por cliente
     y mes, con el mismo allowlist de lineas de fetch_historial. Reduce el
     escaneo de 1.5M filas a ~27K -> rango largo de 3.3s a <20ms. Retorna filas.
+    nom_vendedor alimenta el dropdown de vendedores (fetch_vendedores).
     """
     own = conn is None
     conn = conn or connect(readonly=False)
@@ -1213,7 +1368,8 @@ def refresh_agg_cliente_mes(conn: sqlite3.Connection | None = None) -> int:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS agg_cliente_mes ("
             "id_cliente TEXT NOT NULL, id_vendedor TEXT, nom_cliente TEXT, "
-            "doc_cliente TEXT, mes TEXT NOT NULL, n_docs INTEGER NOT NULL, "
+            "doc_cliente TEXT, nom_vendedor TEXT, mes TEXT NOT NULL, "
+            "n_docs INTEGER NOT NULL, "
             "PRIMARY KEY (id_cliente, id_vendedor, mes))"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_agg_mes ON agg_cliente_mes(mes, n_docs)")
@@ -1223,8 +1379,10 @@ def refresh_agg_cliente_mes(conn: sqlite3.Connection | None = None) -> int:
         # SQLite agrupa distinto por alias de funcion y pierde grupos.
         conn.execute(f"""
             INSERT OR REPLACE INTO agg_cliente_mes
-                (id_cliente, id_vendedor, nom_cliente, doc_cliente, mes, n_docs)
+                (id_cliente, id_vendedor, nom_cliente, doc_cliente, nom_vendedor,
+                 mes, n_docs)
             SELECT id_cliente, id_vendedor, MAX(nom_cliente), MAX(doc_cliente),
+                   MAX(nom_vendedor),
                    substr(fecha_orig, 1, 7) AS mes,
                    COUNT(DISTINCT serie_doc || '-' || nro_doc) AS n_docs
             FROM ventas
@@ -1243,6 +1401,23 @@ def refresh_agg_cliente_mes(conn: sqlite3.Connection | None = None) -> int:
     finally:
         if own:
             conn.close()
+
+
+def ensure_agg_vendedor_col(conn: sqlite3.Connection) -> bool:
+    """Agrega nom_vendedor al agg si falta. Retorna True si cambió el esquema.
+
+    Solo toca la tabla local derivable (agg_cliente_mes): el contrato F4 de
+    no-mutar aplica a las tablas del cartucho, no a este caché. Con la columna
+    recién agregada los nombres quedan en NULL hasta el próximo refresh.
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(agg_cliente_mes)").fetchall()}
+    except Exception:
+        return False
+    if not cols or "nom_vendedor" in cols:
+        return False
+    conn.execute("ALTER TABLE agg_cliente_mes ADD COLUMN nom_vendedor TEXT")
+    return True
 
 
 def db_is_populated() -> bool:
@@ -1265,6 +1440,10 @@ def db_is_populated() -> bool:
 # las compara como texto (ORDER BY, BETWEEN, MIN/MAX, substr), y eso solo da
 # orden cronologico con ISO.
 COLS_FECHA = ("fecha_orig", "fecha_ref", "fecha_venc", "fec_cargo")
+# Columnas de SQLite, en snake_case. Distinto de
+# `validation.normalization.COLS_FECHA`, que son nombres de DataFrame en
+# MAYUSCULAS (FECHA, FECHA_REF...) y no incluyen fec_cargo porque esa columna
+# no se expone en reportes (`in_report: False`). No son la misma lista.
 
 
 def _normaliza_fechas_venta(v: dict) -> dict:
@@ -1286,6 +1465,37 @@ def _normaliza_fechas_venta(v: dict) -> dict:
                 salida = dict(v)
             salida[col] = iso
     return salida if salida is not None else v
+
+
+def normaliza_fechas_fila(fila, cols: list[str], fecha_cols=COLS_FECHA) -> tuple:
+    """Normaliza a ISO las columnas de fecha de una fila copiada de otra base.
+
+    `traer_folios_faltantes` (db_network) inserta filas verbatim del origen. El
+    origen es la base del Tauri, que mantiene su propio formato: hoy tiene
+    74.380 `fec_cargo` en dd/mm/yyyy. Sin normalizar, cada sync reintroduce
+    fechas no ISO y la invariante se pierde sin que nadie lo note.
+
+    Es la misma politica que `_normaliza_fechas_venta`: idempotente y no
+    destructiva (una fecha ilegible se conserva; es preferible un dato raro a
+    perder la fila).
+    """
+    from src.core.fechas import fecha_iso
+
+    pos = {c: i for i, c in enumerate(cols)}
+    idx = [(pos[c], c) for c in fecha_cols if c in pos]
+    if not idx:
+        return fila
+    salida = None
+    for i, col in idx:
+        valor = fila[i]
+        if valor is None or valor == "":
+            continue
+        iso = fecha_iso(valor)
+        if iso and iso != valor:
+            if salida is None:
+                salida = list(fila)
+            salida[i] = iso
+    return tuple(salida) if salida is not None else fila
 
 
 INSERT_COLS = (
@@ -1392,6 +1602,28 @@ def dedup_ventas(conn: sqlite3.Connection) -> int:
     return n
 
 
+_HINT_RE = re.compile(r"\s*INDEXED\s+BY\s+\w+", re.IGNORECASE)
+
+
+def sin_hint(sql: str) -> str:
+    """Quita el hint `INDEXED BY ...` de una consulta."""
+    return _HINT_RE.sub("", sql)
+
+
+def con_indice(conn: sqlite3.Connection, sql: str, params: tuple = ()):
+    """Ejecuta una query que puede llevar un hint `INDEXED BY`.
+
+    Los hints existen para forzar un indice covering cuando el planner elige
+    otro peor, pero hacen que la query dependa de ese indice: si en una DB vieja
+    (o creada por otro esquema) no esta, la query falla. En ese caso se reintenta
+    sin el hint, que es la conducta original.
+    """
+    try:
+        return conn.execute(sql, params)
+    except sqlite3.OperationalError:
+        return conn.execute(sin_hint(sql), params)
+
+
 def refresh_stats_cache(conn: sqlite3.Connection) -> None:
     """Cache KV para KPIs sin full-scan (incluye las métricas caras:
     vendedores, facturas y líneas, que la card de salud necesita).
@@ -1405,7 +1637,14 @@ def refresh_stats_cache(conn: sqlite3.Connection) -> None:
         "n_clientes": "SELECT COUNT(DISTINCT id_cliente) FROM ventas",
         "n_articulos": "SELECT COUNT(DISTINCT id_articulo) FROM ventas",
         "n_vendedores": "SELECT COUNT(DISTINCT id_vendedor) FROM ventas",
-        "n_facturas": ("SELECT COUNT(DISTINCT folio_unico) FROM ventas WHERE tpo_doc LIKE 'F01%'"),
+        "n_facturas": (
+            # Hint a proposito: el planner toma idx_retorno_folio, que NO es
+            # covering, y hace un lookup a tabla por cada una de las 2.8M filas
+            # (3.66s). Con idx_venta_tpodoc_folio la respuesta sale del indice:
+            # 0.71s. `con_indice` cae al plan original si el indice no existe.
+            "SELECT COUNT(DISTINCT folio_unico) FROM ventas INDEXED BY idx_venta_tpodoc_folio "
+            "WHERE tpo_doc LIKE 'F01%'"
+        ),
         "n_lineas": (
             "SELECT COUNT(DISTINCT id_linea) FROM ventas "
             "WHERE id_linea IS NOT NULL AND LENGTH(TRIM(id_linea)) > 0"
@@ -1413,7 +1652,7 @@ def refresh_stats_cache(conn: sqlite3.Connection) -> None:
     }
     valores: dict[str, float] = {}
     for key, sql in stats.items():
-        val = conn.execute(sql).fetchone()[0]
+        val = con_indice(conn, sql).fetchone()[0]
         try:
             valores[key] = float(val) if val is not None else 0.0
         except (TypeError, ValueError):
@@ -1533,6 +1772,85 @@ def reportar_ruc_compartidos(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
+# Cuantos hilos usa `cobertura_por_columna`. Medido sobre la DB real (2.8M
+# filas, 52 columnas): 1 pasada 45s, 2 hilos 21s, 4 hilos 17s, 8 hilos 23s. A
+# partir de 4 se pierde por oversubscription, no por falta de paralelismo.
+COBERTURA_HILOS = 4
+
+
+def _sql_cobertura(cols: list[str]) -> str:
+    """SELECT con un SUM(CASE) por columna: cuenta filas con valor no vacio."""
+    partes = ", ".join(
+        f'SUM(CASE WHEN "{c}" IS NOT NULL AND TRIM(CAST("{c}" AS TEXT)) <> \'\' THEN 1 ELSE 0 END)'
+        for c in cols
+    )
+    return f"SELECT {partes} FROM ventas"
+
+
+def _ruta_de(conn: sqlite3.Connection) -> str:
+    """Archivo de la base 'main', o "" si es in-memory / no se puede saber."""
+    try:
+        for fila in conn.execute("PRAGMA database_list").fetchall():
+            if fila[1] == "main" and fila[2]:
+                return str(fila[2])
+    except sqlite3.Error:
+        pass
+    return ""
+
+
+def _cobertura_en_ruta(ruta: str, cols: list[str]) -> dict[str, int]:
+    """Cobertura cruda usando una conexion propia a `ruta` (hilo aparte)."""
+    c = sqlite3.connect(f"file:{Path(ruta).as_posix()}?mode=ro", uri=True, timeout=30)
+    try:
+        c.execute("PRAGMA busy_timeout = 30000")
+        fila = c.execute(_sql_cobertura(cols)).fetchone()
+        return dict(zip(cols, (int(n or 0) for n in fila)))
+    finally:
+        c.close()
+
+
+def cobertura_por_columna(conn: sqlite3.Connection, cols: list[str]) -> dict[str, int]:
+    """Cuenta, por columna, cuantas filas tienen valor no vacio.
+
+    El predicado es siempre el mismo: `col IS NOT NULL AND TRIM(CAST(col AS
+    TEXT)) <> ''`.
+
+    Historial de por que esta escrito asi (medido sobre 2.8M filas / 52 columnas):
+      - un COUNT por columna: 52 escaneos, 127s.
+      - una sola pasada con SUM(CASE): lee la tabla una vez, ~45s.
+      - la misma pasada repartida en 4 grupos y 4 hilos: ~17s (2.65x). SQLite
+        devuelve el GIL durante el scan, asi que los hilos se superponen.
+
+    Se reparte en `COBERTURA_HILOS` grupos y no mas: a 8 hilos se pierde por
+    oversubscription (23s). Si la base no es un archivo (in-memory) o algo falla,
+    cae a la pasada unica, que es la conducta original.
+    """
+    if not cols:
+        return {}
+    if len(cols) == 1:
+        fila = conn.execute(_sql_cobertura(cols)).fetchone()
+        return {cols[0]: int(fila[0] or 0)}
+
+    ruta = _ruta_de(conn)
+    if ruta:
+        grupos = [cols[i::COBERTURA_HILOS] for i in range(COBERTURA_HILOS)]
+        try:
+            with ThreadPoolExecutor(max_workers=len(grupos)) as ex:
+                crudos: dict[str, int] = {}
+                for parcial in ex.map(lambda g: _cobertura_en_ruta(ruta, g), grupos):
+                    crudos.update(parcial)
+                if set(crudos) == set(cols):
+                    return {c: crudos[c] for c in cols}
+        except Exception:
+            log.debug(
+                "cobertura por columna en paralelo no disponible; se cae a una sola pasada",
+                exc_info=True,
+            )
+
+    fila = conn.execute(_sql_cobertura(cols)).fetchone()
+    return dict(zip(cols, (int(n or 0) for n in fila)))
+
+
 def auditar_completidad(conn: sqlite3.Connection | None = None) -> dict:
     """Census por columna + invariantes de integridad (solo lectura).
 
@@ -1554,12 +1872,11 @@ def auditar_completidad(conn: sqlite3.Connection | None = None) -> dict:
             if r[1] not in ("id",)
         ]
         cobertura: dict[str, float] = {}
-        for c in cols:
-            n = conn.execute(
-                f'SELECT COUNT(*) FROM ventas WHERE "{c}" IS NOT NULL '
-                f"AND TRIM(CAST(\"{c}\" AS TEXT)) <> ''"
-            ).fetchone()[0]
-            cobertura[c] = round(100.0 * n / total, 2) if total else 100.0
+        if cols:
+            crudos = cobertura_por_columna(conn, cols)
+            cobertura = {
+                c: round(100.0 * crudos.get(c, 0) / total, 2) if total else 100.0 for c in cols
+            }
         hallazgos: list[dict] = []
 
         def _chequeo(nombre: str, sql: str, detalle: str = "") -> None:
@@ -1945,46 +2262,43 @@ def month_end(label: str) -> str:
 
 
 def _resumen_meses_por_rango() -> dict[str, dict]:
-    """{mes YYYY-MM: {filas, fmin, fmax}} sin GROUP BY sobre expresiones.
+    """{mes YYYY-MM: {filas, fmin, fmax}} en una sola pasada por índice.
 
-    El GROUP BY sobre substr(fecha_orig,1,7) escanea 2.8M filas (~7s entre
-    months_coverage e incomplete_months). En su lugar: DISTINCT de mes_ref
-    por índice + una query de rango por mes (cada una en ms vía
-    idx_venta_mes). Las etiquetas diarias ("2024-02-15") caen en su mes.
+    Un GROUP BY mes_ref con el covering index idx_venta_mes_fecha
+    (mes_ref, fecha_orig) resuelve todo en una pasada ordenada (~0.7s en
+    2.8M filas) sin tocar la tabla: antes era un DISTINCT + 202 queries de
+    rango (una por mes), ~7s, y se corría dos veces por refresh de la card.
+    Las etiquetas diarias ("2024-02-15") se pliegan a su mes en Python.
     """
     if not db_exists():
         return {}
     try:
         conn = connect(readonly=True)
         try:
-            prefs = sorted(
-                {
-                    str(r[0])[:7]
-                    for r in conn.execute(
-                        "SELECT DISTINCT mes_ref FROM ventas "
-                        "WHERE mes_ref IS NOT NULL AND mes_ref != ''"
-                    ).fetchall()
-                    if str(r[0]).strip()
-                }
-            )
             out: dict[str, dict] = {}
-            for mes in prefs:
+            filas = con_indice(
+                conn,
+                "SELECT mes_ref, COUNT(*), MIN(fecha_orig), MAX(fecha_orig) "
+                "FROM ventas INDEXED BY idx_venta_mes_fecha "
+                "WHERE mes_ref != '' GROUP BY mes_ref",
+            ).fetchall()
+            for mes_ref, n, fmin, fmax in filas:
+                mes = str(mes_ref or "")[:7]
+                if len(mes) != 7:
+                    continue
                 try:
-                    if len(mes) != 7:
-                        continue
-                    y, m = int(mes[:4]), int(mes[5:7])
+                    int(mes[:4])
+                    m = int(mes[5:7])
                     if not 1 <= m <= 12:
                         continue
-                    nxt = f"{y + (m == 12)}-{m % 12 + 1:02d}"
                 except (TypeError, ValueError):
                     continue
-                r = conn.execute(
-                    "SELECT COUNT(*), MIN(fecha_orig), MAX(fecha_orig) FROM ventas "
-                    "WHERE mes_ref >= ? AND mes_ref < ?",
-                    (mes, nxt),
-                ).fetchone()
-                if r[0]:
-                    out[mes] = {"filas": r[0], "fmin": r[1], "fmax": r[2]}
+                e = out.setdefault(mes, {"filas": 0, "fmin": None, "fmax": None})
+                e["filas"] += n
+                if e["fmin"] is None or (fmin is not None and fmin < e["fmin"]):
+                    e["fmin"] = fmin
+                if e["fmax"] is None or (fmax is not None and fmax > e["fmax"]):
+                    e["fmax"] = fmax
             return out
         finally:
             conn.close()
@@ -1992,7 +2306,26 @@ def _resumen_meses_por_rango() -> dict[str, dict]:
         return {}
 
 
-def months_coverage() -> list[dict]:
+_RESUMEN_MESES_CACHE: dict = {"key": None, "data": None}
+
+
+def _resumen_meses_cacheado(n_filas, fmax) -> dict:
+    """Resumen mensual memoizado por (base, filas, fecha_max).
+
+    Los meses solo cambian cuando entran datos nuevos, y eso siempre mueve
+    filas o fmax: mientras la clave coincida se sirve el resumen sin
+    re-escanear. El refresh periódico de la card pasa de ~6s a ~0s.
+    """
+    key = (str(db_path()), n_filas, fmax)
+    if _RESUMEN_MESES_CACHE["key"] == key and _RESUMEN_MESES_CACHE["data"] is not None:
+        return _RESUMEN_MESES_CACHE["data"]
+    data = _resumen_meses_por_rango()
+    _RESUMEN_MESES_CACHE["key"] = key
+    _RESUMEN_MESES_CACHE["data"] = data
+    return data
+
+
+def months_coverage(resumen: dict | None = None) -> list[dict]:
     """Cobertura por mes para display de UI: mes, filas, rango de fechas.
 
     Optimizado: DISTINCT por índice + rangos por mes en vez de
@@ -2001,7 +2334,7 @@ def months_coverage() -> list[dict]:
     if not db_exists():
         return []
     try:
-        resumen = _resumen_meses_por_rango()
+        resumen = resumen if resumen is not None else _resumen_meses_por_rango()
     except Exception:
         return []
     return [
@@ -2029,7 +2362,7 @@ def has_month(mes_ref: str) -> bool:
         return False
 
 
-def incomplete_months(desde: date | None = None) -> list[str]:
+def incomplete_months(desde: date | None = None, resumen: dict | None = None) -> list[str]:
     """Meses PASADOS con filas pero que no cubren hasta fin de mes
     (capturas interrumpidas). El mes en curso se excluye: lo cubre la ventana diaria.
 
@@ -2044,7 +2377,7 @@ def incomplete_months(desde: date | None = None) -> list[str]:
     if not db_exists():
         return out
     try:
-        resumen = _resumen_meses_por_rango()
+        resumen = resumen if resumen is not None else _resumen_meses_por_rango()
     except Exception:
         return out
     for label in sorted(resumen):
@@ -2342,6 +2675,11 @@ _CARD_INFO_REFRESH_BUSY = False
 def invalidate_card_info_cache() -> None:
     # Marca vencido pero CONSERVA los datos para serve-stale.
     _CARD_INFO_CACHE["ts"] = 0.0
+    # El resumen mensual memoizado también vence: si la invalidación viene de
+    # una importación/reemplazo, (filas, fmax) podrían coincidir por azar y el
+    # memo serviría meses de la base anterior.
+    _RESUMEN_MESES_CACHE["key"] = None
+    _RESUMEN_MESES_CACHE["data"] = None
 
 
 def refresh_card_info_async() -> None:
@@ -2413,8 +2751,12 @@ def _cargar_card_info() -> dict:
     if not n_filas:
         return {"exists": True, "filas": 0, "resumen": "DB local vacia"}
 
-    meses = sorted({c["mes_ref"][:7] for c in months_coverage()})
-    incompletos = incomplete_months()
+    # Un solo resumen para los dos consumidores: antes cada uno escaneaba
+    # la tabla por su cuenta (2x ~7s en frío). Memoizado por (filas, fmax):
+    # sin datos nuevos se sirve sin re-escanear.
+    resumen_meses = _resumen_meses_cacheado(n_filas, fmax)
+    meses = sorted({c["mes_ref"][:7] for c in months_coverage(resumen_meses)})
+    incompletos = incomplete_months(resumen=resumen_meses)
     huecos: list[str] = []
     if meses:
         y, m = int(meses[0][:4]), int(meses[0][5:7])
@@ -2532,13 +2874,18 @@ def db_card_info() -> dict:
 def nc_nd_huerfanas(conn: sqlite3.Connection) -> int:
     """NC/ND cuya factura referenciada NO existe en la DB (fuera del rango descargado).
     Se sanan solas al extender el rango hacia atras; se auditan tras cada captura."""
-    row = conn.execute(
-        "SELECT COUNT(*) FROM ventas n "
+    row = con_indice(
+        conn,
+        # Hint a proposito en la pierna externa: con 3 valores de tipo_operacion
+        # el planner prefiere escanear las 2.8M filas (5.35s) en vez de usar
+        # idx_venta_tipo_op, que resuelve en 1.80s. La pierna interna (NOT EXISTS)
+        # ya usa idx_venta_serie_nro.
+        "SELECT COUNT(*) FROM ventas n INDEXED BY idx_venta_tipo_op "
         "WHERE n.tipo_operacion IN ('devolucion','ajuste_valor','nota_debito') "
         "AND COALESCE(n.factura_ref_serie,'') != '' AND COALESCE(n.factura_ref_nro,'') != '' "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM ventas f WHERE f.tpo_doc LIKE 'F01%'"
-        "  AND f.serie_doc = n.factura_ref_serie AND f.nro_doc = n.factura_ref_nro)"
+        "  AND f.serie_doc = n.factura_ref_serie AND f.nro_doc = n.factura_ref_nro)",
     ).fetchone()
     return row[0]
 
@@ -2968,10 +3315,13 @@ def verify_integrity(conn: sqlite3.Connection) -> tuple[bool, list[tuple], list[
 
 
 def reset_connections() -> None:
-    """Cierra las conexiones cacheadas del hilo actual (SOLO del hilo actual:
-    threading.local). NO usar reemplazo de archivo mientras otros hilos
-    tengan la DB abierta en Windows (WinError 32): import_db copia en
-    caliente via backup API en vez de borrar/reemplazar el archivo."""
+    """Cierra las conexiones cacheadas de todos los hilos.
+
+    Equivalente a `cerrar_conexiones()`. Cerrar tambien las de otros hilos es lo
+    que hace posible reemplazar el archivo en Windows (WinError 32 si queda una
+    conexion viva); `import_db` sigue copiando en caliente via backup API, que es
+    mejor todavia porque no interrumpe lectores.
+    """
     conn_rw = getattr(_local, "conn_rw", None)
     if conn_rw:
         try:
@@ -2986,6 +3336,7 @@ def reset_connections() -> None:
         except Exception:
             pass
         _local.conn_ro = None
+    cerrar_todas_las_conexiones()
 
 
 # ── Fechas por defecto (primera carga) ──────────────────────────────────────

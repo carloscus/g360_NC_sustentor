@@ -17,14 +17,13 @@ def build_config(tipo_actual: str, ui: dict[str, Any]) -> dict:
     Args:
         tipo_actual: Clave del tipo de operación (ej: 'diferencia_precio').
         ui: Diccionario con valores de controles UI. Keys esperadas:
-            - modalidad, factura_id, fecha_desde/hasta, fecha_desde_pd/hasta_pd
+            - modalidad, factura_id, fecha_desde/hasta
             - mecanica, mecanica_personalizada, meta_monto, rebate_pct
             - requerimientos_paths, sort_mode, forzar_cantidad
-            - fp_desde, fp_hasta, cliente_fp
+            - fp_desde, fp_hasta
             - stock_cliente_path (override opcional de cantidades en VRS)
-            - factura_ci, factura_df
-            - sku_filter_path, cliente_pd, chk_incluir_nc
-            - cliente_pb, lineas_selected, categorias_nc
+            - sku_filter_path
+            - lineas_selected, categorias_nc
 
     Returns:
         Dict config listo para PipelineContext.config.
@@ -113,12 +112,10 @@ def build_config(tipo_actual: str, ui: dict[str, Any]) -> dict:
             config["fecha_desde"] = ui["fp_desde"]
         if ui.get("fp_hasta"):
             config["fecha_hasta"] = ui["fp_hasta"]
-        cliente_fp = ui.get("cliente_fp")
-        if cliente_fp:
-            config["cliente"] = cliente_fp
 
     if tipo_actual == "anular_factura":
-        config["factura_id"] = ui.get("factura_ci")
+        # ANF usa la factura del fragmento (no dropdown legacy).
+        pass
 
     if tipo_actual == "devolucion_fisica":
         # DF no usa lista de precios: el valor sale de la factura a la que se
@@ -132,7 +129,6 @@ def build_config(tipo_actual: str, ui: dict[str, Any]) -> dict:
         )
 
     if tipo_actual == "descuento_precio":
-        config["factura_id"] = ui.get("factura_df")
         config["descuento_pct"] = _safe_float(ui.get("descuento_pct"))
         desc_path = ui.get("desc_file_path") or ui.get("sku_filter_path")
         if desc_path:
@@ -224,11 +220,6 @@ def build_datos_exp(
             datos_exp = datos_exp[
                 datos_exp["TIPO_CLASE"].astype(str).str.lower() == "factura"
             ].copy()
-        cliente_df = ui.get("cliente_pb")
-        if cliente_df and "CLIENTE" in datos_exp.columns:
-            datos_exp = datos_exp[
-                datos_exp["CLIENTE"].astype(str).str.strip() == str(cliente_df).strip()
-            ]
 
     elif tipo_actual == "rebate_volumen":
         datos_exp = _build_datos_rebate(datos_exp, config, ui)

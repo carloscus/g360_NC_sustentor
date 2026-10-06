@@ -11,7 +11,7 @@ from openpyxl.utils.cell import column_index_from_string, coordinate_to_tuple
 
 from src.core import ventas_db
 from src.core.ventas_db_client import VentasDbClient
-from src.core.fechas import fecha_ui
+from src.core.fechas import excel_fmt_ui, fecha_ui
 from src.ui import reporte_compras as rc
 
 
@@ -2440,7 +2440,7 @@ class TestBDHoja:
         assert fila[13] == "P1"  # Pedido
         assert fila[15] == 200.0  # Dev. contra la línea
         assert fila[16] == 896.0 and fila[17] == 0.0  # Bruto/Ajuste
-        assert ws["B2"].number_format == "dd-mm-yyyy"
+        assert ws["B2"].number_format == excel_fmt_ui()
         assert ws["J2"].number_format == "#,##0"
         assert ws["K2"].number_format == "#,##0.00000"
         assert ws["L2"].number_format == "#,##0.00"
@@ -2944,3 +2944,80 @@ class TestSinReferenciasCirculares:
         )
         wb = load_workbook(str(out))
         assert not _ciclos(wb)
+
+
+class TestFormatoDeFechaUnico:
+    """El reporte no puede mostrar dos formatos de fecha.
+
+    Regression: al cambiar `FMT_UI` de guiones a barras, las hojas que derivan
+    el formato de `excel_fmt_ui()` pasaron a `dd/mm/yyyy`, pero dos hojas lo
+    tenian hardcodeado como `"dd-mm-yyyy"` y quedaron con el formato viejo.
+    En el mismo Excel se veia `05/09/2026` en Ajustes y `05-09-2026` en Facturas.
+    """
+
+    ISO = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+    LEGADO = re.compile(r"\b\d{2}-\d{2}-\d{4}\b")
+    UI = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
+
+    def _generar(self, tmp_db, tmp_path):
+        _poblar(tmp_db)
+        ventas_db.invalidate_card_info_cache()
+        b = rc._paquete_export(VentasDbClient(), "00056101", "2026-09-01", "2026-10-31", True)
+        out = tmp_path / "reporte.xlsx"
+        rc._escribir_xlsx(
+            out,
+            "00056101",
+            "MULTICOPIAS MARY E.I.R.L.",
+            corte_hasta="2026-10-31",
+            ruc="20601024714",
+            vendedor="VEND",
+            total_hojas=7,
+            incluir_nc=True,
+            rango_desde="2026-09-01",
+            rango_hasta="2026-10-31",
+            **b,
+        )
+        return out
+
+    def test_un_solo_formato_de_celcha_de_fecha(self, tmp_db, tmp_path):
+        out = self._generar(tmp_db, tmp_path)
+        formatos = set()
+        celdas = 0
+        wb = load_workbook(str(out))
+        try:
+            for nombre in wb.sheetnames:
+                for row in wb[nombre].iter_rows():
+                    for cell in row:
+                        if cell.value is None:
+                            continue
+                        nf = cell.number_format or ""
+                        if "yy" in nf:
+                            formatos.add(nf)
+                            celdas += 1
+        finally:
+            wb.close()
+        assert celdas > 0, "el reporte no escribio ninguna fecha"
+        assert formatos == {excel_fmt_ui()}, f"formatos mezclados: {sorted(formatos)}"
+
+    def test_ninguna_fecha_ISO_o_legada_en_texto(self, tmp_db, tmp_path):
+        out = self._generar(tmp_db, tmp_path)
+        iso, legado, ui = [], [], []
+        wb = load_workbook(str(out))
+        try:
+            for nombre in wb.sheetnames:
+                for row in wb[nombre].iter_rows():
+                    for cell in row:
+                        v = cell.value
+                        if not isinstance(v, str):
+                            continue
+                        if self.ISO.search(v):
+                            iso.append((nombre, cell.coordinate, v[:60]))
+                        elif self.LEGADO.search(v):
+                            legado.append((nombre, cell.coordinate, v[:60]))
+                        elif self.UI.search(v):
+                            ui.append((nombre, cell.coordinate, v[:60]))
+        finally:
+            wb.close()
+        assert not iso, f"ISO crudo visible: {iso}"
+        assert not legado, f"formato legado dd-mm-yyyy visible: {legado}"
+        assert ui, "el reporte deberia mostrar al menos un rango en dd/mm/yyyy"

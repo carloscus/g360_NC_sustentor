@@ -163,7 +163,12 @@ def _restart_api() -> None:
             "--",
             "bash",
             "-c",
-            "pkill -f g360-ventas-api || true; sleep 1; setsid bash '"
+            # `pkill -f g360-ventas-api` se mataba a si mismo: `bash -c` recibe la
+            # linea COMPLETA como un solo argumento, y esa linea contiene el
+            # patron, asi que pkill mataba el shell que iba a relanzar el API y
+            # este nunca arrancaba. El patron 'lin[u]x' coincide con el binario
+            # real pero no con la linea que lo invoca.
+            "pkill -f 'g360-ventas-api-lin[u]x' || true; sleep 1; setsid bash '"
             + wsl_path
             + "' >/dev/null 2>&1 &",
         ],

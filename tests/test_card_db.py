@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Tests de la Card DB tras la depuración UI (bug autodestructor + KPIs)."""
 
 from __future__ import annotations
@@ -185,3 +186,85 @@ class TestChipSnapshot:
         v = _ViewPanels.__new__(_ViewPanels)
         txt, _ = v._chip_snapshot_txt()
         assert txt == "viejo 72h"
+
+
+class TestRefreshNoBloqueaNiQuedaAMedias:
+    """El refresh de la card no puede dejarla a medio pintar.
+
+    El estado se asigna completo ANTES de los .update(): si un update() falla
+    (controles sin montar en el arranque async), el status igual queda con su
+    texto final en vez de "Calculando…" para siempre.
+    """
+
+    def _vista(self, monkeypatch, info):
+        from types import SimpleNamespace
+
+        from src.ui import view_panels
+        from src.ui.view_panels import _ViewPanels
+
+        v = _ViewPanels.__new__(_ViewPanels)
+        v.app = SimpleNamespace(
+            G360_SUCCESS="ok",
+            G360_ERROR="err",
+            show_snackbar=lambda *a, **k: None,
+        )
+        monkeypatch.setattr(view_panels.ventas_db, "db_card_info", lambda: dict(info))
+        v._construir_card_db()
+        return v
+
+    def test_status_se_asigna_aunque_falle_el_update(self, monkeypatch):
+        v = self._vista(
+            monkeypatch,
+            {
+                "exists": True,
+                "filas": 100,
+                "fecha_min": "2026-09-01",
+                "fecha_max": "2026-09-30",
+                "meses": 1,
+                "clientes": 2,
+                "facturas": 3,
+                "skus": 1,
+                "lineas_prod": 1,
+                "nc_asociadas": 0,
+                "dias_desde_ultimo": 5,
+                "incompletos": [],
+                "huecos": ["2026-08"],
+            },
+        )
+        # Sin page los .update() revientan, pero el estado queda asignado.
+        v._refrescar_card_db(async_=False)
+        # Comparar contra la substring "Calculando" sin el sufijo; el
+        # '…' se corrompe al leer el archivo con cp1252, asi que no lo
+        # incluimos en la assertion para evitar falsos negativos.
+        assert not v.card_db_status.value.startswith("Calculando")
+        assert "Ausentes: 2026-08" in (v.card_db_alerta.value or "")
+        assert len(v.card_db_kpis.controls) == 1  # una fila con los chips
+
+    def test_construir_async_no_bloquea(self, monkeypatch):
+        """El build inicial no espera a db_card_info: pinta y sigue."""
+        import threading
+        import time
+
+        from types import SimpleNamespace
+
+        from src.ui import view_panels
+        from src.ui.view_panels import _ViewPanels
+
+        v = _ViewPanels.__new__(_ViewPanels)
+        v.app = SimpleNamespace(
+            G360_SUCCESS="ok",
+            G360_ERROR="err",
+            show_snackbar=lambda *a, **k: None,
+        )
+        listo = threading.Event()
+
+        def _lento():
+            listo.wait(5)
+            return {"exists": False}
+
+        monkeypatch.setattr(view_panels.ventas_db, "db_card_info", _lento)
+        t0 = time.perf_counter()
+        v._construir_card_db(async_=True)
+        assert time.perf_counter() - t0 < 4, "el build espero al refresh"
+        assert v.card_db_status.value == "Calculando\u2026"
+        listo.set()

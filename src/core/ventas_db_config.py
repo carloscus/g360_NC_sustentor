@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import date
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -120,6 +121,79 @@ def active_line_sql(col: str) -> str:
 def reset_allowed_lines_cache() -> None:
     global _LINES_CACHE
     _LINES_CACHE = None
+    global _ACTIVIDAD_CACHE
+    _ACTIVIDAD_CACHE = None
+
+
+# ── Piso de actividad (desde cuando se lista) ─────────────────────────────────
+#
+# Piso FIJO, no ventana movil. Antes era "ultimos N años desde hoy", lo que
+# hacia que el dropdown se achicara solo con el paso del tiempo: en 2028
+# excluia 2021-2022, que son datos vigentes. El 79% de los clientes solo tiene
+# actividad anterior a 2021 (otra era, otro ruido), asi que el corte real es
+# 2021 y debe quedarse quieto. Si algun dia hay que moverlo, se mueve a mano y
+# a conciencia en el config, no por el calendario.
+DEFAULT_ACTIVIDAD_DESDE = "2021-01-01"
+
+_ACTIVIDAD_CACHE: str | None = None
+
+
+def actividad_desde() -> str:
+    """Primer dia visible en listados ('YYYY-MM-DD'). Configurable.
+
+    Lee `cfg["actividad_desde"]`; si no esta o no es una fecha valida, usa el
+    default. Nunca devuelve vacio: un piso corrupto se ignora en favor del
+    default, no se convierte en "sin piso" (eso seria mostrar 10 años de ruido
+    por un typo en el config).
+    """
+    global _ACTIVIDAD_CACHE
+    if _ACTIVIDAD_CACHE is not None:
+        return _ACTIVIDAD_CACHE
+    piso = DEFAULT_ACTIVIDAD_DESDE
+    try:
+        cfg = load_app_config()
+        raw = str(cfg.get("actividad_desde") or "").strip()
+        if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+            int(raw[:4])
+            m, d = int(raw[5:7]), int(raw[8:10])
+            if 1 <= m <= 12 and 1 <= d <= 31:
+                piso = raw
+    except Exception:
+        pass
+    _ACTIVIDAD_CACHE = piso
+    return piso
+
+
+def actividad_anio() -> int:
+    """Año del piso de actividad (de `actividad_desde`). Para el dropdown de año.
+
+    Nunca falla: si el piso no trae un año válido, devuelve el default (2021).
+    """
+    try:
+        anio = int(str(actividad_desde())[:4])
+        if 2000 <= anio <= date.today().year:
+            return anio
+    except (TypeError, ValueError):
+        pass
+    return int(DEFAULT_ACTIVIDAD_DESDE[:4])
+
+
+def set_actividad_anio(anio: int) -> str:
+    """Fija el piso al 1ro de enero de `anio` (se acota a 2000..año actual).
+
+    Persiste `cfg["actividad_desde"]` e invalida cachés. Retorna el piso usado.
+    """
+    hoy = date.today().year
+    try:
+        anio = int(anio)
+    except (TypeError, ValueError):
+        anio = int(DEFAULT_ACTIVIDAD_DESDE[:4])
+    anio = max(2000, min(anio, hoy))
+    piso = f"{anio:04d}-01-01"
+    cfg = load_app_config()
+    cfg["actividad_desde"] = piso
+    save_app_config(cfg)
+    return piso
 
 
 # ── Config local (credenciales intranet + preferencias) ─────────────────────

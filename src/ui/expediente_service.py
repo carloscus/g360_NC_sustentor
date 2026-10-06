@@ -20,6 +20,10 @@ sin crear duplicados.
 
 from pathlib import Path
 from types import SimpleNamespace
+import logging
+import re
+import time
+
 import pandas as pd
 from src.domain import RecognitionResult
 from src.render.excel_renderer import ExcelRenderer
@@ -44,6 +48,8 @@ from src.ui.catalog import (
     MODALIDAD_INDIVIDUAL,
     MODALIDAD_CONSOLIDADO,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def generar_expediente(
@@ -88,6 +94,7 @@ def generar_expediente(
     if omitir_sin_diferencia:
         resultado = _clonar_sin_diferencia(resultado)
         if resultado is None:
+            logger.info("expediente: sin filas con diferencia; no se genera nada")
             return []
         res = resultado.resultado
         df_res = res.dataframe if res is not None else pd.DataFrame()
@@ -106,9 +113,25 @@ def generar_expediente(
     if not clientes:
         clientes = [cliente_value] if cliente_value else [""]
 
+    # El resultado del pipeline trae COD_CLIENTE y no el nombre: sin este mapa
+    # el filtro por cliente no tiene contra que comparar.
+    cods = _cod_clientes_por_nombre(df_historial)
+
+    t_ini = time.perf_counter()
+    logger.info(
+        "expediente inicio: caso=%s modalidad=%s cliente(s)=%d filas=%d nd=%s sin_dif=%s -> %s",
+        tipo_actual,
+        modalidad,
+        len(clientes),
+        len(df_res),
+        df_nd is not None and not df_nd.empty,
+        omitir_sin_diferencia,
+        desktop_path,
+    )
+
     # ── Individual: un expediente por (cliente × factura) ──
     if modalidad == MODALIDAD_INDIVIDUAL:
-        return _generar_individual(
+        dirs = _generar_individual(
             resultado,
             tipo_actual,
             historico_config,
@@ -120,22 +143,32 @@ def generar_expediente(
             observaciones,
             desktop_path,
             df_nd=df_nd,
+            cods=cods,
+        )
+    # ── Consolidado: un expediente por cliente ──
+    else:
+        dirs = _generar_consolidado(
+            resultado,
+            tipo_actual,
+            historico_config,
+            df_historial,
+            clientes,
+            vendedor_value,
+            vendedor_display,
+            antecedentes,
+            observaciones,
+            desktop_path,
+            df_nd=df_nd,
+            cods=cods,
         )
 
-    # ── Consolidado: un expediente por cliente ──
-    return _generar_consolidado(
-        resultado,
-        tipo_actual,
-        historico_config,
-        df_historial,
-        clientes,
-        vendedor_value,
-        vendedor_display,
-        antecedentes,
-        observaciones,
-        desktop_path,
-        df_nd=df_nd,
+    logger.info(
+        "expediente fin: %d expediente(s) en %.1fs%s",
+        len(dirs),
+        time.perf_counter() - t_ini,
+        f" ({dirs[0].name})" if len(dirs) == 1 else "",
     )
+    return dirs
 
 
 def _recalcular_resumen(res_resumen, df, df_x=None, **extra):
@@ -227,56 +260,70 @@ def _generar_individual(
     observaciones,
     desktop_path,
     df_nd=None,
+    cods: dict | None = None,
 ) -> list:
     """Individual: un Expediente por factura dentro de cada cliente."""
     dirs = []
-    for cli in sorted(clientes):
-        sub_cli = _subresultado_por_cliente(resultado, cli)
-        if sub_cli is None:
-            continue
-        df_f = sub_cli.resultado.dataframe
-        # El dataframe puede ser una vista previa por SKU (ej: FPE) sin
-        # FACTURA; el detalle por factura vive en dataframe_excel.
-        df_x = sub_cli.resultado.get_excel() if hasattr(sub_cli.resultado, "get_excel") else None
-        split_src = df_f if "FACTURA" in df_f.columns else df_x
-        if split_src is None or split_src.empty or "FACTURA" not in split_src.columns:
-            exp_dir = _generar_uno(
-                resultado=sub_cli,
-                tipo_actual=tipo_actual,
-                modalidad=MODALIDAD_CONSOLIDADO,
-                historico_config=historico_config,
-                df_historial=df_historial,
-                cliente_value=cli,
-                vendedor_value=vendedor_value,
-                vendedor_display=vendedor_display,
-                antecedentes=antecedentes,
-                observaciones=observaciones,
-                desktop_path=desktop_path,
-                df_nd=df_nd,
-            )
-            dirs.append(exp_dir)
-            continue
-        # Agrupar por factura
-        for fac in sorted(split_src["FACTURA"].dropna().unique()):
-            fac_str = str(fac).strip()
-            sub_fac = _subresultado_por_factura(sub_cli, fac_str)
-            if sub_fac is None:
+    t_ini = time.perf_counter()
+    try:
+        for cli in sorted(clientes):
+            sub_cli = _subresultado_por_cliente(resultado, cli, (cods or {}).get(cli, ""))
+            if sub_cli is None:
                 continue
-            exp_dir = _generar_uno(
-                resultado=sub_fac,
-                tipo_actual=tipo_actual,
-                modalidad=MODALIDAD_INDIVIDUAL,
-                historico_config=historico_config,
-                df_historial=df_historial,
-                cliente_value=cli,
-                vendedor_value=vendedor_value,
-                vendedor_display=vendedor_display,
-                antecedentes=antecedentes,
-                observaciones=observaciones,
-                desktop_path=desktop_path,
-                df_nd=df_nd,
+            df_f = sub_cli.resultado.dataframe
+            # El dataframe puede ser una vista previa por SKU (ej: FPE) sin
+            # FACTURA; el detalle por factura vive en dataframe_excel.
+            df_x = (
+                sub_cli.resultado.get_excel() if hasattr(sub_cli.resultado, "get_excel") else None
             )
-            dirs.append(exp_dir)
+            split_src = df_f if "FACTURA" in df_f.columns else df_x
+            if split_src is None or split_src.empty or "FACTURA" not in split_src.columns:
+                exp_dir = _generar_uno(
+                    resultado=sub_cli,
+                    tipo_actual=tipo_actual,
+                    modalidad=MODALIDAD_CONSOLIDADO,
+                    historico_config=historico_config,
+                    df_historial=df_historial,
+                    cliente_value=cli,
+                    vendedor_value=vendedor_value,
+                    vendedor_display=vendedor_display,
+                    antecedentes=antecedentes,
+                    observaciones=observaciones,
+                    desktop_path=desktop_path,
+                    df_nd=df_nd,
+                )
+                dirs.append(exp_dir)
+                continue
+            # Agrupar por factura
+            for fac in sorted(split_src["FACTURA"].dropna().unique()):
+                fac_str = str(fac).strip()
+                sub_fac = _subresultado_por_factura(sub_cli, fac_str)
+                if sub_fac is None:
+                    continue
+                exp_dir = _generar_uno(
+                    resultado=sub_fac,
+                    tipo_actual=tipo_actual,
+                    modalidad=MODALIDAD_INDIVIDUAL,
+                    historico_config=historico_config,
+                    df_historial=df_historial,
+                    cliente_value=cli,
+                    vendedor_value=vendedor_value,
+                    vendedor_display=vendedor_display,
+                    antecedentes=antecedentes,
+                    observaciones=observaciones,
+                    desktop_path=desktop_path,
+                    df_nd=df_nd,
+                )
+                dirs.append(exp_dir)
+    except Exception:
+        # Los expedientes ya escritos quedan en disco pero la lista se pierde:
+        # sin este log el error de la UI parece "no se generó nada".
+        logger.exception(
+            "expediente fallo en modo individual tras %d expediente(s) (%.1fs)",
+            len(dirs),
+            time.perf_counter() - t_ini,
+        )
+        raise
     return dirs
 
 
@@ -292,33 +339,82 @@ def _generar_consolidado(
     observaciones,
     desktop_path,
     df_nd=None,
+    cods: dict | None = None,
 ) -> list:
     """Consolidado: un Expediente por cliente (todas las facturas juntas)."""
     dirs = []
-    for cli in sorted(clientes):
-        sub_cli = _subresultado_por_cliente(resultado, cli)
-        if sub_cli is None:
-            continue
-        exp_dir = _generar_uno(
-            resultado=sub_cli,
-            tipo_actual=tipo_actual,
-            modalidad=MODALIDAD_CONSOLIDADO,
-            historico_config=historico_config,
-            df_historial=df_historial,
-            cliente_value=cli,
-            vendedor_value=vendedor_value,
-            vendedor_display=vendedor_display,
-            antecedentes=antecedentes,
-            observaciones=observaciones,
-            desktop_path=desktop_path,
-            df_nd=df_nd,
+    t_ini = time.perf_counter()
+    try:
+        for cli in sorted(clientes):
+            sub_cli = _subresultado_por_cliente(resultado, cli, (cods or {}).get(cli, ""))
+            if sub_cli is None:
+                continue
+            exp_dir = _generar_uno(
+                resultado=sub_cli,
+                tipo_actual=tipo_actual,
+                modalidad=MODALIDAD_CONSOLIDADO,
+                historico_config=historico_config,
+                df_historial=df_historial,
+                cliente_value=cli,
+                vendedor_value=vendedor_value,
+                vendedor_display=vendedor_display,
+                antecedentes=antecedentes,
+                observaciones=observaciones,
+                desktop_path=desktop_path,
+                df_nd=df_nd,
+            )
+            dirs.append(exp_dir)
+    except Exception:
+        logger.exception(
+            "expediente fallo en modo consolidado tras %d expediente(s) (%.1fs)",
+            len(dirs),
+            time.perf_counter() - t_ini,
         )
-        dirs.append(exp_dir)
+        raise
     return dirs
 
 
-def _subresultado_por_cliente(resultado, cliente: str):
-    """Clona el expediente filtrando dataframe/dataframe_excel por cliente."""
+def _clientes_en_df(df) -> list:
+    """Clientes presentes en un dataframe de resultado (id o nombre)."""
+    if df is None or not hasattr(df, "columns") or df.empty:
+        return []
+    for col in ("COD_CLIENTE", "id_cliente", "DOC_CLIENTE", "CLIENTE"):
+        if col in df.columns:
+            vals = df[col].dropna().astype(str).str.strip()
+            return sorted({v for v in vals if v and v.lower() not in ("nan", "none")})
+    return []
+
+
+def _cod_clientes_por_nombre(hist) -> dict:
+    """Mapa nombre de cliente -> COD_CLIENTE, tomado del historial.
+
+    El historial si trae nombre + id (CLIENTE y COD_CLIENTE); el dataframe del
+    pipeline solo trae el id. Sin este mapa no hay forma de pasarle al filtro
+    por cliente el codigo que corresponde a cada nombre.
+    """
+    if hist is None or not hasattr(hist, "columns") or hist.empty:
+        return {}
+    col = next(
+        (c for c in ("COD_CLIENTE", "id_cliente", "CODIGO_CLIENTE") if c in hist.columns), ""
+    )
+    if not col or "CLIENTE" not in hist.columns:
+        return {}
+    out = {}
+    for nombre, cod in zip(hist["CLIENTE"], hist[col]):
+        n, c = str(nombre).strip(), str(cod).strip()
+        if n and c and c.lower() not in ("nan", "none") and n not in out:
+            out[n] = c
+    return out
+
+
+def _subresultado_por_cliente(resultado, cliente: str, cod: str = ""):
+    """Clona el expediente filtrando dataframe/dataframe_excel por cliente.
+
+    El dataframe del pipeline trae COD_CLIENTE, no CLIENTE. Filtrar solo por
+    nombre dejaba el dataframe entero como "sub" resultado, y con mas de un
+    cliente cada expediente se llevaba las filas del otro (el consolidado
+    salia con el id del cliente equivocado en el nombre de la carpeta).
+    """
     res = resultado.resultado
     if res is None:
         return None
@@ -326,13 +422,31 @@ def _subresultado_por_cliente(resultado, cliente: str):
     df_x = res.get_excel() if hasattr(res, "get_excel") else pd.DataFrame()
 
     def _flt(d):
-        if d is None or d.empty or "CLIENTE" not in d.columns:
+        # `resultado.datos` no es un DataFrame: se devuelve tal cual.
+        if d is None or not hasattr(d, "columns") or d.empty:
             return d
-        return d[d["CLIENTE"].astype(str).str.strip() == cliente].copy()
+        for col in ("CLIENTE", "NOM_CLIENTE"):
+            if col in d.columns:
+                return d[d[col].astype(str).str.strip() == cliente].copy()
+        for col in ("COD_CLIENTE", "id_cliente"):
+            if col in d.columns and cod:
+                return d[d[col].astype(str).str.strip() == cod].copy()
+        return d
 
     df_f, df_x_f = _flt(df), _flt(df_x)
     if df_f.empty and (df_x_f is None or df_x_f.empty):
         return None
+    # Si el filtro no surtio efecto, el "sub" resultado es el dataframe entero:
+    # con mas de un cliente eso no es un expediente, es un error silencioso.
+    mezclados = _clientes_en_df(df_f)
+    if len(mezclados) > 1:
+        logger.error(
+            "expediente: el sub-resultado de '%s' quedo con %d clientes (%s); "
+            "no se pudo aislar y se entrega mezclado",
+            cliente,
+            len(mezclados),
+            ", ".join(mezclados),
+        )
     sub_res = RecognitionResult(
         dataframe=df_f,
         dataframe_excel=df_x_f if df_x_f is not None else df_f,
@@ -508,6 +622,7 @@ def _generar_uno(
     res = resultado.resultado
     cliente = _resolve_cliente(cliente_value, res, df_historial)
     doc_ref = _resolve_doc_ref(res, resultado)
+    t0 = time.perf_counter()
 
     # Extraer SERIE y NUMERO del documento de referencia para el ID
     serie, nro = _extract_serie_nro(doc_ref)
@@ -600,8 +715,17 @@ def _generar_uno(
             vendedor=vendedor_display,
             exp_id=exp_id,
             historico_config=historico_config,
+            modalidad=modalidad,
         )
 
+    logger.info(
+        "expediente OK %s cliente=%s doc=%s archivos=%s (%.1fs)",
+        exp_id,
+        cliente or "-",
+        doc_ref or "-",
+        ",".join(sorted(p.name for p in exp_dir.iterdir() if p.is_file())),
+        time.perf_counter() - t0,
+    )
     return exp_dir
 
 
@@ -827,6 +951,7 @@ def _generar_historico(
     vendedor="",
     exp_id="",
     historico_config=None,
+    modalidad="",
 ):
     """Genera el reporte histórico (segmento del expediente) en estilo clásico.
 
@@ -852,6 +977,15 @@ def _generar_historico(
 
     hist = _filtrar_documentos_historico(hist, historico_config)
 
+    reclamados = _reclamados_de_df(
+        resultado.resultado.dataframe if resultado.resultado is not None else None
+    )
+
+    if modalidad == MODALIDAD_INDIVIDUAL:
+        # El expediente es de una sola factura: el Histórico se acota a ese
+        # documento y a las notas que lo referencian.
+        hist = _acotar_historico_a_documentos(hist, {f for f, _ in reclamados})
+
     if hist.empty:
         return historico_path
 
@@ -868,11 +1002,59 @@ def _generar_historico(
         vendedor=vendedor,
         expediente_id=exp_id,
         ruta_salida=historico_path,
-        reclamados=_reclamados_de_df(
-            resultado.resultado.dataframe if resultado.resultado is not None else None
-        ),
+        reclamados=reclamados,
     )
     return historico_path
+
+
+def _serie_canon(serie) -> str:
+    """Serie comparable: 'FF001' (TIPO_DOC+SERIE) y 'F001' son la misma.
+
+    Se queda con el bloque de digitos final; si no hay, usa el texto limpio.
+    """
+    txt = re.sub(r"[^0-9A-Za-z]", "", str(serie or "")).upper()
+    m = re.search(r"(\d+)$", txt)
+    return m.group(1) if m else txt
+
+
+def _clave_doc(valor) -> str:
+    """Clave comparable de un documento: 'F001-101' / 'FF001-101' / 'F01/001-101'."""
+    s = str(valor or "").strip().upper()
+    if "-" not in s:
+        return ""
+    serie, nro = s.rsplit("-", 1)
+    return f"{_serie_canon(serie)}-{nro.strip()}"
+
+
+def _acotar_historico_a_documentos(hist: pd.DataFrame, docs) -> pd.DataFrame:
+    """Deja en el Histórico solo los documentos del expediente y sus notas.
+
+    En consolidado el Histórico es el del cliente en el período (contexto). En
+    individual cada expediente pertenece a UNA factura: dejarlo con todas las
+    facturas del cliente hace que el sustento de un documento aparezca como
+    evidencia en el de otro.
+    """
+    claves = {_clave_doc(d) for d in (docs or set())}
+    claves.discard("")
+    if not claves or hist is None or hist.empty:
+        return hist
+
+    def _tiene(row):
+        es_nota = str(row.get("TIPO_CLASE", "")).strip().lower() != "factura" and bool(
+            str(row.get("TIPO_DOC", "")).strip().upper().startswith(("N", "C"))
+        )
+        candidatos = [row.get("DOC_ID", "")]
+        if es_nota:
+            candidatos += [row.get("FACTURA_REF", ""), row.get("REFERENCIA", "")]
+        else:
+            serie = f"{str(row.get('TIPO_DOC', '')).strip()[:1]}{row.get('SERIE', '')}"
+            candidatos.append(f"{serie}-{row.get('NUMERO', '')}")
+        return any(_clave_doc(c) in claves for c in candidatos if c)
+
+    mask = hist.apply(_tiene, axis=1)
+    if not mask.any():
+        return hist  # sin coincidencias: no acotar (no perder evidencia)
+    return hist[mask].copy()
 
 
 def _filtrar_documentos_historico(hist: pd.DataFrame, historico_config) -> pd.DataFrame:

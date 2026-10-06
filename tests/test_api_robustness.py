@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import socket
-import time
 from datetime import datetime, timezone
 
-import pytest
+# `json`, `socket`, `time` e `import pytest` de nivel de modulo no se usan: cada
+# test importa lo que necesita dentro de su cuerpo.
 
 
 def test_parse_dt_formats():
@@ -51,19 +49,18 @@ def test_check_client_no_server():
 
 
 def _api_disponible(url: str = "http://127.0.0.1:8090") -> bool:
-    """True si el API responde health. Evita falsos rojos cuando el API esta caido."""
-    import socket
+    """True si el API responde health de verdad.
+
+    Antes solo comprobaba que el puerto abriera. Con el forwarder 8090 vivo y
+    la API de WSL caida, el puerto abria igual, el guard pasaba de largo y los
+    tests de integracion fallaban con WinError 10054 en vez de saltarse. Ahora
+    se consulta el health real, que es lo que el docstring siempre prometio.
+    """
+    from src.core.api_robustness.check import check_client
 
     try:
-        host = url.replace("http://", "").replace("https://", "").split("/")[0]
-        if ":" in host:
-            h, p = host.rsplit(":", 1)
-            port = int(p)
-        else:
-            h, port = host, 80
-        with socket.create_connection((h, port), timeout=3):
-            return True
-    except OSError:
+        return bool(check_client(url).health_ok)
+    except Exception:
         return False
 
 

@@ -541,18 +541,18 @@ class TestSetBusyNoMuestraFalse:
     """
 
     def test_el_overlay_no_muestra_false(self):
-        """El modal maneja su propio overlay; la aplicación jamás recibe `False`.
+        """El flujo intranet maneja su propio estado; la app solo ve mensajes explícitos.
 
         Regresión: antes el card pasaba `self.app.show_loading` directo como
-        `set_busy`, y el booleano "False" quedaba en pantalla. Ahora el flujo
-        vive dentro de `ApiSyncModal` y la app solo ve mensajes explícitos.
+        `set_busy`, y el booleano "False" quedaba en pantalla. El modal API se
+        eliminó: `_actualizar_hoy` delega a `_iniciar_descarga` (intranet).
         """
-        from src.ui.components.api_sync_modal import ApiSyncModal
         from src.ui.view_panels import _ViewPanels
 
-        # El canal ya no acepta un setter crudo: el Modal traduce al overlay.
+        # El canal ya no acepta un setter crudo ni modal API: solo intranet.
         v = _ViewPanels.__new__(_ViewPanels)
-        assert hasattr(ApiSyncModal, "open")
+        assert callable(_ViewPanels._actualizar_hoy)
+        assert callable(_ViewPanels._iniciar_descarga)
         assert not hasattr(v, "_sincronizar_desde_api")
         assert not hasattr(v, "_mostrar_resultado_api")
 
@@ -573,11 +573,11 @@ class TestBotonCard:
         return v
 
     def test_el_handler_existe(self):
-        """Los handlers viejos se borraron; el canal único es el modal."""
-        from src.ui.components.api_sync_modal import ApiSyncModal
+        """El botón Actualizar hoy usa intranet (el modal API se eliminó)."""
         from src.ui.view_panels import _ViewPanels
 
-        assert hasattr(ApiSyncModal, "open") and callable(ApiSyncModal.open)
+        assert callable(_ViewPanels._actualizar_hoy)
+        assert callable(_ViewPanels._iniciar_descarga)
         # Y de la clase vieja solo quedan los métodos del panel.
         assert callable(_ViewPanels._refrescar_card_db)
 
@@ -601,8 +601,7 @@ class TestBotonCard:
         with _patch_ghost(fake_ghost):
             v._construir_card_db()
 
-        # El modal unificado reemplazó al botón provisional: "Actualizar hoy"
-        # ahora abre ApiSyncModal en vez de abrir login XLS directo.
+        # "Actualizar hoy" corre el incremental intranet (sin modal API).
         assert "Actualizar hoy" in creado, f"botones: {list(creado)}"
         assert creado["Actualizar hoy"].on_click == v._actualizar_hoy
 

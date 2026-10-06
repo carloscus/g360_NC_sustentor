@@ -57,32 +57,27 @@ def mostrar_dialogo_plantillas(page, app):
 
     dialog = ft.AlertDialog(
         modal=True,
-        title=ft.Row(
-            [
-                ft.Icon(ft.Icons.DOWNLOAD_OUTLINED, size=20, color=app.G360_ACCENT),
-                ft.Text("Descargar Plantillas", weight=ft.FontWeight.BOLD),
-            ],
-            spacing=8,
+        title=G360Theme.dialog_title(
+            ft.Icons.DOWNLOAD_OUTLINED,
+            "Descargar plantillas",
+            icon_color=app.G360_ACCENT,
         ),
         content=ft.Container(content, padding=ft.padding.only(top=10)),
         actions=[
             ft.TextButton("Cancelar", on_click=lambda _: _cerrar_dialogo(page, dialog)),
             ft.ElevatedButton(
-                "DESCARGAR SELECCIONADAS",
+                "Descargar seleccionadas",
                 on_click=lambda _: _descargar_plantillas(page, app, dialog, checkboxes, claves),
                 style=ft.ButtonStyle(bgcolor=G360Theme.button_color(), color="white"),
             ),
         ],
         actions_alignment=ft.MainAxisAlignment.END,
     )
-    page.overlay.append(dialog)
-    dialog.open = True
-    page.update()
+    page.open(dialog)
 
 
 def _cerrar_dialogo(page, dialog):
-    dialog.open = False
-    page.update()
+    page.close(dialog)
 
 
 def _descargar_plantillas(page, app, dialog, checkboxes, claves):
@@ -90,8 +85,7 @@ def _descargar_plantillas(page, app, dialog, checkboxes, claves):
     if not seleccionados:
         app.show_snackbar("Selecciona al menos una plantilla", app.G360_WARNING)
         return
-    dialog.open = False
-    page.update()
+    page.close(dialog)
 
     app.show_loading("Generando plantillas...")
 

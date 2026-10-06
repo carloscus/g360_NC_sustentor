@@ -62,6 +62,11 @@ COLS_NUM_INGESTA = (
     "PRECIO_NETO",
 )
 COLS_FECHA = ("FECHA", "FECHA_REF", "FECHA_VENC")
+# OJO: esto NO es `ventas_db.COLS_FECHA`. Ahi son columnas de SQLite en
+# snake_case (fecha_orig, fecha_ref, fecha_venc, fec_cargo); aca son columnas
+# de DataFrame en MAYUSCULAS, que es como las expone `ventas_db_client`.
+# `FEC_CARGO` no aparece porque no llega a la capa DataFrame: el diccionario lo
+# marca `in_report: False` y nadie lo selecciona. No unificar las dos listas.
 COLS_CRITICAS_ERP = ("ANHO", "CODIGO", "CANTIDAD", "FECHA", "SOLES", "NUMERO")
 
 

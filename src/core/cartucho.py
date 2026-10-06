@@ -174,6 +174,10 @@ def exportar_cartucho(
             "bytes": db_dst.stat().st_size,
             "user_version": ventas_db.CONTRACTO_VERSION,
             "ventas_filas": ventas_filas,
+            # Alias de `ventas_filas`. El importador lo lee para validar que el
+            # archivo tenga las filas que el manifiesto declara; se acepta
+            # cualquiera de las dos claves para no romper cartuchos viejos.
+            "filas": ventas_filas,
             "soles_total": soles,
             "fecha_min": fmin,
             "fecha_max": fmax,
@@ -312,6 +316,29 @@ def _envolver_semilla(db_suelto: Path) -> Path:
     (tmp / MANIFIESTO).write_text(json.dumps(man, ensure_ascii=False), encoding="utf-8")
     (tmp / "config_sanitizado.json").write_text("{}", encoding="utf-8")
     return tmp
+
+
+def _recalcular_checksums_meses(conn: sqlite3.Connection) -> int:
+    """Recalcula `mes_checksums` para todos los meses presentes.
+
+    Se borra y se vuelve a generar en una pasada. `ventas_db.record_month_checksum`
+    escribe un mes por vez y toma el lock de escritura por llamada: 202 meses
+    serian 202 transacciones. Aqui va todo en una.
+
+    El checksum tiene la misma forma que el de `record_month_checksum`
+    ("filas:soles") para que un cartucho generado aca sea comparable con uno
+    generado alla.
+    """
+    conn.execute("DELETE FROM mes_checksums")
+    cur = conn.execute(
+        "INSERT INTO mes_checksums (mes_ref, checksum, total_filas, total_soles, calculado_en) "
+        "SELECT mes_ref, COUNT(*) || ':' || ROUND(COALESCE(SUM(soles),0),2), "
+        "COUNT(*), ROUND(COALESCE(SUM(soles),0),2), datetime('now') "
+        "FROM ventas GROUP BY mes_ref"
+    )
+    n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    conn.commit()
+    return n
 
 
 def _leer_manifiesto(carpeta: Path) -> dict:
@@ -557,6 +584,32 @@ def importar_cartucho(origen: Path | str, forzar: str = "") -> dict:
             rep = ventas_db.verificar_contrato(src)
             if rep["tablas_faltantes"] or rep["columnas_difieren"]:
                 raise ventas_db.ContratoDBError(f"el cartucho no cumple: {rep['detalle']}")
+
+            # 2b. Las filas deben ser las que declara el manifiesto.
+            #
+            # El sha256 garantiza que el ARCHIVO no cambio en tránsito, pero no
+            # que el manifiesto sea del mismo archivo: un manifiesto viejo junto
+            # a una DB nueva (o al reves) pasa el sha y produce una base con el
+            # numero de filas que el receptor espera y no tiene. Sin esto, el
+            # superset/merge decide sobre datos que no corresponden y el
+            # receptor queda con una populacion incompleta sin aviso.
+            man_filas = man["db"].get("filas")
+            if man_filas is None:
+                man_filas = man["db"].get("ventas_filas")
+            if man_filas is not None:
+                reales = src.execute("SELECT COUNT(*) FROM ventas").fetchone()[0]
+                if reales != man_filas:
+                    raise ValueError(
+                        f"el manifiesto declara {man_filas} filas y el archivo tiene "
+                        f"{reales}: manifiesto de otro cartucho o DB truncada"
+                    )
+
+            # 2c. integrity_check del entrante. Es la unica defensa contra una
+            # DB truncada que por lo demas parece sana: sha coincide, columnas
+            # correctas, y aun asi leeria mal.
+            chk = src.execute("PRAGMA integrity_check").fetchone()[0]
+            if chk != "ok":
+                raise ValueError(f"integrity_check del cartucho = {chk}, no se importa")
         finally:
             src.close()
 
@@ -598,6 +651,20 @@ def importar_cartucho(origen: Path | str, forzar: str = "") -> dict:
                     src2.close()
                 conn.commit()
                 ventas_db.init_db(conn)
+                # RECALCULAR los derivados.
+                #
+                # `backup()` copia el archivo entero, y con el los agregados que
+                # la PC de origen tenia cacheados: agg_cliente_mes, nc_asociadas,
+                # stats_cache y mes_checksums. Esos describen la realidad de la
+                # OTRA PC, incluida su allowlist (el cartucho lleva la DB
+                # completa, pero los derivados se calcularon con su filtro).
+                # Sin recalcular, un dashboard de la PC receptora muestra
+                # numeros que no coinciden con las filas que tiene al lado.
+                ventas_db.refresh_agg_cliente_mes(conn)
+                ventas_db.populate_nc_asociadas(conn)
+                ventas_db.refresh_stats_cache(conn)
+                n_meses = _recalcular_checksums_meses(conn)
+                conn.commit()
                 est = ventas_db.connect_estado(readonly=False)
                 try:
                     ventas_db.init_estado(est)
@@ -609,13 +676,26 @@ def importar_cartucho(origen: Path | str, forzar: str = "") -> dict:
                     )
                 finally:
                     est.close()
-                reporte.update({"dias_reconstruidos": n_dias, "sidecar": union})
+                reporte.update(
+                    {
+                        "dias_reconstruidos": n_dias,
+                        "sidecar": union,
+                        "agregados_recalculados": True,
+                        "meses_recalculados": n_meses,
+                    }
+                )
             else:
                 # Merge por folio: trae lo que falta sin pisar nada existente.
                 from src.core.db_network import traer_folios_faltantes
 
-                fmin = man["db"].get("fecha_min") or "2010-01-01"
-                fmax = man["db"].get("fecha_max") or "2026-09-28"
+                # El rango sale del manifiesto. El fallback NO puede ser una
+                # fecha fija: estaba en "2026-09-28", asi que un cartucho sin
+                # fecha_max traeria solo las ventas hasta esa fecha y las
+                # posteriores quedarian faltando sin aviso. Si el manifiesto no
+                # trae el rango, se usa TODO el periodo de la tabla: es mas
+                # trabajo, pero no pierde datos.
+                fmin = man["db"].get("fecha_min") or "0000-01-01"
+                fmax = man["db"].get("fecha_max") or "9999-12-31"
                 m = traer_folios_faltantes(fmin, fmax, rutas=[carpeta], conn=conn)
                 est = ventas_db.connect_estado(readonly=False)
                 try:

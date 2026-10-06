@@ -36,6 +36,26 @@ def _clear_card_cache():
     ventas_db.invalidate_card_info_cache()
 
 
+def _esperar_hilos_de_fondo(timeout: float = 10.0) -> None:
+    """Espera a que terminen los hilos daemon de refresco de caches.
+
+    `refresh_card_info_async()` / `refresh_lineas_async()` /
+    `refresh_sucursales_async()` abren su PROPIA conexion read-only en background.
+    En Windows, mientras uno de esos hilos esta vivo el `.db` esta tomado y el
+    rename falla con WinError 32 -- y no por una conexion abierta, sino porque el
+    hilo esta por abrirla. Por eso el fallo era intermitente segun el scheduling.
+
+    `cerrar_conexiones()` no alcanza: solo ve las conexiones ya creadas, y una
+    conexion que se abre despues vuelve a tomar el archivo.
+    """
+    import threading
+
+    for t in threading.enumerate():
+        if t is threading.current_thread():
+            continue
+        t.join(timeout=timeout)
+
+
 def _row(fecha: str, nro: str, mes_ref: str, vendedor: str = "178", sku: str = "02211") -> dict:
     v = {
         "id_articulo": sku,
@@ -281,7 +301,13 @@ class TestSimulacionesCardDB:
         v._refrescar_card_db(async_=False)
         assert len(v.card_db_kpis.controls) >= 1
 
+        # Orden importante antes de tocar el archivo:
+        #  1. esperar a los hilos de refresco (abren su propia conexion read-only);
+        #  2. cerrar las conexiones cacheadas de todos los hilos.
+        # Con solo el paso 2 el rename fallaba con WinError 32 segun el timing.
         backup = data_dir / "historial_backup.db"
+        _esperar_hilos_de_fondo()
+        ventas_db.cerrar_conexiones()
         ventas_db.db_path().rename(backup)
         ventas_db.init_db()
         conn = ventas_db.get_conn()

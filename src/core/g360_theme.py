@@ -25,11 +25,19 @@ def safe_handler(fn):
                 page.snack_bar = ft.SnackBar(
                     content=ft.Row(
                         [
-                            ft.Icon(ft.Icons.ERROR_OUTLINE, color="#f0f4f8", size=20),
-                            ft.Text(f"Error: {str(e)[:100]}", color="#f0f4f8", size=14),
+                            ft.Icon(
+                                ft.Icons.ERROR_OUTLINE,
+                                color=G360Theme.TEXT_PRIMARY,
+                                size=20,
+                            ),
+                            ft.Text(
+                                f"Error: {str(e)[:100]}",
+                                color=G360Theme.TEXT_PRIMARY,
+                                size=14,
+                            ),
                         ]
                     ),
-                    bgcolor="#b91c1c",
+                    bgcolor=G360Theme.ERROR_LIGHT,
                     duration=5000,
                 )
                 page.snack_bar.open = True
@@ -344,6 +352,27 @@ class G360Theme:
             col.append(ft.Text(subtitle, size=cls.TYPE_SUBTITLE, color=cls.subtitle_color()))
         return ft.Column(col, spacing=2)
 
+    @classmethod
+    def dialog_title(cls, icon, text, icon_color=None):
+        """Título único de diálogos: icono 20 + texto 14/W_700 primario.
+
+        Regla: todo `AlertDialog` usa este helper (antes había 4 variantes de
+        tamaño, algunas sin icono). Los diálogos de progreso conservan su
+        `Row(ProgressRing+Text)` porque el spinner es estado, no decoración.
+        """
+        return ft.Row(
+            [
+                ft.Icon(icon, size=20, color=icon_color or cls.accent_color()),
+                ft.Text(
+                    text,
+                    size=14,
+                    weight=ft.FontWeight.W_700,
+                    color=cls.text_primary_color(),
+                ),
+            ],
+            spacing=8,
+        )
+
     # ── Card Containers ──────────────────────────────────────────────────────
 
     @classmethod
@@ -393,6 +422,41 @@ class G360Theme:
             border_radius=radius if radius is not None else cls.RADIUS_CONTROL,
             bgcolor=bgcolor if bgcolor is not None else cls.surface_variant_color(),
             border=ft.border.all(1, border_color or cls.border_subtle_color()),
+        )
+
+    @classmethod
+    def kpi_tile(cls, icon, valor, color, label, icon_size: int = 14):
+        """Tile de metrica: icono + valor + etiqueta, centrado.
+
+        Es LA pieza de KPI de la app. Antes vivia como funcion anidada dentro
+        de `_refrescar_card_db` (view_panels) y no se podia reutilizar ni
+        testear. `resultados_view` tiene su propia cuadricula de metricas con la
+        misma forma pero medidas distintas (radio 10, valor 17); comparten este
+        radio y fondo para leerse como la misma pieza.
+
+        Medidas: radio RADIUS_CHIP (el token declara "tiles metricas" para 10;
+        la card usaba RADIUS_CONTROL=12, se alinea a 10). Texto en TYPE_BODY
+        (12, identico a lo que pintaba). Icono 14 por defecto, overridable.
+        """
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Icon(icon, size=icon_size, color=color),
+                    ft.Text(
+                        valor,
+                        size=cls.TYPE_BODY,
+                        weight=ft.FontWeight.W_700,
+                        color=color,
+                    ),
+                    ft.Text(label, size=cls.TYPE_BODY, color=cls.text_muted_color()),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=cls.SPACE_XS,
+            ),
+            padding=ft.padding.symmetric(horizontal=18, vertical=10),
+            border_radius=cls.RADIUS_CHIP,
+            bgcolor=cls.surface_variant_color(),
+            border=ft.border.all(1, cls.border_subtle_color()),
         )
 
     @classmethod

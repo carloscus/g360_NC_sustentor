@@ -446,6 +446,33 @@ class TestCliente:
         assert df.iloc[0]["TIPO_CLASE"] == "cargo"
         assert not df.iloc[0]["AFECTA_CANTIDAD"]
 
+    def test_fetch_historial_marca_truncado(self, populated_db):
+        """Si hay mas filas que `limit`, se recorta y se marca.
+
+        Sin la marca, un cliente con mas de 50k filas perdia las viejas
+        (ORDER BY fecha_orig DESC) sin que nadie lo supiera.
+        """
+        df = VentasDbClient().fetch_historial(id_cliente="00068414", limit=2)
+        assert len(df) == 2
+        assert df.attrs.get("truncado_por_limite") is True
+        assert df.attrs.get("limite_aplicado") == 2
+
+    def test_fetch_historial_sin_truncar_no_marca(self, populated_db):
+        df = VentasDbClient().fetch_historial(id_cliente="00068414", limit=50000)
+        assert len(df) == 5
+        assert df.attrs.get("truncado_por_limite") is False
+
+    def test_fetch_historial_completo_pagina(self, populated_db):
+        """Pagina todo aunque el chunk sea chico."""
+        df = VentasDbClient().fetch_historial_completo(id_cliente="00068414", chunk=2)
+        assert len(df) == 5
+        assert df.attrs.get("truncado_por_limite") is False
+        assert df.attrs.get("paginas") == 3
+
+    def test_fetch_historial_completo_rechaza_limit(self, populated_db):
+        with pytest.raises(ValueError, match="limit/offset"):
+            VentasDbClient().fetch_historial_completo(id_cliente="00068414", limit=10)
+
     def test_fetch_vendedores_y_clientes(self, populated_db):
         cli = VentasDbClient()
         vends = cli.fetch_vendedores()
@@ -719,6 +746,123 @@ class TestCliente:
         vends_empty = cli.fetch_vendedores(min_docs=99999)
         assert vends_empty == []
 
+    class TestActividadReciente:
+        """Los listados solo muestran actividad de los últimos 5 años.
+
+        Solo ocultar: la búsqueda directa y los rangos explícitos no se tocan,
+        para no romper clientes con varios vendedores a lo largo del tiempo
+        (Apolo, Universo) cuando se los busca puntualmente.
+        """
+
+        def _fila(self, cid, nom, vid, vnom, fecha, nro):
+            from src.core.xls_processor import derivar_campos
+
+            d = dict(
+                id_articulo="014850",
+                original_sku="014850",
+                nom_articulo="PELOTA",
+                id_linea="0101",
+                nom_linea="GASEOSAS",
+                id_grupo="01",
+                nom_grupo="G",
+                id_tipo="01",
+                nom_tipo="T",
+                id_familia="01",
+                nom_familia="F",
+                id_cliente=cid,
+                doc_cliente="20000000001",
+                nom_cliente=nom,
+                tpo_doc="F01",
+                serie_doc="204",
+                nro_doc=nro,
+                referencia="",
+                moneda="Soles",
+                cantidad=10.0,
+                cantidad_fae=0.0,
+                soles=100.0,
+                dolares=0.0,
+                precio_unitario=10.0,
+                anho=int(fecha[:4]),
+                mes=int(fecha[5:7]),
+                fecha_orig=fecha,
+                fecha_ref=None,
+                fecha_venc=None,
+                cod_sucursal="01",
+                nom_sucursal="LIMA",
+                departamento="LIMA",
+                provincia="LIMA",
+                distrito="LIMA",
+                id_vendedor=vid,
+                nom_vendedor=vnom,
+                id_pedido="P1",
+                file_source="t",
+                mes_ref=fecha[:7],
+                tipo_operacion="",
+                factura_ref_serie="",
+                factura_ref_nro="",
+                folio_unico="",
+            )
+            derivar_campos(d)
+            return d
+
+        @pytest.fixture
+        def db_mixta(self, tmp_db):
+            """Un vendedor/cliente reciente y otro solo con ventas de 2015."""
+            rows = [
+                self._fila("00000001", "CLIENTE NUEVO", "01188", "VEND NUEVO", "2026-09-05", "1"),
+                self._fila("00000002", "CLIENTE VIEJO", "01199", "VEND VIEJO", "2015-03-10", "2"),
+            ]
+            conn = tmp_db.get_conn()
+            ventas_db.insert_ventas(conn, rows)
+            return tmp_db
+
+        def test_vendedor_antiguo_no_sale_en_el_drop(self, db_mixta):
+            ids = {v["id"] for v in VentasDbClient().fetch_vendedores()}
+            assert "188" in ids  # el reciente sigue
+            assert "199" not in ids  # el de 2015 se oculta
+
+        def test_vendedor_antiguo_sale_con_actividad_none(self, db_mixta):
+            ids = {v["id"] for v in VentasDbClient().fetch_vendedores(actividad_anios=None)}
+            assert {"188", "199"} <= ids
+
+        def test_cliente_antiguo_no_sale_en_listado_por_defecto(self, db_mixta):
+            ids = [c["id"] for c in VentasDbClient().fetch_clientes()]
+            assert "00000001" in ids
+            assert "00000002" not in ids
+
+        def test_busqueda_directa_encuentra_cliente_antiguo(self, db_mixta):
+            """Buscar por nombre/RUC es independiente: trae al inactivo igual."""
+            r = VentasDbClient().fetch_clientes(search="CLIENTE VIEJO")
+            assert [c["id"] for c in r] == ["00000002"]
+            r = VentasDbClient().fetch_clientes(search="00000002")
+            assert [c["id"] for c in r] == ["00000002"]
+
+        def test_rango_explicito_viejo_sigue_funcionando(self, db_mixta):
+            """Un rango forense anterior al piso se honra tal cual."""
+            r = VentasDbClient().fetch_clientes(fecha_desde="2015-01-01", fecha_hasta="2015-12-31")
+            assert [c["id"] for c in r] == ["00000002"]
+
+        def test_cliente_con_dos_vendedores_no_se_rompe(self, tmp_db):
+            """Caso Apolo/Universo: el mismo cliente con vendedor viejo y nuevo."""
+            rows = [
+                self._fila("00000003", "TIENDAS APOLO", "01199", "VEND VIEJO", "2015-03-10", "3"),
+                self._fila("00000003", "TIENDAS APOLO", "01188", "VEND NUEVO", "2026-09-05", "4"),
+            ]
+            conn = tmp_db.get_conn()
+            ventas_db.insert_ventas(conn, rows)
+            cli = VentasDbClient()
+            # En el listado por defecto aparece (tiene actividad reciente)
+            assert "00000003" in [c["id"] for c in cli.fetch_clientes()]
+            # Bajo su vendedor actual también
+            assert "00000003" in [c["id"] for c in cli.fetch_clientes(vendedor_id="01188")]
+            # Y por id resuelve igual que siempre
+            assert cli.fetch_client_by_id("00000003")["nombre"] == "TIENDAS APOLO"
+
+        def test_anclado_antiguo_resuelve_por_id(self, db_mixta):
+            """Los anclados no pasan por el listado: el by-id no filtra."""
+            c = VentasDbClient().fetch_client_by_id("00000002")
+            assert c is not None and c["nombre"] == "CLIENTE VIEJO"
+
     def test_fetch_client_by_id(self, populated_db):
         c = VentasDbClient().fetch_client_by_id("00068414")
         assert c is not None
@@ -898,7 +1042,7 @@ class TestEstado:
         n2, tot2 = ventas_db.record_month_checksum(conn, "2024-01")
         assert n2 == n
 
-    def _row(self, mes_ref="2024-01", folio="F1", soles=100.0):
+    def _row(self, mes_ref="2024-01", folio="F1", soles=100.0, dia="01"):
         from src.core.xls_processor import derivar_campos
 
         v = dict(
@@ -928,7 +1072,10 @@ class TestEstado:
             precio_unitario=soles,
             anho=int(mes_ref[:4]),
             mes=int(mes_ref[5:7]),
-            fecha_orig=mes_ref,
+            # `mes_ref` es `yyyy-mm`: sirve de anio/mes pero NO como fecha. La
+            # columna fecha_orig tiene CHECK de formato ISO, asi que `2024-01`
+            # rebotaria. Antes no se notaba porque la columna no lo tenia.
+            fecha_orig=f"{mes_ref}-{dia}",
             fecha_ref=None,
             fecha_venc=None,
             cod_sucursal="01",
@@ -972,7 +1119,10 @@ class TestEstado:
         conn = tmp_db.get_conn()
         tmp_db.insert_ventas(conn, [self._row(folio="F1", soles=100.0)])
         tmp_db.record_month_checksum(conn, "2024-01")
-        tmp_db.insert_ventas(conn, [self._row(folio="F2", soles=50.0)])
+        # Dia DISTINTO a propósito: `insert_ventas` borra por dia antes de
+        # insertar, asi que dos filas en la misma fecha se reemplazarian y el
+        # drift de 1 -> 2 filas no se veria. El checksum del mes es 2024-01.
+        tmp_db.insert_ventas(conn, [self._row(folio="F2", soles=50.0, dia="02")])
         ok, drifts, sin = ventas_db.verify_integrity(conn)
         assert not ok
         assert [d[0] for d in drifts] == ["2024-01"]
@@ -1612,6 +1762,117 @@ class TestAggClienteMes:
         agg = cli.fetch_clientes(fecha_desde="2024-01-01", fecha_hasta="2024-01-31")
         assert {c["id"] for c in agg} == ids_det
         assert "00068414" in {c["id"] for c in agg}
+
+    def test_refresh_guarda_nom_vendedor(self, populated_db):
+        """El agg lleva el nombre para el dropdown de vendedores (sin scan)."""
+        ventas_db.refresh_agg_cliente_mes()
+        conn = ventas_db.get_conn()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(agg_cliente_mes)").fetchall()}
+        assert "nom_vendedor" in cols
+        noms = {
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT nom_vendedor FROM agg_cliente_mes WHERE nom_vendedor != ''"
+            ).fetchall()
+        }
+        assert "VENDEDOR UNO" in noms
+
+    def test_fetch_vendedores_agg_coincide_con_detalle(self, populated_db):
+        """El fast-path por agg devuelve lo mismo que el escaneo (nombres incluidos)."""
+        cli = VentasDbClient()
+        det = {v["id"]: v["nombre"] for v in cli.fetch_vendedores(actividad_anios=None)}
+        assert det, "el fixture no tiene vendedores"
+        ventas_db.refresh_agg_cliente_mes()
+        assert cli._agg_vendedores_ready(cli._read_conn()) is True
+        agg = {v["id"]: v["nombre"] for v in cli.fetch_vendedores(actividad_anios=None)}
+        assert agg == det
+
+    def test_fetch_vendedores_agg_respeta_min_docs_y_piso(self, populated_db):
+        ventas_db.refresh_agg_cliente_mes()
+        cli = VentasDbClient()
+        # min_docs alto no deja pasar a nadie, igual que en el detalle
+        assert cli.fetch_vendedores(min_docs=99999) == []
+        # piso en el futuro: nadie tiene actividad "reciente"
+        assert cli.fetch_vendedores(actividad_anios=-800) == []
+        assert cli.fetch_vendedores(min_docs=1, actividad_anios=None) != []
+
+
+class TestPisoActividadFijo:
+    """El piso de actividad es FIJO (2021-01-01), no ventana movil.
+
+    Antes era "ultimos N años desde hoy": el dropdown se achicaba solo con el
+    paso del tiempo. Ahora el default es el piso configurado y no se mueve.
+    """
+
+    def test_default_es_el_piso_configurado(self, tmp_db, monkeypatch):
+        from src.core import ventas_db_config
+        from src.core.ventas_db_client import _POR_DEFECTO, _resolver_piso
+
+        # El cache es global al modulo: resetear para no heredar otro test.
+        monkeypatch.setattr(ventas_db_config, "_ACTIVIDAD_CACHE", None)
+        try:
+            assert _resolver_piso(_POR_DEFECTO) == "2021-01-01"
+        finally:
+            monkeypatch.setattr(ventas_db_config, "_ACTIVIDAD_CACHE", None)
+
+    def test_none_explicito_es_sin_piso(self, tmp_db):
+        """None = toda la historia (uso forense). No cambio."""
+        from src.core.ventas_db_client import _resolver_piso
+
+        assert _resolver_piso(None) is None
+
+    def test_int_explicito_sigue_siendosi_ventana_movil(self, tmp_db):
+        """Compatibilidad: un int pasado a mano resuelve relativo a hoy."""
+        from datetime import date
+
+        from src.core.ventas_db_client import _resolver_piso
+
+        hoy = date.today()
+        total = hoy.year * 12 + (hoy.month - 1) - 1 * 12
+        esperado = f"{total // 12}-{(total % 12) + 1:02d}-01"
+        assert _resolver_piso(1) == esperado
+
+    def test_config_invalida_cae_al_default(self, tmp_db, monkeypatch):
+        import json
+
+        from src.core import ventas_db_config
+
+        monkeypatch.setattr(ventas_db_config, "_ACTIVIDAD_CACHE", None)
+        cfg_path = ventas_db_config.config_file_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps({"actividad_desde": "no-es-fecha"}), encoding="utf-8")
+        try:
+            assert ventas_db_config.actividad_desde() == "2021-01-01"
+        finally:
+            monkeypatch.setattr(ventas_db_config, "_ACTIVIDAD_CACHE", None)
+            if cfg_path.exists():
+                cfg_path.unlink()
+
+    def test_config_override_mueve_el_piso(self, tmp_db, monkeypatch):
+        import json
+
+        from src.core import ventas_db_config
+        from src.core.ventas_db_client import _POR_DEFECTO, _resolver_piso
+
+        monkeypatch.setattr(ventas_db_config, "_ACTIVIDAD_CACHE", None)
+        cfg_path = ventas_db_config.config_file_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps({"actividad_desde": "2023-06-01"}), encoding="utf-8")
+        try:
+            assert ventas_db_config.actividad_desde() == "2023-06-01"
+            assert _resolver_piso(_POR_DEFECTO) == "2023-06-01"
+        finally:
+            monkeypatch.setattr(ventas_db_config, "_ACTIVIDAD_CACHE", None)
+            if cfg_path.exists():
+                cfg_path.unlink()
+
+    def test_vendedores_default_usa_piso_fijo(self, populated_db):
+        """El fixture es de 2024: pasa el piso 2021 por default."""
+        cli = VentasDbClient()
+        sentinels = [v["id"] for v in cli.fetch_vendedores()]
+        todos = [v["id"] for v in cli.fetch_vendedores(actividad_anios=None)]
+        assert sentinels, "el fixture deberia tener vendedores"
+        assert sentinels == todos
 
 
 class TestAnclados:

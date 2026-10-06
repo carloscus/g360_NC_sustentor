@@ -532,12 +532,16 @@ def traer_folios_faltantes(
                         (fol,),
                     ).fetchall()
                     if rows:
+                        # El origen es otra base (la del Tauri) y puede traer
+                        # fechas en dd/mm/yyyy: se normalizan al insertar para
+                        # no reintroducir formatos no ISO en cada sync.
+                        filas_norm = [ventas_db.normaliza_fechas_fila(r, cols) for r in rows]
                         conn.executemany(
                             f"INSERT INTO ventas ({', '.join(cols)}) "
                             f"VALUES ({', '.join('?' * len(cols))})",
-                            rows,
+                            filas_norm,
                         )
-                        filas += len(rows)
+                        filas += len(filas_norm)
             remap = {"filas_actualizadas": 0}
             if filas:
                 from src.core.oc_backfill import remapar_orden_compra_desde_origen

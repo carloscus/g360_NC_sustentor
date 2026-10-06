@@ -9,9 +9,10 @@ la DB (devolucion/ajuste en negativo, nota de debito en positivo).
 """
 
 from __future__ import annotations
-from datetime import date, datetime
 
+import logging
 import re
+from datetime import date, datetime
 
 import flet as ft
 import pandas as pd
@@ -20,6 +21,8 @@ from src.core.fechas import excel_fmt_ui, fecha_ui
 from src.core.g360_theme import G360Theme
 from src.core.utils import EXCEL_FMT_UNIT_PRICE, cliente_visible
 
+
+logger = logging.getLogger(__name__)
 
 _RE_FN = re.compile(r"[^\w\s().&-]", re.UNICODE)
 
@@ -77,12 +80,11 @@ def _mes_label(mes_ref: str) -> str:
 
 
 def _fecha_corta(fecha) -> str:
-    """'YYYY-MM-DD' -> 'dd-mm-yyyy' para mostrar en el reporte.
+    """Fecha para mostrar en el reporte, en el formato de `src/core/fechas.py`.
 
-    La convención vive en `src/core/fechas.py` (interno ISO, display con
-    guiones); esta función queda como alias de compatibilidad.
+    La convención vive en `fechas.FMT_UI`; esta función queda como alias de
+    compatibilidad.
     """
-
     return fecha_ui(fecha) or str(fecha or "").strip()[:10]
 
 
@@ -95,13 +97,16 @@ def _mes_display(mm: str, anio: str) -> str:
 
 
 def _fecha_obj(fecha):
-    """'YYYY-MM-DD…' → date real (Excel la filtra y ordena); None si no hay."""
-    from datetime import datetime
+    """Fecha real para Excel (ordena y filtra como fecha); None si no hay.
 
-    try:
-        return datetime.strptime(str(fecha or "").strip()[:10], "%Y-%m-%d").date()
-    except ValueError:
-        return None
+    Usa `a_fecha`, que acepta ISO, dd/mm/yyyy, dd-mm-yyyy y timestamp. Antes
+    hacia `strptime(..., "%Y-%m-%d")` a mano: cualquier fecha no ISO devolvia
+    None y la celda quedaba VACIA, o sea una fecha perdida en silencio dentro
+    de un Excel que se ve correcto.
+    """
+    from src.core.fechas import a_fecha
+
+    return a_fecha(fecha)
 
 
 def _c_visible(cid: str) -> str:
@@ -351,6 +356,17 @@ def _paquete_export(
             df = fn(cid_raw, **kwd, **extra)
             return None if df is None or df.empty else df
         except Exception:
+            # Un fetch caído omite su hoja sin tirar el libro entero, pero en
+            # silencio un SQL roto es indistinguible de "el cliente no tiene
+            # NC": el Excel salía incompleto sin dejar rastro. Se avisa.
+            logger.warning(
+                "reporte: fetch %s fallo para cid=%s (rango %s..%s); se omite su hoja",
+                getattr(fn, "__name__", fn),
+                cid_raw,
+                kwd.get("fecha_desde"),
+                kwd.get("fecha_hasta"),
+                exc_info=True,
+            )
             return None
 
     def _dfc(fn, **extra):
@@ -372,11 +388,19 @@ def _paquete_export(
             )
         except Exception:
             # Igual que el resto de hojas, una consulta fallida no tira el libro.
+            logger.warning(
+                "reporte: fetch fetch_analisis_sucursales_cliente fallo para cid=%s "
+                "(rango %s..%s); se omite la hoja Sucursales",
+                cid_raw,
+                fd,
+                fh,
+                exc_info=True,
+            )
             pass
 
     ln = {"solo_lineas_activas": solo_lineas_activas}
     nc = {"incluir_nc": incluir_nc}
-    return {
+    bundle = {
         "df_hist": (_df(cli.fetch_historico_mensual, kw, **nc, **ln) if _sel("resumen") else None),
         "df_lineas": (
             _df(cli.fetch_lineas_resumen_cliente, kw, **nc, **ln) if _sel("consolidado") else None
@@ -401,6 +425,17 @@ def _paquete_export(
         "df_suc_linea_mes": suc["linea_mes"],
         "df_suc_sku_mes": suc["sku_mes"],
     }
+    # Resumen de una linea: separa "esta hoja va vacia porque el cliente no
+    # tiene NC" de "va vacia porque el fetch cayo" (que ya aviso arriba).
+    logger.info(
+        "reporte: paquete cid=%s rango=%s..%s hojas con datos: %s",
+        cid_raw,
+        fd,
+        fh,
+        ", ".join(f"{k[3:]}={len(v)}" for k, v in bundle.items() if v is not None and len(v))
+        or "ninguna",
+    )
+    return bundle
 
 
 # ── conciliación ─────────────────────────────────────────────────
@@ -1468,7 +1503,7 @@ def _x_bd(wb, df, st, nombre, cid):
     ):
         ws.column_dimensions[col].width = w
     for rrow in ws.iter_rows(min_row=2, min_col=1, max_row=rlast, max_col=18):
-        rrow[1].number_format = "dd-mm-yyyy"
+        rrow[1].number_format = excel_fmt_ui()
         rrow[9].number_format = "#,##0"
         rrow[10].number_format = EXCEL_FMT_UNIT_PRICE
         rrow[11].number_format = "#,##0.00"
@@ -2080,7 +2115,7 @@ def _x_facturas(wb, df_det, df_dev, rango_ajustes, mapa_nc, st, nombre, cid):
     )
     r, r_hdr = _x_bloque(ws, mat, "#,##0.00", 1, st, subtitulo="DETALLADO POR (FACTURA, SKU)")
     for rr in range(r0, rtot + 1):
-        ws.cell(row=rr, column=2).number_format = "dd-mm-yyyy"
+        ws.cell(row=rr, column=2).number_format = excel_fmt_ui()
         ws.cell(row=rr, column=9).number_format = "#,##0"
         for cc in (10, 11, 12, 13, 14):
             ws.cell(row=rr, column=cc).number_format = "#,##0.00"

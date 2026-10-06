@@ -5,20 +5,33 @@ import os
 import pytest
 
 
-@pytest.fixture(scope="session")
-def _data_dir_aislado(tmp_path_factory):
-    return tmp_path_factory.mktemp("g360_data")
+@pytest.fixture(autouse=True)
+def _sin_conexiones_colgadas():
+    """Ningun test deja una conexion SQLite abierta.
+
+    `ventas_db` cachea una conexion read-write por hilo. Si un test renombra o
+    borra el `.db` y no cierra esa conexion, el siguiente recibe "database is
+    locked" porque los sidecars `-wal`/`-shm` siguen tomados. Era intermitente y
+    no dependia del test que fallaba sino de cual habia corrido antes.
+    """
+    yield
+    from src.core import ventas_db
+
+    ventas_db.cerrar_conexiones()
 
 
 @pytest.fixture(autouse=True)
-def _aislar_db_real(_data_dir_aislado, request):
+def _aislar_db_real(tmp_path, request):
     """Red de seguridad: ningun test debe tocar la DB real de produccion.
 
     `data_dir()` cae a %APPDATA%\\g360-db-ventas\\data cuando G360_DATA_DIR no esta
-    seteado, asi que un test que olvide `tmp_db` abre la base de 2.5 GB. Se vio
+    seteado, asi que un test que olvide `tmp_db` abre la base de 3.3 GB. Se vio
     justo en `test_coverage_summary`, que leia 2,815,148 filas de produccion y
-    fallaba por datos ajenos. Los tests que necesitan su propia DB siguen
-    sobrescribiendo G360_DATA_DIR con monkeypatch.
+    fallaba por datos ajenos.
+
+    El directorio es POR TEST (tmp_path), no uno de sesion: con un dir de sesion
+    cualquier test que escribiera ahi sin `tmp_db` dejaba estado para los
+    siguientes, que es exactamente la contaminacion que se queria evitar.
 
     Los guards que SI auditan la base real se marcan con `@pytest.mark.real_db`
     y quedan fuera del aislamiento.
@@ -27,7 +40,7 @@ def _aislar_db_real(_data_dir_aislado, request):
         yield
         return
     previo = os.environ.get("G360_DATA_DIR")
-    os.environ["G360_DATA_DIR"] = str(_data_dir_aislado)
+    os.environ["G360_DATA_DIR"] = str(tmp_path / "data")
     yield
     if previo is None:
         os.environ.pop("G360_DATA_DIR", None)

@@ -326,16 +326,10 @@ def abrir_picker_clientes(
         on_confirm(elegidos)
 
     dlg = ft.AlertDialog(
-        title=ft.Row(
-            [
-                ft.Icon(ft.Icons.SEARCH, color=G360Theme.accent_color()),
-                ft.Text(
-                    "Seleccionar cliente" if not multiple else "Seleccionar clientes",
-                    size=14,
-                    weight=ft.FontWeight.W_700,
-                ),
-            ],
-            spacing=8,
+        modal=True,
+        title=G360Theme.dialog_title(
+            ft.Icons.SEARCH,
+            "Seleccionar cliente" if not multiple else "Seleccionar clientes",
         ),
         content=ft.Container(
             content=ft.Column(

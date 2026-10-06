@@ -32,7 +32,7 @@ def test_flujo_y_secciones_separadas():
     view.lbl_ejecutar_hint = ft.Text("Completa los datos.")
     view.resultados_container = ft.Container(visible=False)
     view.reporte_panel = SimpleNamespace(construir_card=lambda: ft.Text("Reporte de compras"))
-    view._construir_card_db = lambda: ft.Text("Historial local")
+    view._construir_card_db = lambda async_=False: ft.Text("Historial local")
     view._construir_strip_captura = lambda: ft.Text("Estado de captura")
     view._construir_seccion_datos = lambda: ft.Text("Filtro de datos")
     view._construir_seccion_insumos = lambda _cfg: workflow_section(

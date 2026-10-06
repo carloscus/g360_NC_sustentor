@@ -94,7 +94,7 @@ def a_fecha(valor: Any) -> Optional[date]:
 
 
 def fecha_ui(valor: Any, vacio: str = "") -> str:
-    """Fecha para mostrar: ``dd-mm-yyyy``.
+    """Fecha para mostrar: ``dd/mm/yyyy``.
 
     Es la función que deben usar las superficies de UI y exportación. Acepta
     ISO (que es como viene de la DB y de la API) y no exige que el llamador se
@@ -132,12 +132,12 @@ def anio_de(valor: Any) -> Optional[int]:
 
 
 def rango_ui(desde: Any, hasta: Any, separador: str = "  →  ") -> str:
-    """Rango para mostrar, p.ej. ``04-01-2010  →  03-10-2026``."""
+    """Rango para mostrar, p.ej. ``04/01/2010  →  03/10/2026``."""
     return f"{fecha_ui(desde, '—')}{separador}{fecha_ui(hasta, '—')}"
 
 
 def fecha_hora_ui(valor: Any, vacio: str = "") -> str:
-    """Timestamp para mostrar: ``dd-mm-yyyy HH:MM`` (o solo la hora si es hoy)."""
+    """Timestamp para mostrar: ``dd/mm/yyyy HH:MM`` (o solo la hora si es hoy)."""
     if valor is None or valor == "":
         return vacio
     if isinstance(valor, str):

@@ -245,23 +245,15 @@ class _ViewHelpers:
             "fp_desde": self.fp_desde.value,
             "fp_hasta": self.fp_hasta.value,
             "stock_cliente_path": self.stock_cliente_path,
-            # Factura unica por fragmento (fallback a dropdown si existe legacy)
-            "factura_ci": (
-                self.factura_dropdown_ci.value
-                or (self._sel_facturas[0][1] if len(self._sel_facturas) == 1 else None)
-            ),
-            "factura_sf": self.factura_dropdown_sf.value,
-            "factura_df": (
-                self.factura_dropdown_df.value
-                or (self._sel_facturas[0][1] if len(self._sel_facturas) == 1 else None)
-            ),
+            # Factura unica por fragmento (legacy ya no usa dropdown; fallback a chip)
+            "factura_ci": (self._sel_facturas[0][1] if len(self._sel_facturas) == 1 else None),
+            "factura_df": (self._sel_facturas[0][1] if len(self._sel_facturas) == 1 else None),
             "descuento_pct": self.descuento_pct.value,
             "desc_file_path": self.desc_file_path,
             "sku_filter_path": self.sku_filter_path,
             "historico_config": historico.as_dict(),
             "chk_incluir_nc": historico.considerar("nc"),
             "chk_incluir_ndb": historico.considerar("ndb"),
-            "cliente_pb": self.cliente_dropdown_pb.value,
             "lineas_selected": [name for name, cb in self.linea_checkboxes.items() if cb.value],
             "categorias_nc": [cat for cat, cb in self.categoria_nc_checkboxes.items() if cb.value],
             "skus_incluidos": skus_incluidos,

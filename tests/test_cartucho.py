@@ -186,7 +186,12 @@ def _cartucho_minimo(dest: Path, ventas_filas, alias_filas=()):
             "sha256": _sha(pdb),
             "bytes": pdb.stat().st_size,
             "user_version": 3,
+            # El importador compara esto contra el COUNT real del archivo para
+            # detectar manifiesto de otro cartucho. Se escriben AMBAS claves
+            # porque el exportador real usa `ventas_filas` y asi queda el
+            # fixture igual a un cartucho de verdad.
             "ventas_filas": n,
+            "filas": n,
             "soles_total": 0,
             "fecha_min": fmin,
             "fecha_max": fmax,
@@ -334,6 +339,100 @@ class TestImportar:
         assert r["modo"] == "mergear"
         n = conn.execute("SELECT COUNT(*) FROM ventas").fetchone()[0]
         assert n == 2  # 1 local + 1 traído, nada pisado
+
+
+class TestIntegridadDelEntrante:
+    """Lo que el sha256 NO cubre.
+
+    El sha garantiza que el archivo no cambio en transito. No garantiza que el
+    manifiesto sea del MISMO archivo: un manifiesto viejo junto a una DB nueva
+    (o al reves) pasa el chequeo y deja al receptor con una poblacion que no
+    corresponde a lo que el cartucho dice.
+    """
+
+    def test_rechaza_manifiesto_de_otro_cartucho(self, tmp_db, tmp_path):
+        cart = _cartucho_minimo(tmp_path / "cart", [_fila("2026-09-28", "1")])
+        man = json.loads((cart / "CARTUCHO.json").read_text(encoding="utf-8"))
+        # el manifiesto ahora declara 99 filas, el archivo tiene 1
+        man["db"]["ventas_filas"] = 99
+        man["db"]["filas"] = 99
+        (cart / "CARTUCHO.json").write_text(json.dumps(man), encoding="utf-8")
+        with pytest.raises(ValueError, match="99 filas"):
+            importar_cartucho(cart)
+
+    def test_acepta_si_el_manifiesto_no_declara_filas(self, tmp_db, tmp_path):
+        """Un cartucho viejo sin el conteo debe seguir importando."""
+        cart = _cartucho_minimo(tmp_path / "cart", [_fila("2026-09-28", "1")])
+        man = json.loads((cart / "CARTUCHO.json").read_text(encoding="utf-8"))
+        man["db"].pop("filas", None)
+        man["db"].pop("ventas_filas", None)
+        (cart / "CARTUCHO.json").write_text(json.dumps(man), encoding="utf-8")
+        r = importar_cartucho(cart)
+        assert r["modo"] in ("reemplazar", "mergear")
+
+
+class TestDerivadosSeRecalculan:
+    """El `reemplazar` copia el archivo entero, y con el los agregados.
+
+    Los derivados (`agg_cliente_mes`, `nc_asociadas`, `stats_cache`,
+    `mes_checksums`) describen la realidad de la PC que exporto, calculada con
+    SU allowlist. Si el receptor los hereda, su dashboard muestra numeros que no
+    coinciden con las filas que tiene al lado. Es el bug que estas pruebas
+    fijan.
+    """
+
+    def test_agregados_describen_la_pc_receptora(self, tmp_db, tmp_path):
+        conn = ventas_db.get_conn()
+        _vender(conn, "2026-09-28", "1", cliente="CA", soles=10.0)
+        _vender(conn, "2026-09-28", "2", cliente="CA", soles=20.0)
+        _vender(conn, "2026-09-28", "3", cliente="CB", soles=30.0)
+        conn.commit()
+
+        cart = _cartucho_minimo(
+            tmp_path / "cart",
+            [
+                _fila("2026-09-28", "1", cliente="CA", soles=10.0),
+                _fila("2026-09-28", "2", cliente="CA", soles=20.0),
+                _fila("2026-09-28", "3", cliente="CB", soles=30.0),
+            ],
+        )
+        r = importar_cartucho(cart)
+        assert r["modo"] == "reemplazar"
+        assert r.get("agregados_recalculados") is True
+
+        # agg_cliente_mes es (id_cliente, id_vendedor, mes) con n_docs, no soles.
+        # Lo que importa es que refleje LAS FILAS de esta PC, no las de la que
+        # exporto: 2 clientes y 3 documentos distintos.
+        n_agg = conn.execute("SELECT COUNT(*) FROM agg_cliente_mes").fetchone()[0]
+        assert n_agg == 2, f"agg_cliente_mes deberia tener 2 clientes, tiene {n_agg}"
+        n_docs = conn.execute("SELECT COALESCE(SUM(n_docs), 0) FROM agg_cliente_mes").fetchone()[0]
+        assert n_docs == 3, f"agg deberia sumar 3 documentos, suma {n_docs}"
+
+    def test_mes_checksums_regenerados(self, tmp_db, tmp_path):
+        conn = ventas_db.get_conn()
+        _vender(conn, "2026-09-28", "1", soles=10.0)
+        conn.commit()
+
+        cart = _cartucho_minimo(tmp_path / "cart", [_fila("2026-09-28", "1", soles=10.0)])
+        r = importar_cartucho(cart)
+        assert r["modo"] == "reemplazar"
+
+        n = conn.execute("SELECT COUNT(*) FROM mes_checksums").fetchone()[0]
+        assert n >= 1, "mes_checksums quedo vacio tras el reemplazo"
+        _mes, filas, soles = conn.execute(
+            "SELECT mes_ref, total_filas, total_soles FROM mes_checksums LIMIT 1"
+        ).fetchone()
+        assert filas == 1
+        assert abs(float(soles) - 10.0) < 0.01
+
+    def test_reporte_informa_lo_que_se_recalculo(self, tmp_db, tmp_path):
+        conn = ventas_db.get_conn()
+        _vender(conn, "2026-09-28", "1")
+        conn.commit()
+        cart = _cartucho_minimo(tmp_path / "cart", [_fila("2026-09-28", "1")])
+        r = importar_cartucho(cart)
+        assert r.get("agregados_recalculados") is True
+        assert "meses_recalculados" in r
 
 
 class TestSidecar:

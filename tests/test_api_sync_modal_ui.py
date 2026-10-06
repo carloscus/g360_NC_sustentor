@@ -1,155 +1,69 @@
-"""Regresiones estructurales del modal de sincronizacion.
+"""Sin API en la UI: el modal de sincronizacion se elimino.
 
-Cubre los tres defectos que rompian el flujo LOGIN -> FRESHNESS:
+El unico camino de actualizacion es intranet (`_actualizar_hoy` delega a
+`_iniciar_descarga` -> `CaptureService.update_from_last`), mas copia manual
+Tauri y cartucho. El backend API (`api_auth`, `sync_api`, `ventas_api_client`)
+queda en cuarentena, sin entry points en la UI.
 
-1. Re-parentado: las secciones se re-construian en cada paso y los mismos
-   controles (btn_sync, status_text, log_text, btn_ntfs, btn_cartucho) acababan
-   en varias filas. En Flet un control tiene un unico padre.
-2. `result_box` se creaba pero nunca se llenaba: el paso RESULTADOS salia vacio.
-3. `safe_page_update` estaba redefinido para llamar a `safe_update()`, que a su
-   vez la llamaba -> recursion infinita y la pagina nunca se actualizaba.
+Estos tests impiden que el modal vuelva a entrar por accidente.
 """
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
 
 MODAL = Path(__file__).resolve().parents[1] / "src" / "ui" / "components" / "api_sync_modal.py"
+VIEW_PANELS = Path(__file__).resolve().parents[1] / "src" / "ui" / "view_panels.py"
 
 
-def _flet_esta_mockeado() -> bool:
-    """`tests/test_card_db_simulaciones.py` hace `sys.modules["flet"] =
-    MagicMock()` a nivel de modulo y no lo restaura. Estos tests necesitan
-    Flet real (recorren el arbol de controles y cuentan Padres; con un
-    MagicMock darian un falso verde o falso rojo).
-    """
-    import flet
-
-    return type(flet).__name__ == "MagicMock"
+def test_modal_api_no_existe():
+    """El archivo del modal API se elimino."""
+    assert not MODAL.exists(), "api_sync_modal.py volvio a aparecer"
 
 
-@pytest.fixture(autouse=True)
-def _exige_flet_real():
-    """Se evalua en tiempo de ejecucion, no de import: el parche global del
-    otro test se aplica al recolectar, que es despues de importar este
-    modulo."""
-    if _flet_esta_mockeado():
-        pytest.skip("Flet esta mockeado en este proceso (parche global de otro test)")
-
-
-def _app_stub():
-    return SimpleNamespace(
-        G360_ERROR="#B3261E",
-        G360_SUCCESS="#146C2E",
-        G360_ACCENT="#1F6FEB",
-        show_snackbar=lambda *a, **k: None,
-    )
-
-
-class _PageStub:
-    def __init__(self):
-        self.dialogs = []
-        self.closed = []
-
-    def open(self, dlg):
-        self.dialogs.append(dlg)
-
-    def close(self, dlg):
-        self.closed.append(dlg)
-
-    def update(self):
-        pass
-
-
-def _modal_abierto():
-    from src.ui.components.api_sync_modal import ApiSyncModal
-
-    page = _PageStub()
-    modal = ApiSyncModal(_app_stub(), page)
-    modal.open(server_url="http://127.0.0.1:8090")
-    assert page.dialogs, "el modal no abrio ningun dialog"
-    return page.dialogs[0]
-
-
-def _caminos(ctrl, path="root"):
-    """Itera (ruta, control) por todo el arbol de controles."""
-    yield path, ctrl
-    for attr in ("controls",):
-        hijos = getattr(ctrl, attr, None)
-        if not isinstance(hijos, list):
-            continue
-        for i, h in enumerate(hijos):
-            if hasattr(h, "controls") or hasattr(h, "content"):
-                yield from _caminos(h, f"{path}.{attr}[{i}]")
-
-
-def test_modal_no_duplica_padres():
-    """Cada control aparece una sola vez en el arbol del dialog.
-
-    Este es el invariante que rompia la transicion de pasos: un control con dos
-    padres hace que Flet renderice una de las dos copias o directamente lance.
-    """
-    dlg = _modal_abierto()
-    vistos = {}
-    repetidos = []
-    for path, ctrl in _caminos(dlg.content):
-        key = id(ctrl)
-        if key in vistos:
-            repetidos.append(f"{type(ctrl).__name__} en {vistos[key]} y {path}")
-        else:
-            vistos[key] = path
-    assert not repetidos, "controles con dos padres: " + "; ".join(repetidos)
-
-
-def test_modal_tiene_las_cuatro_secciones():
-    """Las cuatro secciones se construyen una vez y se togglean por visible."""
-    dlg = _modal_abierto()
-    sec_login = dlg.content.content.controls[0].controls
-    assert len(sec_login) == 4, "se esperaban login/freshness/sync/error"
-    tipos = {type(s).__name__ for s in sec_login}
-    assert tipos == {"Column"}, tipos
-    # Solo la de login arranca visible.
-    visibles = [s for s in sec_login if s.visible]
-    assert len(visibles) == 1 and visibles[0] is sec_login[0]
-
-
-def test_result_box_esta_en_el_arbol():
-    """result_box debe existir y ser parte del dialog (antes nunca se llenaba)."""
-    dlg = _modal_abierto()
-    nombres = [type(c).__name__ for c in dlg.content.content.controls]
-    assert "Column" in nombres
-    assert not dlg.content.content.controls[0].controls[3].visible, "error visible al abrir"
-
-
-def test_solo_una_def_de_safe_page_update():
-    """Un unico safe_page_update: redefinirlo causaba recursion infinita."""
-    arbol = ast.parse(MODAL.read_text(encoding="utf-8"))
-    defs = [
-        n
-        for n in ast.walk(arbol)
-        if isinstance(n, ast.FunctionDef) and n.name == "safe_page_update"
+def test_view_panels_sin_referencias_api():
+    """La UI no referencia el modal ni el sync API (solo en comentarios)."""
+    lineas = [
+        ln for ln in VIEW_PANELS.read_text(encoding="utf-8").splitlines() if ln.strip()[:1] != "#"
     ]
-    assert len(defs) == 1, f"safe_page_update definido {len(defs)} veces"
+    # También excluyo docstrings: líneas que empiezan con `"""` o contienen solo texto entre comillas.
+    codigo = "\n".join(ln for ln in lineas if not ln.strip().startswith('"""'))
+    for prohibido in ("ApiSyncModal(", "api_sync_modal(", "btn_sync_api", "sincronizar_api"):
+        assert prohibido not in codigo, f"referencia API en UI: {prohibido}"
 
 
-def test_modal_no_reconstruye_secciones_en_show_step():
-    """_show_step alterna `visible`; no vacia content.controls."""
-    arbol = ast.parse(MODAL.read_text(encoding="utf-8"))
+def test_actualizar_hoy_delega_a_intranet():
+    """`_actualizar_hoy` usa intranet, no API."""
+    import ast
+
+    arbol = ast.parse(VIEW_PANELS.read_text(encoding="utf-8"))
     fn = next(
-        n for n in ast.walk(arbol) if isinstance(n, ast.FunctionDef) and n.name == "_show_step"
+        n for n in ast.walk(arbol) if isinstance(n, ast.FunctionDef) and n.name == "_actualizar_hoy"
     )
     texto = ast.dump(fn)
-    assert "clear" not in texto, "_show_step vuelve a vaciar content"
-    for sec in ("sec_login", "sec_freshness", "sec_sync", "sec_error"):
-        assert sec in texto, f"_show_step no alterna la visibilidad de {sec}"
+    assert "_iniciar_descarga" in texto, "_actualizar_hoy no delega a intranet"
+
+
+def test_actualizar_hoy_no_abre_modal():
+    """Delegacion real: con page sin API, llama a `_iniciar_descarga`."""
+    from types import SimpleNamespace
+
+    from src.ui.view_panels import _ViewPanels
+
+    v = _ViewPanels.__new__(_ViewPanels)
+    v.app = SimpleNamespace(page=SimpleNamespace())
+    llamado = {}
+
+    def fake_descarga(page):
+        llamado["page"] = page
+
+    v._iniciar_descarga = fake_descarga
+    v._actualizar_hoy(None)
+    assert llamado.get("page") is v.app.page
 
 
 def test_auth_result_distingue_transporte_de_credenciales():
-    """Un WinError 10061 no debe rotularse como 'credenciales rechazadas'."""
+    """El backend de auth sigue intacto (en cuarentena, no eliminado)."""
     from src.core.api_auth import AuthResult
 
     transporte = AuthResult(
@@ -184,9 +98,30 @@ def test_start_api_es_idempotente():
     texto = script.read_text(encoding="utf-8")
     # Buscar el comando real, no la palabra en un comentario.
     i_health = texto.find("/api/health")
-    i_pkill = texto.find('pkill -f "g360-ventas-api-linux"')
+    i_pkill = texto.find("pkill -f 'g360-ventas-api-lin[u]x'")
     assert i_health != -1, "start_api.sh perdio el chequeo de salud"
     assert 0 <= i_health < i_pkill, "el chequeo de salud debe ir antes del pkill"
+
+
+def test_start_api_no_se_mata_a_si_mismo():
+    """`pkill -f g360-ventas-api` mataba al shell que lo invocaba.
+
+    El patron tiene que llevar el truco `lin[u]x`: coincide con el binario real
+    pero no con la linea de comando que invoca el script (que si no, se mataria
+    a si mismo y el API nunca relanzaria).
+    """
+    script = Path(__file__).resolve().parents[2] / "g360-ventas-api" / "deploy" / "start_api.sh"
+    if not script.is_file():
+        import pytest
+
+        pytest.skip("repo g360-ventas-api no disponible")
+    texto = script.read_text(encoding="utf-8")
+    comandos = [
+        ln.strip() for ln in texto.splitlines() if "pkill" in ln and not ln.strip().startswith("#")
+    ]
+    assert comandos, "start_api.sh deberia tener un pkill"
+    for cmd in comandos:
+        assert "lin[u]x" in cmd, f"pkill sin el truco lin[u]x (se auto-mata): {cmd}"
 
 
 def test_start_api_se_desacopla():

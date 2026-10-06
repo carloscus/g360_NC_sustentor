@@ -3,13 +3,74 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from datetime import date
+from typing import Any, Optional
 
 import pandas as pd
 
 from src.core import ventas_db
 
 log = logging.getLogger(__name__)
+
+# Ventana de actividad por defecto para los listados (dropdowns y pickers).
+#
+# SUPERSEDED por el piso fijo: ver `ventas_db_config.actividad_desde`
+# (default 2021-01-01). Se conserva porque `actividad_anios` como parametro
+# explicito (int) sigue resolviendose por ventana movil para compatibilidad.
+# No usar para codigo nuevo: pasar el default (centinela) para el piso fijo,
+# o None explicito para toda la historia.
+ACTIVIDAD_ANIOS = 5
+
+
+def _piso_actividad_iso(actividad_anios: Optional[int]) -> Optional[str]:
+    """'YYYY-MM-DD' del primer día visible, o None si no hay filtro.
+
+    None (o 0) desactiva el piso: el listado vuelve a toda la historia.
+    """
+    if not actividad_anios:
+        return None
+    hoy = date.today()
+    total = hoy.year * 12 + (hoy.month - 1) - int(actividad_anios) * 12
+    return f"{total // 12}-{(total % 12) + 1:02d}-01"
+
+
+# Centinela para "el llamador no paso actividad_anios".
+#
+# Hace falta porque None ya significa otra cosa ("sin piso, toda la historia",
+# uso forense) y no puede significar tambien "usa el default". Sin el
+# centinela no hay forma de distinguir "quiero todo" de "quiero el default".
+_POR_DEFECTO: Any = object()
+
+
+def _resolver_piso(actividad_anios: Any) -> Optional[str]:
+    """Resuelve el piso de actividad a 'YYYY-MM-DD' o None (sin piso).
+
+    - No pasado (centinela) -> piso FIJO configurado (default 2021-01-01).
+    - None explicito -> sin piso, toda la historia (uso forense).
+    - str 'YYYY-MM-DD' -> piso explicito tal cual (preview de un año
+      aun no guardado en config; se valida forma, si no valida se ignora).
+    - int -> ventana movil de N años (compatibilidad; preferir el fijo).
+    """
+    from src.core.ventas_db_config import actividad_desde
+
+    if actividad_anios is _POR_DEFECTO:
+        return actividad_desde()
+    if isinstance(actividad_anios, str):
+        raw = actividad_anios.strip()
+        if (
+            len(raw) == 10
+            and raw[4] == "-"
+            and raw[7] == "-"
+            and raw[:4].isdigit()
+            and raw[5:7].isdigit()
+            and raw[8:10].isdigit()
+            and 1 <= int(raw[5:7]) <= 12
+            and 1 <= int(raw[8:10]) <= 31
+        ):
+            return raw
+        return None
+    return _piso_actividad_iso(actividad_anios)
+
 
 # Mapeo columna DB -> columna historial (identico al de historial_client.py)
 VENTAS_TO_HISTORIAL = {
@@ -441,8 +502,12 @@ class VentasDbClient:
         sql = f"SELECT {cols} FROM ventas"
         if where:
             sql += " WHERE " + " AND ".join(where)
+        # Se piden limit+1 filas a proposito: si vienen limit+1, hay MAS datos
+        # de los que se devuelven y el llamador esta viendo un conjunto
+        # truncado. Sin la fila extra, `len(df) == limit` es ambiguo (podria
+        # ser exactamente limit) y el truncado pasa en silencio. Ver abajo.
         sql += " ORDER BY fecha_orig DESC LIMIT ? OFFSET ?"
-        params.extend([int(limit), int(offset)])
+        params.extend([int(limit) + 1, int(offset)])
 
         conn = self._read_conn()
         try:
@@ -481,6 +546,29 @@ class VentasDbClient:
                         df["NC_ASOCIADAS"] = [[] for _ in range(len(df))]
                 else:
                     df["NC_ASOCIADAS"] = []
+                # Deteccion exacta de truncado (ver el LIMIT+1 de arriba). Si
+                # vinieron mas filas de las pedidas, se recorta y se marca: el
+                # llamador decide si paginar o avisar. Sin esto, un cliente con
+                # mas de `limit` filas perdia las viejas sin que nadie lo
+                # supiera (ORDER BY fecha_orig DESC = se pierden las viejas).
+                truncado = len(df) > int(limit)
+                if truncado:
+                    df = df.iloc[: int(limit)].copy()
+                    log.warning(
+                        "fetch_historial truncado: hay mas de %s filas "
+                        "(se devuelven las %s mas nuevas). Usar offset o "
+                        "fetch_historial_completo para el resto.",
+                        limit,
+                        limit,
+                    )
+                # attrs viaja con el DataFrame sin cambiar su forma: los
+                # llamadores que concatenan lo pierden, asi que el helper
+                # paginado lo lee antes de concatenar.
+                try:
+                    df.attrs["truncado_por_limite"] = bool(truncado)
+                    df.attrs["limite_aplicado"] = int(limit)
+                except Exception:
+                    pass
                 return df
             finally:
                 if own:
@@ -488,6 +576,58 @@ class VentasDbClient:
         except Exception:
             log.exception("fetch_historial fallo")
             raise
+
+    def fetch_historial_completo(self, *, chunk: int = 50000, **filtros) -> pd.DataFrame:
+        """Todo el historial que matchea, sin truncar.
+
+        `fetch_historial` corta en `limit` filas (default 50k) y marca
+        `df.attrs["truncado_por_limite"]`. Para un sustento que necesita
+        profundidad historica (NC que referencia facturas viejas), ese corte
+        pierde datos. Este helper pagina con offset hasta agotar y concatena.
+
+        Los filtros son los mismos de `fetch_historial` (id_cliente,
+        fecha_desde, etc.). `limit`/`offset` no se aceptan aca: los maneja el
+        paginado interno.
+        """
+        if "limit" in filtros or "offset" in filtros:
+            raise ValueError(
+                "fetch_historial_completo maneja limit/offset solo; "
+                "usar fetch_historial para una pagina"
+            )
+        paginas: list = []
+        offset = 0
+        while True:
+            df = self.fetch_historial(limit=chunk, offset=offset, **filtros)
+            if df is None or df.empty:
+                break
+            try:
+                truncado = bool(df.attrs.get("truncado_por_limite", False))
+            except Exception:
+                truncado = False
+            paginas.append(df)
+            # La marca es exacta (se pidio limit+1 interno). Si no hay marca
+            # pero la pagina vino llena, la proxima iteracion trae vacio y
+            # corta; no se pierde nada.
+            if not truncado:
+                break
+            offset += chunk
+        if not paginas:
+            return pd.DataFrame()
+        if len(paginas) == 1:
+            out = paginas[0]
+        else:
+            out = pd.concat(paginas, ignore_index=True)
+            log.info(
+                "fetch_historial_completo: %s filas en %s paginas",
+                len(out),
+                len(paginas),
+            )
+        try:
+            out.attrs["truncado_por_limite"] = False
+            out.attrs["paginas"] = len(paginas)
+        except Exception:
+            pass
+        return out
 
     def distribucion_por_tienda(
         self,
@@ -1962,6 +2102,7 @@ class VentasDbClient:
         self,
         min_docs: int = 0,
         solo_lineas_activas: bool = True,
+        actividad_anios: Any = _POR_DEFECTO,
     ) -> list[dict]:
         """Vendedores con VENTAS válidas (facturas/boletas de líneas activas).
 
@@ -1972,6 +2113,10 @@ class VentasDbClient:
         '177' salen como un solo '177' con docs sumados).
 
         min_docs: umbral mínimo de documentos distintos (F*/B*) por vendedor.
+        actividad_anios: piso de actividad. No pasado = piso FIJO configurado
+        (default 2021-01-01, ver `ventas_db_config.actividad_desde`). None
+        explicito = sin piso, toda la historia (uso forense). Un int = ventana
+        movil de N años hacia atras (compatibilidad; preferir el fijo).
         """
         from src.core.xls_processor import vendedor_corto
 
@@ -1983,6 +2128,36 @@ class VentasDbClient:
             params: list = []
             if solo_lineas_activas:
                 where_parts.append(ventas_db.active_line_sql("v.id_linea"))
+            piso = _resolver_piso(actividad_anios)
+            if piso:
+                # Solo fechas ISO válidas: el resto no prueba recencia y
+                # ensuciaría la lista con vendedores de hace 10+ años.
+                where_parts.append("(v.fecha_orig >= ? AND v.fecha_orig LIKE '____-__-__')")
+                params.append(piso)
+            if solo_lineas_activas and self._agg_vendedores_ready(conn):
+                # Fast-path: el resumen (27K filas) en vez del detalle (2.8M).
+                # n_docs ya es COUNT(DISTINCT doc) por (cliente, vendedor, mes)
+                # de líneas activas, así que SUM() equivale al HAVING original.
+                awhere = ["id_vendedor IS NOT NULL", "id_vendedor != ''"]
+                aparams: list = []
+                if piso:
+                    awhere.append("mes >= ?")
+                    aparams.append(piso[:7])
+                asql = (
+                    "SELECT UPPER(SUBSTR(id_vendedor,-3)) AS vid, MAX(nom_vendedor), "
+                    "SUM(n_docs) AS docs FROM agg_cliente_mes WHERE "
+                    + " AND ".join(awhere)
+                    + " GROUP BY vid"
+                )
+                if min_docs > 0:
+                    asql += " HAVING docs >= ?"
+                    aparams.append(int(min_docs))
+                asql += " ORDER BY 2"
+                rows = conn.execute(asql, aparams).fetchall()
+                return [
+                    {"id": vid, "codigo": vendedor_corto(vid), "nombre": (nom or vid).strip()}
+                    for vid, nom, _docs in rows
+                ]
             sql = (
                 "SELECT UPPER(SUBSTR(v.id_vendedor,-3)) AS vid,"
                 " MAX(v.nom_vendedor) FROM ventas v "
@@ -2102,6 +2277,20 @@ class VentasDbClient:
             if own:
                 conn.close()
 
+    def _agg_vendedores_ready(self, conn) -> bool:
+        """agg con nom_vendedor poblado -> apto para el dropdown de vendedores."""
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(agg_cliente_mes)").fetchall()}
+            if "nom_vendedor" not in cols:
+                return False
+            n = conn.execute(
+                "SELECT COUNT(*) FROM agg_cliente_mes "
+                "WHERE nom_vendedor IS NOT NULL AND nom_vendedor != ''"
+            ).fetchone()[0]
+            return n > 0
+        except Exception:
+            return False
+
     def _agg_cliente_mes_ready(self, conn) -> bool:
         """agg_cliente_mes existe y tiene filas -> apto como fast-path."""
         try:
@@ -2118,6 +2307,7 @@ class VentasDbClient:
         solo_lineas_activas: bool = True,
         search: Optional[str] = None,
         offset: int = 0,
+        actividad_anios: Any = _POR_DEFECTO,
     ) -> list[dict]:
         """Clientes con VENTAS (facturas/boletas de lineas activas) en el rango, por actividad.
 
@@ -2125,6 +2315,13 @@ class VentasDbClient:
         lineas (mismo criterio que fetch_historial): un cliente que solo tiene
         NC/NDB o productos fuera del allowlist NO aparece (daria "Sin
         resultados"). Orden: facturas/boletas distintas DESC.
+
+        actividad_anios: piso de actividad. No pasado = piso FIJO configurado
+        (default 2021-01-01). None explicito = sin piso (uso forense). Un int =
+        ventana movil de N años (compatibilidad). Solo rellena el
+        `fecha_desde` ausente: los rangos explícitos se honran tal cual
+        (forense) y la búsqueda directa (`search`) no se toca, para que un
+        cliente puntual se encuentre igual aunque esté inactivo.
 
         Fast-path: si agg_cliente_mes esta poblado, consulta ese resumen
         (cliente x vendedor x mes, ~27K filas) en vez de escanear 1.5M ->
@@ -2141,6 +2338,12 @@ class VentasDbClient:
             use_agg = solo_lineas_activas and self._agg_cliente_mes_ready(conn)
             q = (search or "").strip()
             like = f"%{q}%"
+            if not q and not fecha_desde:
+                # Listado por defecto: solo actividad desde el piso fijo. La
+                # búsqueda directa y los rangos explícitos quedan intactos.
+                piso = _resolver_piso(actividad_anios)
+                if piso:
+                    fecha_desde = piso
             # Ranking as-you-type: lo que calza exacto o por prefijo
             # (en forma corta o canónica) sube primero; el resto por docs.
             # Así tipear '68414' (o '68') trae su cliente al tope sin

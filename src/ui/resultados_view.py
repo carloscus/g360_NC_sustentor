@@ -8,6 +8,23 @@ import re
 import flet as ft
 import pandas as pd
 from src.core.g360_theme import G360Theme
+from src.core.fechas import fecha_ui
+
+# Una columna se trata como fecha si su nombre lo dice. Cubre las que agrega el
+# ERP y las que arma la app, para que ningun camino muestre un ISO crudo.
+_RE_COL_FECHA = re.compile(r"FECHA|_FEC\b|^FEC_", re.IGNORECASE)
+
+
+def _es_col_fecha(col: str) -> bool:
+    return bool(_RE_COL_FECHA.search(str(col)))
+
+
+def _pd_isna(val) -> bool:
+    try:
+        return bool(pd.isna(val))
+    except (TypeError, ValueError):
+        return False
+
 
 # Precios unitarios: 5 decimales en toda la app (acuerdo comercial).
 # Montos/subtotales siguen a 2 decimales.
@@ -441,6 +458,10 @@ def _build_standard_table(
                     texto = f"{val:.5f}" if abs(val) < 10000 else f"{val:,.5f}"
                 else:
                     texto = f"{val:.2f}" if abs(val) < 10000 else f"{val:,.2f}"
+            elif _es_col_fecha(col) and not _pd_isna(val):
+                # Una columna de fecha nunca se muestra cruda: la DB y la API
+                # entregan ISO y `str(val)` la delataria en la pantalla.
+                texto = fecha_ui(val) or str(val)[:25]
             else:
                 texto = str(val)[:25]
 
@@ -694,7 +715,11 @@ def _build_verification_panel(resultado, tipo_actual, alertas, accent_color, suc
                             ),
                             padding=12,
                             expand=True,
-                            border_radius=10,
+                            # RADIUS_CHIP es el radio declarado para tiles de
+                            # metrica (ver G360Theme.kpi_tile). Era un literal
+                            # 10 suelto; con el token, cambiar el radio de los
+                            # tiles es un solo lugar.
+                            border_radius=G360Theme.RADIUS_CHIP,
                             bgcolor=G360Theme.surface_variant_color(),
                         )
                         for lbl, val, icon in items

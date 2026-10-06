@@ -14,8 +14,10 @@ Estado propio e independiente del caso de NC:
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
+import time
 from datetime import datetime
 
 import flet as ft
@@ -31,6 +33,8 @@ from src.ui.reporte_compras import (
     _paquete_export,
     nombre_archivo_compras,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ReportePanel:
@@ -144,10 +148,10 @@ class ReportePanel:
             "Exportar Excel",
             icon=ft.Icons.GRID_ON,
             height=control_factory.HEIGHT,
-            style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_800, color="white"),
+            style=ft.ButtonStyle(bgcolor=accent, color="white"),
             on_click=self._exportar,
         )
-        self.status = ft.Text("", size=10, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.status = ft.Text("", size=10, color=muted)
         self.resultados = ft.Column([], spacing=6, scroll=ft.ScrollMode.AUTO, expand=True)
 
         # Píldora icono+texto (un chevron solo no se identifica como botón).
@@ -349,13 +353,30 @@ class ReportePanel:
         except Exception:
             pass
 
-    def expandir(self, cliente=None, vendedor=None, rango=None):
-        """Abre la card con prefill (cliente (cid, nom), vendedor, (desde, hasta))."""
+    def expandir(self, cliente=None, vendedor=None, rango=None, clientes=None):
+        """Abre la card con prefill y genera.
+
+        `cliente` es un (cid, nombre) individual; `clientes` es la lista completa
+        que usa el botón "Reporte de compras" de la card Búsqueda, que ya viene
+        con multi-selección. `expandir` los combina: la card nunca reemplaza una
+        selección existente, la suma.
+        """
+        seleccionados = []
         if cliente:
-            cid, nom = cliente
+            seleccionados.append(cliente)
+        seleccionados += [c for c in (clientes or []) if c]
+        agregados = 0
+        for cid, nom in seleccionados:
             if not any(c[0] == cid for c in self.state["clientes"]):
                 self.state["clientes"].append((cid, nom or cid))
+                agregados += 1
+        if agregados:
             self._pintar_cli_chips()
+            logger.info(
+                "reporte.prefill: %d cliente(s) desde otra seccion (%d ya estaban)",
+                len(seleccionados),
+                agregados,
+            )
         if vendedor:
             self.state["vendedor"] = vendedor
             self.vend_dd.value = vendedor
@@ -528,7 +549,8 @@ class ReportePanel:
 
             cli = VentasDbClient()
             datos: dict = {}
-            error = None
+            fallos: list = []
+            t0 = time.perf_counter()
             for cid, _nom in clientes:
                 try:
                     datos[cid] = cli.fetch_compras_cliente(
@@ -539,23 +561,34 @@ class ReportePanel:
                         solo_lineas_activas=False,
                     )
                 except Exception as ex:
+                    # Un cliente que falla no puede arrastrar a los otros: con
+                    # multi-selección se perdían N-1 previews que sí funcionaban.
+                    logger.exception("reporte.preview fallo cid=%s", cid)
                     datos[cid] = None
-                    error = str(ex)
+                    fallos.append(f"{_c_visible(cid)}: {ex}")
             self.state["datos"] = datos
+            self.state["fallos"] = fallos
+            # Antes de liberar los botones: si el log va despues, un lector que
+            # espera al fin de la tarea puede ver la consulta "sin rastro".
+            logger.info(
+                "reporte.preview %d cliente(s) fd=%s fh=%s nc=%s fallos=%d (%.1fs)",
+                len(clientes),
+                fd,
+                fh,
+                self.state["incluir_nc"],
+                len(fallos),
+                time.perf_counter() - t0,
+            )
             self._set_busy(False)
-            if error:
-                self.status.value = f"Error: {error}"
-                self.status.color = self.app.G360_ERROR
-                self._update()
-                return
-            self._render_resultados(fd, fh)
+            self._render_resultados(fd, fh, fallos)
 
         threading.Thread(target=task, daemon=True).start()
 
-    def _render_resultados(self, fd, fh):
+    def _render_resultados(self, fd, fh, fallos=None):
         self.resultados.controls.clear()
         datos = self.state.get("datos") or {}
         clientes = self.state["clientes"]
+        fallos = list(fallos or self.state.get("fallos") or [])
         periodo = (
             f"{fecha_ui(self.state['desde']) if self.state['desde'] else 'inicio'}"
             f" → {fecha_ui(self.state['hasta']) if self.state['hasta'] else 'hoy'}"
@@ -563,12 +596,16 @@ class ReportePanel:
         tot_soles = 0.0
         tot_cant = 0.0
         n_ok = 0
+        caidos = {linea.split(":", 1)[0] for linea in fallos}
         for cid, nombre in clientes:
+            visible = _c_visible(cid)
+            if visible in caidos:
+                continue  # se reporta al final, como error (no como "sin compras")
             df = datos.get(cid)
             if df is None or df.empty:
                 self.resultados.controls.append(
                     ft.Text(
-                        f"{nombre or cid} ({_c_visible(cid)}) — sin compras en el rango",
+                        f"{nombre or cid} ({visible}) — sin compras en el rango",
                         size=12,
                         color=G360Theme.text_muted_color(),
                     )
@@ -592,17 +629,36 @@ class ReportePanel:
                 ft.Row([_construir_tabla(df)], scroll=ft.ScrollMode.AUTO, expand=False)
             )
 
+        # Los que no se pudieron consultar van al final, marcados como error y
+        # no como "sin compras": son cosas distintas.
+        for linea in fallos:
+            self.resultados.controls.append(
+                ft.Text(
+                    f"{linea} — no se pudo consultar",
+                    size=12,
+                    color=self.app.G360_ERROR,
+                )
+            )
+
         n = len(clientes)
         if n_ok:
             self.status.value = (
                 f"{n} cliente(s) · {n_ok} con compras · "
                 f"neto S/ {tot_soles:,.2f} · {tot_cant:,.0f} u"
             )
-            self.status.color = self.app.G360_SUCCESS
+            if fallos:
+                self.status.value += f" · {len(fallos)} con error"
+                self.status.color = self.app.G360_WARNING
+            else:
+                self.status.color = self.app.G360_SUCCESS
             self._resumen.value = f"{n} cliente(s) · {periodo} · S/ {tot_soles:,.2f}"
+        elif fallos:
+            self.status.value = f"No se pudo consultar {len(fallos)} cliente(s)"
+            self.status.color = self.app.G360_ERROR
+            self._resumen.value = ""
         else:
             self.status.value = "Sin compras en el rango"
-            self.status.color = ft.Colors.ON_SURFACE_VARIANT
+            self.status.color = G360Theme.text_muted_color()
             self._resumen.value = ""
         self._update()
 
@@ -639,55 +695,108 @@ class ReportePanel:
             out_dir = app._get_desktop_path()
             out_dir.mkdir(exist_ok=True)
             generados = 0
+            fallidos: list = []
             ultimo = None
+            t_ini = time.perf_counter()
+            logger.info(
+                "reporte.export inicio: %d cliente(s) hojas=%s nc=%s rango=%s..%s -> %s",
+                len(clientes),
+                "+".join(sorted(hojas)),
+                self.state["incluir_nc"],
+                fd,
+                fh,
+                out_dir,
+            )
             try:
                 for cid_raw, nombre in clientes:
-                    bundle = _paquete_export(
-                        cli,
-                        cid_raw,
-                        fd,
-                        fh,
-                        self.state["incluir_nc"],
-                        hojas | {"resumen"},
-                        solo_lineas_activas=False,
-                    )
-                    ruc_info = cli.fetch_client_by_id(cid_raw) or {}
-                    ruc = ruc_info.get("doc") or ""
-                    # Si el nombre es solo el CID (sin ceros), reemplazar por el real.
-                    if nombre.isdigit() or nombre == _c_visible(cid_raw):
-                        nombre = ruc_info.get("nombre") or nombre
-                    # Resolver nombre del vendedor si solo hay ID.
-                    vend = self.state["vendedor"] or ""
-                    if vend:
-                        vinfo = cli.fetch_vendedor_by_id(vend)
-                        if vinfo:
-                            vend = vinfo.get("nombre") or vend
-                    cid = _c_visible(cid_raw)
-                    out_path = resolve_output_path(out_dir / nombre_archivo_compras(nombre, cid))
-                    _escribir_xlsx(
-                        out_path,
-                        cid,
-                        nombre,
-                        hojas=hojas,
-                        corte_hasta=fh or "",
-                        incluir_nc=self.state["incluir_nc"],
-                        rango_desde=fd or "",
-                        rango_hasta=fh or "",
-                        ruc=ruc,
-                        vendedor=vend,
-                        hojas_incluidas=hojas,
-                        total_hojas=len(self.TODAS),
-                        **bundle,
-                    )
+                    t0 = time.perf_counter()
+                    try:
+                        bundle = _paquete_export(
+                            cli,
+                            cid_raw,
+                            fd,
+                            fh,
+                            self.state["incluir_nc"],
+                            hojas | {"resumen"},
+                            # INTENCIONAL: el reporte de compras NO filtra por
+                            # allowlist (incluye todas las lineas). El sustento
+                            # (Busqueda) usa el default True. Mismo cliente y
+                            # rango dan conjuntos distintos a proposito: cada
+                            # seccion tiene sus reglas. No cambiar sin avisar.
+                            solo_lineas_activas=False,
+                            corte_hasta=fh,
+                        )
+                        ruc_info = cli.fetch_client_by_id(cid_raw) or {}
+                        ruc = ruc_info.get("doc") or ""
+                        # Si el nombre es solo el CID (sin ceros), reemplazar por el real.
+                        if nombre.isdigit() or nombre == _c_visible(cid_raw):
+                            nombre = ruc_info.get("nombre") or nombre
+                        # Resolver nombre del vendedor si solo hay ID.
+                        vend = self.state["vendedor"] or ""
+                        if vend:
+                            vinfo = cli.fetch_vendedor_by_id(vend)
+                            if vinfo:
+                                vend = vinfo.get("nombre") or vend
+                        cid = _c_visible(cid_raw)
+                        out_path = resolve_output_path(
+                            out_dir / nombre_archivo_compras(nombre, cid)
+                        )
+                        _escribir_xlsx(
+                            out_path,
+                            cid,
+                            nombre,
+                            hojas=hojas,
+                            corte_hasta=fh or "",
+                            incluir_nc=self.state["incluir_nc"],
+                            rango_desde=fd or "",
+                            rango_hasta=fh or "",
+                            ruc=ruc,
+                            vendedor=vend,
+                            hojas_incluidas=hojas,
+                            total_hojas=len(self.TODAS),
+                            **bundle,
+                        )
+                    except Exception as ex:
+                        # El fallo se acota al cliente: con multi-selección, un
+                        # Excel trabado (archivo abierto, disco lleno) acababa el
+                        # lote entero y los demas se quedaban sin nada.
+                        logger.exception("reporte.export fallo cid=%s", _c_visible(cid_raw))
+                        fallidos.append(f"{_c_visible(cid_raw)}: {ex}")
+                        continue
                     generados += 1
                     ultimo = out_path
-                if generados == 1:
+                    logger.info(
+                        "reporte.export OK cid=%s -> %s (%.1fs)",
+                        cid,
+                        out_path.name,
+                        time.perf_counter() - t0,
+                    )
+                logger.info(
+                    "reporte.export fin: %d Excel en %.1fs (%d con error)",
+                    generados,
+                    time.perf_counter() - t_ini,
+                    len(fallidos),
+                )
+                self.state["fallos_export"] = fallidos
+                if fallidos:
+                    app.show_snackbar(
+                        f"⚠️ {generados} Excel generados, {len(fallidos)} con error: {fallidos[0]}",
+                        app.G360_WARNING,
+                    )
+                elif generados == 1:
                     app.show_snackbar(f"✅ Excel: {ultimo.name}", app.G360_SUCCESS)
                 else:
                     app.show_snackbar(f"✅ {generados} Excel generados", app.G360_SUCCESS)
                 if os.name == "nt":
                     os.startfile(str(out_dir))
             except Exception as ex:
+                # Solo llega algo que no sea el fallo de un cliente (p.ej. la
+                # carpeta de salida): el try interno ya absorbe esos.
+                logger.exception(
+                    "reporte.export fallo tras %d Excel (%.1fs)",
+                    generados,
+                    time.perf_counter() - t_ini,
+                )
                 from src.ui.mensajes import mensaje
 
                 app.show_snackbar(mensaje(ex, "generar el reporte"), app.G360_ERROR)
