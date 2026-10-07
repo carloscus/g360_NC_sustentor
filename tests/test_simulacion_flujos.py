@@ -983,10 +983,13 @@ class TestSeparacionPorCliente:
         assert por_carpeta == {"56101": ALFA[2], "5610": BETA[2]}, por_carpeta
         assert set(_celda_calculo(d) for d in exps) == {ALFA[2], BETA[2]}
 
-    def test_individual_el_historico_se_acota_a_su_documento(
+    def test_individual_el_historico_conserva_el_periodo_del_cliente(
         self, vista_2c, spy_threads, monkeypatch
     ):
-        """El historico del 101 listaba las 2 facturas de ALFA: no es su evidencia."""
+        """El Histórico es el del cliente en el período completo (ya allowlisted):
+        igual en individual que en consolidado. Los documentos reclamados del
+        expediente se resaltan en el render, no filtran filas.
+        """
         monkeypatch.setattr("os.startfile", lambda *_: None)
         vista_2c.modalidad_actual = "individual"
         exps = _generar(vista_2c, spy_threads)
@@ -996,21 +999,17 @@ class TestSeparacionPorCliente:
         fac_102 = next(d for d in exps if "-102-" in d.name)
         fac_201 = next(d for d in exps if "-201-" in d.name)
 
-        # 101: su factura (896) menos la NC que se le aplica (-50)
-        assert (
-            res[fac_101.name]
-            == "2 registro(s) \u00b7 1 factura(s) \u00b7 1 nota(s) \u00b7 Total S/ 846.00"
+        # 101 y 102 (ALFA): las 2 facturas del período + la NC de 101
+        esperado_alfa = (
+            "3 registro(s) \u00b7 2 factura(s) \u00b7 1 nota(s) \u00b7 Total S/ 1,294.00"
         )
-        # 102: su factura sola, sin nota
-        assert (
-            res[fac_102.name]
-            == "1 registro(s) \u00b7 1 factura(s) \u00b7 0 nota(s) \u00b7 Total S/ 448.00"
-        )
-        # 201: la de BETA, no la de ALFA
+        assert res[fac_101.name] == esperado_alfa, res[fac_101.name]
+        assert res[fac_102.name] == esperado_alfa, res[fac_102.name]
+        # 201 (BETA): su factura + su NC, sin las de ALFA
         assert (
             res[fac_201.name]
             == "2 registro(s) \u00b7 1 factura(s) \u00b7 1 nota(s) \u00b7 Total S/ 194.00"
-        )
+        ), res[fac_201.name]
 
     def test_consolidado_una_carpeta_por_cliente_con_su_id(
         self, vista_2c, spy_threads, monkeypatch

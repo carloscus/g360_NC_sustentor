@@ -958,7 +958,12 @@ class _ViewHandlers:
 
         if historial_visible is None or "NC_ASOCIADAS" not in historial_visible.columns:
             return
-        hay_notas = bool(historial_visible["TIPO_CLASE"].astype(str).str.lower() != "factura").any()
+        # bool(...) iba sobre la Serie, no sobre el .any(): pandas levanta
+        # "truth value of a Series is ambiguous" y el error terminaba como
+        # snackbar genérico al ejecutar.
+        hay_notas = bool(
+            (historial_visible["TIPO_CLASE"].astype(str).str.lower() != "factura").any()
+        )
         if not hay_notas:
             return
 
@@ -1292,7 +1297,11 @@ class _ViewHandlers:
             self._actualizar_tab_resultado(cliente_id)
             return
 
-        # Single client path
+        # Single client path: el set global de controles (clave None).
+        activar = getattr(self, "_activar_controles_resultado", None)
+        if activar is not None:
+            activar(None)
+
         vista = self._resultado_efectivo()
         if vista is None:
             self.app.show_snackbar(
@@ -1313,7 +1322,7 @@ class _ViewHandlers:
         self._renderizar_panel_compartido(result)
         self.resultados_container.content = self._result_summary
         self.resultados_container.visible = True
-        self.btn_expediente.disabled = False
+        self._set_btn_expediente(True)
 
     def _renderizar_panel_compartido(self, result):
         """Renderiza las piezas comunes entre single-client y multi-client tabs."""
@@ -1396,10 +1405,18 @@ class _ViewHandlers:
 
         self.resultados_container.content = self._result_tabs_container
         self.resultados_container.visible = True
-        self.btn_expediente.disabled = False
 
+        # Se pintan TODOS los tabs, no solo el primero: si no, el segundo
+        # cliente se quedaba en el placeholder "Cargando..." hasta que el
+        # usuario lo abria, y se leia como que la vista previa no existia.
+        # Los datos ya estan en memoria, asi que no cuesta nada.
+        for cid in clientes:
+            self._actualizar_tab_resultado(cid)
         if clientes:
-            self._actualizar_tab_resultado(clientes[0])
+            # Los handlers quedan apuntando al tab visible.
+            self._activar_controles_resultado(clientes[0])
+            self._result_tabs.selected_index = 0
+        self._set_btn_expediente(True)
 
     def _construir_badge_clientes(self, clientes):
         """Badge que muestra la cantidad de clientes en el resultado."""
@@ -1465,6 +1482,13 @@ class _ViewHandlers:
         vista = self._obtener_vista_cliente(cliente_id)
         if vista is None:
             return
+
+        # Cada tab se arma con sus propios controles: compartir la tabla hacia
+        # que los tabs se pisen entre si (un control de Flet no puede estar en
+        # dos padres) y solo se viera el ultimo cliente pintado.
+        activar = getattr(self, "_activar_controles_resultado", None)
+        if activar is not None:
+            activar(cliente_id)
 
         from src.ui.resultados_view import render_resultado
 
@@ -1558,12 +1582,16 @@ class _ViewHandlers:
 
         if not hasattr(self, "_result_tabs") or not self._result_tabs:
             return
+        # `ft.Tabs` expone sus paginas en `.tabs`, no en `.controls`: con
+        # `.controls` esto reventaba con AttributeError y el tab se quedaba
+        # en el placeholder "Cargando..." para siempre (solo con 2+ clientes,
+        # porque con uno se usa el panel unico).
         idx = getattr(self, "_resultado_clientes_order", []).index(cliente_id)
         tab_content = ft.Container(
             content=self._result_summary,
             padding=ft.padding.only(top=8),
         )
-        self._result_tabs.controls[idx].content = tab_content
+        self._result_tabs.tabs[idx].content = tab_content
         try:
             if self.app.page:
                 self.app.page.update()

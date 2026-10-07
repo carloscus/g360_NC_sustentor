@@ -502,6 +502,11 @@ def adoptar_lineas(allowlist: list[str]) -> dict:
     cfg["allowed_lines"] = nuevas
     save_app_config(cfg)
     reset_allowed_lines_cache()
+    # El allowlist queda horneado en agg_cliente_mes: sin rebuild el
+    # fast-path del picker devolveria el allowlist viejo.
+    from src.core import ventas_db as _vdb_mod
+
+    _vdb_mod.rebuild_agg_async()
     return {"antes": antes, "despues": list(allowed_lines())}
 
 

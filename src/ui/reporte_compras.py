@@ -88,14 +88,6 @@ def _fecha_corta(fecha) -> str:
     return fecha_ui(fecha) or str(fecha or "").strip()[:10]
 
 
-def _mes_display(mm: str, anio: str) -> str:
-    """Mes × año en formato display: 'MM-AAAA' (conducido de _fecha_corta)."""
-    try:
-        return f"{int(mm):02d}-{anio}"
-    except Exception:
-        return mm
-
-
 def _fecha_obj(fecha):
     """Fecha real para Excel (ordena y filtra como fecha); None si no hay.
 
@@ -494,10 +486,14 @@ def _estilos():
 def _x_bloque(ws, matriz, unidad_fmt, start_row, st, subtitulo=None):
     """Escribe una matriz (encabezado + filas) desde start_row.
 
+    Oculta la grilla: las hojas del paquete se leen como reporte, no como
+    hoja de cálculo cruda (las tablas ya traen borde y encabezado).
+
     Retorna (fila_fin, fila_encabezado) para congelar/filtrar después.
     """
     from openpyxl.styles import Alignment, Font
 
+    ws.sheet_view.showGridLines = False
     r = start_row
     if subtitulo:
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(matriz[0]))
@@ -608,8 +604,8 @@ def _x_consolidado(wb, df_lineas, df_skus, st, nombre, cid, fd="", fh=""):
                 "NDB S/",
                 "Neto S/",
                 "Unid.",
-                "N° docs",
-                "% neto",
+                "N° Docs",
+                "% Neto",
             ]
         ]
         tot_neto = round(float(df_lineas["SOLES"].sum()), 2)
@@ -653,7 +649,7 @@ def _x_consolidado(wb, df_lineas, df_skus, st, nombre, cid, fd="", fh=""):
         r += 1
     if df_skus is not None and not df_skus.empty:
         tot_s = round(float(df_skus["SOLES"].sum()), 2)
-        mat = [["SKU", "Artículo", "Línea", "Neto S/", "Unid.", "% neto"]]
+        mat = [["SKU", "Artículo", "Línea", "Neto S/", "Unid.", "% Neto"]]
         top = df_skus.head(_TOP_SKUS)
         resto = df_skus.iloc[_TOP_SKUS:]
 
@@ -705,7 +701,7 @@ def _x_consolidado(wb, df_lineas, df_skus, st, nombre, cid, fd="", fh=""):
         r + 1,
         ancho_nota,
         "Neto = Bruta + Dev. + Desc. + NDB (fórmula por fila). "
-        "% neto calculado al exportar. Actualizar = re-exportar el "
+        "% Neto calculado al exportar. Actualizar = re-exportar el "
         "reporte. Importes en Soles sin IGV.",
     )
 
@@ -929,7 +925,7 @@ def _cmp_pivot(df, anios, parciales):
 
     def _mes_lab(mm: str) -> str:
         try:
-            lab = _mes_display(mm, anio_ref)
+            lab = _mes_label(f"{anio_ref}-{mm}")
         except Exception:
             return mm
         return f"{lab} (parcial)" if mm in parciales else lab
@@ -939,7 +935,7 @@ def _cmp_pivot(df, anios, parciales):
         header += [f"Unid {anio}", f"Soles {anio}"]
         if i < n - 1:
             par = anios[i + 1][2:]
-            header += [f"dif {anio[2:]}-{par}", f"% {anio[2:]}-{par}"]
+            header += [f"Dif {anio[2:]}-{par}", f"% {anio[2:]}-{par}"]
     header.append("Obs.")
     header.append("Tend. Soles")
     header.append("Tend. Precio")
@@ -1321,7 +1317,7 @@ def _x_analisis_sucursales(wb, df_pareto, df_linea_mes, df_sku_mes):
             ("NDB_S", "Débitos S/"),
             ("SOLES", "Neto S/"),
             ("CANTIDAD", "Unidades"),
-            ("N_DOCS", "N° docs"),
+            ("N_DOCS", "N° Docs"),
             ("PCT_BRUTA", "% Bruta"),
             ("PCT_ACUMULADO", "% Acumulado"),
         ],
@@ -1361,8 +1357,8 @@ def _x_analisis_sucursales(wb, df_pareto, df_linea_mes, df_sku_mes):
             ("NDB_S", "Débitos S/"),
             ("SOLES", "Neto S/"),
             ("CANTIDAD", "Unidades"),
-            ("N_DOCS", "N° docs"),
-            ("N_SKUS", "SKU distintos"),
+            ("N_DOCS", "N° Docs"),
+            ("N_SKUS", "SKU Distintos"),
         ],
         {
             "A": 12,
@@ -1401,7 +1397,7 @@ def _x_analisis_sucursales(wb, df_pareto, df_linea_mes, df_sku_mes):
             ("NDB_S", "Débitos S/"),
             ("SOLES", "Neto S/"),
             ("CANTIDAD", "Unidades"),
-            ("N_DOCS", "N° docs"),
+            ("N_DOCS", "N° Docs"),
         ],
         {
             "A": 12,
@@ -1617,18 +1613,18 @@ def _matriz_mensual(df_hist, corte, r0, rlast, rtot):
 
     header = [
         "Mes",
-        "Venta bruta",
+        "Venta Bruta",
         "Dev. S/",
         "Desc. S/",
         "NDB S/",
-        "Venta neta",
-        "U. fact.",
-        "U. dev.",
-        "U. netas",
-        "% dev.",
+        "Venta Neta",
+        "U. Fact.",
+        "U. Dev.",
+        "U. Netas",
+        "% Dev.",
         "Facturas",
         "NC",
-        "NDB docs",
+        "NDB Docs",
         "SKUs",
         "Ticket",
         "Estado",
@@ -2045,7 +2041,7 @@ def _x_facturas(wb, df_det, df_dev, rango_ajustes, mapa_nc, st, nombre, cid):
             "Ajuste/NC",
             "Total Neto",
             "Costo Unit. Neto",
-            "NC asociadas",
+            "NC Asociadas",
         ]
     ]
     for _, d in df_det.iterrows():
@@ -2220,9 +2216,9 @@ def _x_ajustes_huerfanas(ws, df_huerf, st, r):
     mat = [
         [
             "NC",
-            "F. doc",
+            "F. Doc.",
             "Motivo",
-            "Factura ref.",
+            "Factura Ref.",
             "SKU",
             "Artículo",
             "Cant.",
@@ -2277,21 +2273,21 @@ def _x_ajustes_detalle(ws, df_dev, st, r):
     r0, rlast = r_det_hdr + 1, r_det_hdr + len(df_dev)
     cab = [
         "Factura",
-        "F. fact.",
+        "F. Fact.",
         "SKU",
         "Artículo",
-        "Cant. fact.",
-        "S/ fact.",
+        "Cant. Fact.",
+        "S/ Fact.",
         "NC",
-        "F. doc",
+        "F. Doc.",
         "Motivo",
         "Cant.",
         "Base FAE",
-        "P.U. fact.",
+        "P.U. Fact.",
         "P.U. NC",
         "Cobertura",
-        "Afecta precio",
-        "P.U. neto",
+        "Afecta Precio",
+        "P.U. Neto",
         "S/ NC",
         "Saldo",
         "Obs.",

@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from src.core import ventas_db
+from src.core import ventas_db_config
 from src.core.ventas_db_client import VentasDbClient
 
 
@@ -862,6 +863,145 @@ class TestCliente:
             """Los anclados no pasan por el listado: el by-id no filtra."""
             c = VentasDbClient().fetch_client_by_id("00000002")
             assert c is not None and c["nombre"] == "CLIENTE VIEJO"
+
+    class TestClienteSoloNotas:
+        """Cliente con SOLO NC/NDB en el periodo: aparece en el listado y su reporte funciona."""
+
+        def _fila_nc(self, cid, nom, nro, soles, fecha="2026-09-05", tpo="NCR"):
+            from src.core.xls_processor import derivar_campos
+
+            d = dict(
+                id_articulo="014850",
+                original_sku="014850",
+                nom_articulo="PELOTA",
+                id_linea="0101",
+                nom_linea="GASEOSAS",
+                id_grupo="01",
+                nom_grupo="G",
+                id_tipo="01",
+                nom_tipo="T",
+                id_familia="01",
+                nom_familia="F",
+                id_cliente=cid,
+                doc_cliente="20000000002",
+                nom_cliente=nom,
+                tpo_doc=tpo,
+                serie_doc="N204",
+                nro_doc=nro,
+                referencia="",
+                moneda="Soles",
+                cantidad=0.0,
+                cantidad_fae=10.0,
+                soles=soles,
+                dolares=0.0,
+                precio_unitario=0.0,
+                anho=int(fecha[:4]),
+                mes=int(fecha[5:7]),
+                fecha_orig=fecha,
+                fecha_ref=None,
+                fecha_venc=None,
+                cod_sucursal="01",
+                nom_sucursal="LIMA",
+                departamento="LIMA",
+                provincia="LIMA",
+                distrito="LIMA",
+                id_vendedor="01188",
+                nom_vendedor="VEND UNO",
+                id_pedido="P1",
+                file_source="t",
+                mes_ref=fecha[:7],
+                tipo_operacion="devolucion" if tpo == "NCR" else "",
+                factura_ref_serie="",
+                factura_ref_nro="",
+                folio_unico="",
+            )
+            derivar_campos(d)
+            return d
+
+        @pytest.fixture
+        def db_solo_nc(self, tmp_db):
+            """Cliente con solo NC de devolucion en el periodo (sin facturas)."""
+            rows = [
+                self._fila_nc("00000007", "CLIENTE SOLO NC", "70001", -100.0),
+                self._fila_nc("00000007", "CLIENTE SOLO NC", "70002", -50.0, fecha="2026-09-20"),
+            ]
+            conn = tmp_db.get_conn()
+            ventas_db.insert_ventas(conn, rows)
+            ventas_db.refresh_agg_cliente_mes(conn)
+            return tmp_db
+
+        def test_aparece_en_listado_agg(self, db_solo_nc):
+            """El cliente con solo NC aparece en el listado del picker."""
+            ids = [c["id"] for c in VentasDbClient().fetch_clientes()]
+            assert "00000007" in ids
+
+        def test_aparece_en_listado_detalle(self, db_solo_nc):
+            """El path de detalle (sin agg) tambien lo incluye."""
+            ids = [c["id"] for c in VentasDbClient().fetch_clientes(solo_lineas_activas=False)]
+            assert "00000007" in ids
+
+        def test_compras_cliente_devuelve_sus_notas(self, db_solo_nc):
+            """El preview del reporte trae sus NC con neto negativo."""
+            df = VentasDbClient().fetch_compras_cliente("00000007")
+            assert not df.empty
+            assert float(df["SOLES"].sum()) == pytest.approx(-150.0)
+
+        def test_con_facturas_sigue_igual(self, db_solo_nc):
+            """Un cliente con facturas + NC no cambia su conteo de docs."""
+            conn = db_solo_nc.get_conn()
+            from src.core.xls_processor import derivar_campos
+
+            f = dict(
+                id_articulo="014850",
+                original_sku="014850",
+                nom_articulo="PELOTA",
+                id_linea="0101",
+                nom_linea="GASEOSAS",
+                id_grupo="01",
+                nom_grupo="G",
+                id_tipo="01",
+                nom_tipo="T",
+                id_familia="01",
+                nom_familia="F",
+                id_cliente="00000008",
+                doc_cliente="20000000003",
+                nom_cliente="CLIENTE MIXTO",
+                tpo_doc="F01",
+                serie_doc="204",
+                nro_doc="80001",
+                referencia="",
+                moneda="Soles",
+                cantidad=10.0,
+                cantidad_fae=0.0,
+                soles=100.0,
+                dolares=0.0,
+                precio_unitario=10.0,
+                anho=2026,
+                mes=9,
+                fecha_orig="2026-09-05",
+                fecha_ref=None,
+                fecha_venc=None,
+                cod_sucursal="01",
+                nom_sucursal="LIMA",
+                departamento="LIMA",
+                provincia="LIMA",
+                distrito="LIMA",
+                id_vendedor="01188",
+                nom_vendedor="VEND UNO",
+                id_pedido="P1",
+                file_source="t",
+                mes_ref="2026-09",
+                tipo_operacion="",
+                factura_ref_serie="",
+                factura_ref_nro="",
+                folio_unico="",
+            )
+            derivar_campos(f)
+            ventas_db.insert_ventas(conn, [f])
+            ventas_db.refresh_agg_cliente_mes(conn)
+            clientes = {c["id"]: c for c in VentasDbClient().fetch_clientes()}
+            assert "00000007" in clientes
+            assert "00000008" in clientes
 
     def test_fetch_client_by_id(self, populated_db):
         c = VentasDbClient().fetch_client_by_id("00068414")
@@ -1732,9 +1872,43 @@ class TestAggClienteMes:
         n = ventas_db.refresh_agg_cliente_mes()
         assert n > 0
         conn = ventas_db.get_conn()
-        # La factura de muestra es 2024-01; la NCR (2024-02) no cuenta como venta.
+        # La factura es 2024-01; la NCR/ajuste/NDB (2024-02) ahora también
+        # cuentan: un cliente con solo notas en el periodo aparece en el listado.
         meses = {r[0] for r in conn.execute("SELECT DISTINCT mes FROM agg_cliente_mes")}
-        assert meses == {"2024-01"}
+        assert meses == {"2024-01", "2024-02"}
+
+    def test_cambio_allowlist_reconstruye_el_agg(self, populated_db):
+        """El allowlist queda horneado en el agg: cambiarlo sin rebuild deja el fast-path stale."""
+        # Cliente con linea '0101' (sufijo '01', en el allowlist default)
+        assert "00068414" in [c["id"] for c in VentasDbClient().fetch_clientes()]
+        # Excluir la linea '01' del allowlist
+        cfg = ventas_db_config.load_app_config()
+        cfg["allowed_lines"] = ["ZZ"]
+        ventas_db_config.save_app_config(cfg)
+        # Sin rebuild el fast-path devolveria el cliente (agg viejo);
+        # con rebuild desaparece (su linea ya no es activa).
+        ventas_db.rebuild_agg_async()
+        self._esperar_agg()
+        assert "00068414" not in [c["id"] for c in VentasDbClient().fetch_clientes()]
+
+    def test_rebuild_agg_async_single_flight(self, populated_db):
+        """Llamadas concurrentes a rebuild_agg_async no relanzan el rebuild."""
+        ventas_db._AGG_REBUILD_BUSY = False
+        ventas_db.rebuild_agg_async()
+        ventas_db.rebuild_agg_async()
+        ventas_db.rebuild_agg_async()
+        self._esperar_agg()
+        assert ventas_db._AGG_REBUILD_BUSY is False
+
+    def _esperar_agg(self, timeout=30):
+        import time as _t
+
+        fin = _t.time() + timeout
+        while _t.time() < fin:
+            if not ventas_db._AGG_REBUILD_BUSY:
+                return
+            _t.sleep(0.05)
+        raise TimeoutError("el rebuild del agg no termino")
 
     def test_refresh_incluye_vendedor(self, populated_db):
         conn = ventas_db.get_conn()

@@ -3,7 +3,10 @@ name = "g360-erp-nc-sustentor"
 version = "1.2.0"
 description = "G360 ERP NC Sustentor - Automatización de cuadros de sustento de Notas de Crédito (NC) y análisis CRM."
 readme = "README.md"
-requires-python = ">=3.11"
+# 3.11 es el target de despliegue (run.bat/launch.vbs lo instalan): el mas
+# liviano y maduro para PCs nuevas. El tope <3.12 evita que uv cree el venv
+# con 3.12/3.13/3.14 y que los tests dejen de validar lo que se despliega.
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "flet[desktop]==0.28.3",
     "openpyxl==3.1.5",

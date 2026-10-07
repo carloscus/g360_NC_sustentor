@@ -1094,9 +1094,9 @@ class ExcelRenderer(_CalculoWriter):
         ws.cell(row=r2, column=1).border = THIN_BORDER
         # Fecha en la columna mas a la derecha disponible
         fecha_col = max(2, max_col)
-        ws.cell(
-            row=r2, column=fecha_col, value=f"Fecha: {fecha_ui(datetime.now())}"
-        ).font = Font(size=9, color=EXP_FAINT)
+        ws.cell(row=r2, column=fecha_col, value=f"Fecha: {fecha_ui(datetime.now())}").font = Font(
+            size=9, color=EXP_FAINT
+        )
         ws.cell(row=r2, column=fecha_col).alignment = Alignment(horizontal="right")
 
         # ── Bloque DATOS DE LA OPERACIÓN (izq.) + TOTALES (der.) ───────
@@ -1407,14 +1407,33 @@ class ExcelRenderer(_CalculoWriter):
                     ("CODIGO", "SKU del artículo a reconocer"),
                     ("CANTIDAD", "Unidades determinadas a reconocer por SKU"),
                     ("PRECIO_BASE", "Precio de lista vigente antes de descuentos"),
-                    ("DESC01", "Descuento 1 (fracción, ej: 0.05 = 5%) — opcional"),
-                    ("DESC02", "Descuento 2 (fracción) — opcional"),
+                    ("DESC01", "Primer descuento en % (fracción: 0.05 = 5%) — cascada"),
+                    ("DESC02", "Segundo descuento en % (fracción) — cascada"),
+                    ("DESC03", "Tercer descuento en % (fracción) — cascada"),
+                    ("DESC04", "Cuarto descuento en % (fracción) — cascada"),
+                    ("DESC05", "Quinto descuento en % (fracción) — cascada"),
+                    ("DESC06", "Sexto descuento en % (fracción) — cascada"),
+                    ("DESC07", "Séptimo descuento en % (fracción) — cascada"),
+                    ("DESC08", "Octavo descuento en % (fracción) — cascada"),
                 ],
-                "ejemplo": ["72015", "12954", "4.80", "0.05", "0"],
+                "ejemplo": [
+                    "72015",
+                    "12954",
+                    "4.80",
+                    "0.05",
+                    "0.04",
+                    "0.04",
+                    "0.07",
+                    "0.02",
+                    "0",
+                    "0",
+                    "0",
+                ],
                 "notas": [
                     "• Un archivo combinado: una fila por SKU con cantidad y precio.",
                     "• Opcionalmente un segundo archivo SKU + CANTIDAD pisa las cantidades.",
-                    "• Se compara el precio histórico de compra vs precio de lista actual.",
+                    "• La cadena de descuentos se aplica en cascada: PRECIO_BASE × (1−DESC01) × (1−DESC02) × … × (1−DESC08) = PRECIO NETO.",
+                    "• Se compara el precio histórico de compra vs precio de lista actual (neto).",
                     "• La asignación FIFO/LIFO se hace sobre las compras históricas del SKU.",
                 ],
             },

@@ -816,7 +816,7 @@ class TestComparativoHoja:
             "SKU",
             "Unid 2026",
             "Soles 2026",
-            "dif 26-25",
+            "Dif 26-25",
             "% 26-25",
             "Unid 2025",
             "Soles 2025",
@@ -826,7 +826,7 @@ class TestComparativoHoja:
         ]
         # Una sola fila consolidada: mismo SKU en 2025 y 2026.
         f1 = [c.value for c in ws[3]]
-        assert f1[0] == "06-2026"
+        assert f1[0] == "2026-06"
         assert f1[1] == "01"
         assert f1[2] == "PELOTAS"
         assert f1[3] == "014850"
@@ -929,7 +929,7 @@ class TestComparativoHoja:
                 etiquetas.append(v)
         # Orden: mes ascendente; cada SKU consolida sus años en una sola fila.
         # Sept-2026 marcado (parcial) porque el rango corta el día 26.
-        assert etiquetas == ["08-2026", "09-2026 (parcial)"]
+        assert etiquetas == ["2026-08", "2026-09 (parcial)"]
 
     def test_paridad_neto_vs_bd(self, tmp_db, tmp_path):
         """Columna Soles del año = neto de BD (misma ventana)."""
@@ -956,7 +956,7 @@ class TestComparativoHoja:
             rc._escribir_xlsx(out, "56101", "M", hojas={"comparativo"})
 
     def test_dos_totales_con_rango(self, tmp_path):
-        """Rango con fd/fh: dos filas TOTAL y etiquetas MM-AAAA por año real."""
+        """Rango con fd/fh: dos filas TOTAL y etiquetas YYYY-MM por año real."""
         out = tmp_path / "R.xlsx"
         rc._escribir_xlsx(
             out,
@@ -1035,11 +1035,11 @@ class TestComparativoHoja:
             "SKU",
             "Unid 2026",
             "Soles 2026",
-            "dif 26-25",
+            "Dif 26-25",
             "% 26-25",
             "Unid 2025",
             "Soles 2025",
-            "dif 25-24",
+            "Dif 25-24",
             "% 25-24",
             "Unid 2024",
             "Soles 2024",
@@ -1055,7 +1055,7 @@ class TestComparativoHoja:
                 break
             if v is not None:
                 datos.append(v)
-        assert datos == ["01-2026", "08-2026", "09-2026"]
+        assert datos == ["2026-01", "2026-08", "2026-09"]
         # Dos filas TOTAL después de los datos (filas 6 y 7).
         tot1 = [c.value for c in ws[6]]
         tot2 = [c.value for c in ws[7]]
@@ -1138,11 +1138,11 @@ class TestLibroValidoExcel:
             "SKU",
             "Unid 2026",
             "Soles 2026",
-            "dif 26-25",
+            "Dif 26-25",
             "% 26-25",
             "Unid 2025",
             "Soles 2025",
-            "dif 25-24",
+            "Dif 25-24",
             "% 25-24",
             "Unid 2024",
             "Soles 2024",
@@ -2022,8 +2022,8 @@ class TestConsolidadoHoja:
             "NDB S/",
             "Neto S/",
             "Unid.",
-            "N° docs",
-            "% neto",
+            "N° Docs",
+            "% Neto",
         ]
         fila = [c.value for c in ws[3]]
         assert fila[0] == "01 - GASEOSAS"  # identidad línea sin artículo
@@ -2050,7 +2050,7 @@ class TestConsolidadoHoja:
             "Línea",
             "Neto S/",
             "Unid.",
-            "% neto",
+            "% Neto",
         ]
         fila = [ws.cell(row=hdr + 1, column=c).value for c in range(1, 7)]
         assert fila[:3] == ["014850", "PELOTA PVC #5", "01"]
@@ -2124,21 +2124,21 @@ class TestAjustesHoja:
         hdr, filas, total = self._detalle(ws)
         assert [ws.cell(row=hdr, column=c).value for c in range(1, 20)] == [
             "Factura",
-            "F. fact.",
+            "F. Fact.",
             "SKU",
             "Artículo",
-            "Cant. fact.",
-            "S/ fact.",
+            "Cant. Fact.",
+            "S/ Fact.",
             "NC",
-            "F. doc",
+            "F. Doc.",
             "Motivo",
             "Cant.",
             "Base FAE",
-            "P.U. fact.",
+            "P.U. Fact.",
             "P.U. NC",
             "Cobertura",
-            "Afecta precio",
-            "P.U. neto",
+            "Afecta Precio",
+            "P.U. Neto",
             "S/ NC",
             "Saldo",
             "Obs.",
@@ -2353,9 +2353,9 @@ class TestAjustesHoja:
         )
         assert [ws.cell(row=sub + 1, column=c).value for c in range(1, 11)] == [
             "NC",
-            "F. doc",
+            "F. Doc.",
             "Motivo",
-            "Factura ref.",
+            "Factura Ref.",
             "SKU",
             "Artículo",
             "Cant.",
@@ -2516,7 +2516,7 @@ class TestFacturasHoja:
             "Ajuste/NC",
             "Total Neto",
             "Costo Unit. Neto",
-            "NC asociadas",
+            "NC Asociadas",
         ]
         assert ws.freeze_panes is None
         assert ws.auto_filter.ref is None  # la tabla filtra sola
@@ -2661,7 +2661,7 @@ class TestSimetriaTitulos:
             "U.fact",
             "U.dev",
             "U.netas",
-            "% dev",
+            "% Dev",
             "SOLES NETOS (S/)",
             "DEV S/",
             "DESC S/",

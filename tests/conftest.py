@@ -21,6 +21,26 @@ def _sin_conexiones_colgadas():
 
 
 @pytest.fixture(autouse=True)
+def _esperar_rebuild_agg():
+    """Ningun test deja el rebuild de agg_cliente_mes corriendo.
+
+    `rebuild_agg_async` borra y repuebla la tabla en un hilo daemon (lo dispara
+    el guardado del allowlist). Si un test lo dispara y no espera, el hilo
+    sigue mutando la DB cuando el test SIGUIENTE ya esta corriendo: el fallo
+    aparece en un test que no tiene nada que ver (se vio en
+    test_dc_2_clientes_agrupa_en_2_tabs, intermitente).
+    """
+    yield
+    import time as _t
+
+    from src.core import ventas_db
+
+    fin = _t.time() + 60
+    while getattr(ventas_db, "_AGG_REBUILD_BUSY", False) and _t.time() < fin:
+        _t.sleep(0.05)
+
+
+@pytest.fixture(autouse=True)
 def _aislar_db_real(tmp_path, request):
     """Red de seguridad: ningun test debe tocar la DB real de produccion.
 

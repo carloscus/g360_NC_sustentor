@@ -282,7 +282,7 @@ diferencia_stock:
     columnas_descuento:
       pattern: "^DESC\\d+$"
       min: 0
-      max: 1
+      max: 8
     columnas_requeridas:
       - CODIGO
       - PRECIO_BASE

@@ -21,7 +21,6 @@ sin crear duplicados.
 from pathlib import Path
 from types import SimpleNamespace
 import logging
-import re
 import time
 
 import pandas as pd
@@ -715,7 +714,6 @@ def _generar_uno(
             vendedor=vendedor_display,
             exp_id=exp_id,
             historico_config=historico_config,
-            modalidad=modalidad,
         )
 
     logger.info(
@@ -951,13 +949,14 @@ def _generar_historico(
     vendedor="",
     exp_id="",
     historico_config=None,
-    modalidad="",
 ):
     """Genera el reporte histórico (segmento del expediente) en estilo clásico.
 
     Usa `generar_historico_clasico`: reporte sobrio tipo ERP Gupta (economato
     y negro), filtrado al cliente del expediente y guardado dentro de la
-    carpeta del mismo.
+    carpeta del mismo. El histórico es el del cliente en el período completo
+    del fragmento (ya allowlisted en la consulta SQL): igual en individual y
+    en consolidado.
     """
     from src.render.audit_renderer import generar_historico_clasico
 
@@ -981,10 +980,9 @@ def _generar_historico(
         resultado.resultado.dataframe if resultado.resultado is not None else None
     )
 
-    if modalidad == MODALIDAD_INDIVIDUAL:
-        # El expediente es de una sola factura: el Histórico se acota a ese
-        # documento y a las notas que lo referencian.
-        hist = _acotar_historico_a_documentos(hist, {f for f, _ in reclamados})
+    # El Histórico es el del cliente en el período completo del fragmento (ya
+    # allowlisted): igual en individual y en consolidado. Los pares
+    # (factura, sku) reclamados se resaltan en el render, no filtran filas.
 
     if hist.empty:
         return historico_path
@@ -1005,56 +1003,6 @@ def _generar_historico(
         reclamados=reclamados,
     )
     return historico_path
-
-
-def _serie_canon(serie) -> str:
-    """Serie comparable: 'FF001' (TIPO_DOC+SERIE) y 'F001' son la misma.
-
-    Se queda con el bloque de digitos final; si no hay, usa el texto limpio.
-    """
-    txt = re.sub(r"[^0-9A-Za-z]", "", str(serie or "")).upper()
-    m = re.search(r"(\d+)$", txt)
-    return m.group(1) if m else txt
-
-
-def _clave_doc(valor) -> str:
-    """Clave comparable de un documento: 'F001-101' / 'FF001-101' / 'F01/001-101'."""
-    s = str(valor or "").strip().upper()
-    if "-" not in s:
-        return ""
-    serie, nro = s.rsplit("-", 1)
-    return f"{_serie_canon(serie)}-{nro.strip()}"
-
-
-def _acotar_historico_a_documentos(hist: pd.DataFrame, docs) -> pd.DataFrame:
-    """Deja en el Histórico solo los documentos del expediente y sus notas.
-
-    En consolidado el Histórico es el del cliente en el período (contexto). En
-    individual cada expediente pertenece a UNA factura: dejarlo con todas las
-    facturas del cliente hace que el sustento de un documento aparezca como
-    evidencia en el de otro.
-    """
-    claves = {_clave_doc(d) for d in (docs or set())}
-    claves.discard("")
-    if not claves or hist is None or hist.empty:
-        return hist
-
-    def _tiene(row):
-        es_nota = str(row.get("TIPO_CLASE", "")).strip().lower() != "factura" and bool(
-            str(row.get("TIPO_DOC", "")).strip().upper().startswith(("N", "C"))
-        )
-        candidatos = [row.get("DOC_ID", "")]
-        if es_nota:
-            candidatos += [row.get("FACTURA_REF", ""), row.get("REFERENCIA", "")]
-        else:
-            serie = f"{str(row.get('TIPO_DOC', '')).strip()[:1]}{row.get('SERIE', '')}"
-            candidatos.append(f"{serie}-{row.get('NUMERO', '')}")
-        return any(_clave_doc(c) in claves for c in candidatos if c)
-
-    mask = hist.apply(_tiene, axis=1)
-    if not mask.any():
-        return hist  # sin coincidencias: no acotar (no perder evidencia)
-    return hist[mask].copy()
 
 
 def _filtrar_documentos_historico(hist: pd.DataFrame, historico_config) -> pd.DataFrame:

@@ -2309,12 +2309,12 @@ class VentasDbClient:
         offset: int = 0,
         actividad_anios: Any = _POR_DEFECTO,
     ) -> list[dict]:
-        """Clientes con VENTAS (facturas/boletas de lineas activas) en el rango, por actividad.
+        """Clientes con VENTAS (facturas/boletas/notas de lineas activas) en el rango, por actividad.
 
-        Solo lineas con `tpo_doc LIKE 'F%' OR 'B%'` y el allowlist de 24
-        lineas (mismo criterio que fetch_historial): un cliente que solo tiene
-        NC/NDB o productos fuera del allowlist NO aparece (daria "Sin
-        resultados"). Orden: facturas/boletas distintas DESC.
+        Incluye facturas/boletas (tpo_doc F*/B*) y NC/NDB: un cliente con solo
+        notas en el periodo tambien aparece (el reporte muestra su neto).
+        Productos fuera del allowlist NO aparecen (darian "Sin resultados").
+        Orden: documentos distintos DESC.
 
         actividad_anios: piso de actividad. No pasado = piso FIJO configurado
         (default 2021-01-01). None explicito = sin piso (uso forense). Un int =
@@ -2391,7 +2391,11 @@ class VentasDbClient:
                 )
                 params = params + rank_params
             else:
-                where = ["v.id_cliente != ''", "(v.tpo_doc LIKE 'F%' OR v.tpo_doc LIKE 'B%')"]
+                where = [
+                    "v.id_cliente != ''",
+                    "(v.tpo_doc LIKE 'F%' OR v.tpo_doc LIKE 'B%'"
+                    " OR UPPER(v.tpo_doc) IN ('NCR','NDB','NC','ND'))",
+                ]
                 params = []
                 if solo_lineas_activas:
                     where.append(ventas_db.active_line_sql("v.id_linea"))

@@ -32,6 +32,10 @@ from src.core.ventas_db_config import (  # noqa: F401  (re-exportado p/ compatib
     is_allowed_line,
     active_line_sql,
     reset_allowed_lines_cache,
+    DEFAULT_ACTIVIDAD_DESDE,
+    actividad_desde,
+    actividad_anio,
+    set_actividad_anio,
     load_app_config,
     save_app_config,
     load_pinned,
@@ -617,6 +621,10 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_venta_sku ON ventas(id_articulo);",
     "CREATE INDEX IF NOT EXISTS idx_venta_orig_sku ON ventas(original_sku);",
     "CREATE INDEX IF NOT EXISTS idx_venta_linea ON ventas(id_linea);",
+    # Covering (id_linea, nom_linea): distinct_lineas() baja de 78s (scan con
+    # lookup de tabla por fila) a 0.6s (index-only) en 3.7 GB / 2.8M filas.
+    # Alimenta el modal de allowlist de lineas que no termina de cargar.
+    "CREATE INDEX IF NOT EXISTS idx_venta_linea_nom ON ventas(id_linea, nom_linea);",
     "CREATE INDEX IF NOT EXISTS idx_venta_doc ON ventas(tpo_doc, serie_doc, nro_doc);",
     "CREATE INDEX IF NOT EXISTS idx_venta_doc_linea ON ventas(serie_doc, nro_doc, id_linea);",
     "CREATE INDEX IF NOT EXISTS idx_venta_ref ON ventas(referencia);",
@@ -1354,11 +1362,13 @@ def populate_nc_asociadas(conn: sqlite3.Connection | None = None) -> int:
 
 
 def refresh_agg_cliente_mes(conn: sqlite3.Connection | None = None) -> int:
-    """Reconstruye agg_cliente_mes (cliente x mes, facturas/boletas activas).
+    """Reconstruye agg_cliente_mes (cliente x mes, facturas/boletas activas + notas).
 
     Alimenta el dropdown de clientes: n_docs = COUNT(DISTINCT doc) por cliente
-    y mes, con el mismo allowlist de lineas de fetch_historial. Reduce el
-    escaneo de 1.5M filas a ~27K -> rango largo de 3.3s a <20ms. Retorna filas.
+    y mes, con el mismo allowlist de lineas de fetch_historial. Incluye NC/NDB:
+    un cliente con solo notas en el periodo tambien aparece (su reporte muestra
+    el neto de las notas). Reduce el escaneo de 1.5M filas a ~27K -> rango largo
+    de 3.3s a <20ms. Retorna filas.
     nom_vendedor alimenta el dropdown de vendedores (fetch_vendedores).
     """
     own = conn is None
@@ -1387,7 +1397,8 @@ def refresh_agg_cliente_mes(conn: sqlite3.Connection | None = None) -> int:
                    COUNT(DISTINCT serie_doc || '-' || nro_doc) AS n_docs
             FROM ventas
             WHERE id_cliente != ''
-              AND (tpo_doc LIKE 'F%' OR tpo_doc LIKE 'B%')
+              AND (tpo_doc LIKE 'F%' OR tpo_doc LIKE 'B%'
+                   OR UPPER(tpo_doc) IN ('NCR','NDB','NC','ND'))
               AND {lineas_sql}
             GROUP BY id_cliente, id_vendedor, substr(fecha_orig, 1, 7)
         """)
@@ -1401,6 +1412,39 @@ def refresh_agg_cliente_mes(conn: sqlite3.Connection | None = None) -> int:
     finally:
         if own:
             conn.close()
+
+
+_AGG_REBUILD_BUSY = False
+
+
+def rebuild_agg_async() -> None:
+    """Reconstruye agg_cliente_mes en background tras cambiar el allowlist.
+
+    El allowlist queda HORNEADO en la tabla (la SQL del refresh filtra con
+    active_line_sql al construir la tabla): sin este rebuild, el fast-path
+    del picker (fetch_clientes) y fetch_vendedores devuelven datos con el
+    allowlist VIEJO hasta la proxima captura. Durante el rebuild (DELETE +
+    repoblado) la tabla queda vacia: el fast-path cae al path de detalle
+    (correcto con el allowlist nuevo, solo mas lento).
+    Single-flight: si ya hay un rebuild en curso, no relanza.
+    """
+    global _AGG_REBUILD_BUSY
+    if _AGG_REBUILD_BUSY:
+        return
+    _AGG_REBUILD_BUSY = True
+
+    def worker():
+        global _AGG_REBUILD_BUSY
+        try:
+            log.info("rebuild agg_cliente_mes: el allowlist cambio")
+            n = refresh_agg_cliente_mes()
+            log.info("rebuild agg_cliente_mes OK (%d filas)", n)
+        except Exception:
+            log.exception("rebuild agg_cliente_mes fallo")
+        finally:
+            _AGG_REBUILD_BUSY = False
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def ensure_agg_vendedor_col(conn: sqlite3.Connection) -> bool:

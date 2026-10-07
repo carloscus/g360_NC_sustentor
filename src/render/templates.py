@@ -93,18 +93,24 @@ class PlantillaGenerator:
             "hoja": "LISTA_PRECIOS_CANT",
             "casos": ["VRS"],
             "insumos": ["lista_precios", "cantidad"],
-            "descripcion": "Precio de lista y cantidad a reconocer por SKU (VRS).",
+            "descripcion": "Precio de lista y cantidad a reconocer por SKU (VRS). La cadena de descuentos se aplica en cascada: PRECIO_BASE × (1−DESC01) × (1−DESC02) × … × (1−DESC08).",
             "columnas": [
                 ("CODIGO_SKU", "Código del Artículo / SKU"),
                 ("CANTIDAD_A_SUSTENTAR", "Cantidad de unidades a reconocer por SKU"),
                 ("PRECIO_BASE", "Precio de lista vigente sin IGV antes de descuentos"),
-                ("DESC01", "Descuento 1 (fracción, ej: 0.05 = 5%) — opcional"),
-                ("DESC02", "Descuento 2 (fracción) — opcional"),
+                ("DESC01", "Primer descuento en % (fracción: 0.05 = 5%) — cascada"),
+                ("DESC02", "Segundo descuento en % (fracción) — cascada"),
+                ("DESC03", "Tercer descuento en % (fracción) — cascada"),
+                ("DESC04", "Cuarto descuento en % (fracción) — cascada"),
+                ("DESC05", "Quinto descuento en % (fracción) — cascada"),
+                ("DESC06", "Sexto descuento en % (fracción) — cascada"),
+                ("DESC07", "Séptimo descuento en % (fracción) — cascada"),
+                ("DESC08", "Octavo descuento en % (fracción) — cascada"),
             ],
             "ejemplos": [
-                ["72015", 12954, 4.80, 0.05, 0],
-                ["72015", 500, 4.80, 0, 0.05],
-                ["A002", 500, 12.00, None, None],
+                ["72015", 12954, 4.80, 0.05, 0.04, 0.04, 0.07, 0.02, 0, 0, 0],
+                ["72015", 500, 4.80, 0.05, 0, 0, 0, 0, 0, 0, 0],
+                ["A002", 500, 12.00, None, None, None, None, None, None, None, None],
             ],
         },
         "lista_descuentos": {
@@ -257,7 +263,7 @@ class PlantillaGenerator:
             ws_leeme.cell(row=i, column=1, value=texto).font = Font(size=10, color="444444")
 
         # Ajustar anchos
-        anchos = {1: 18, 2: 18, 3: 18, 4: 18, 5: 14, 6: 14, 7: 14, 8: 18, 9: 16, 10: 16}
+        anchos = {1: 18, 2: 18, 3: 18, 4: 18, 5: 14, 6: 14, 7: 14, 8: 18, 9: 16, 10: 16, 11: 14}
         for col, ancho in anchos.items():
             if col <= len(columnas):
                 ws.column_dimensions[chr(64 + col)].width = ancho
