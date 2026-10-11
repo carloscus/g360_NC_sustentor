@@ -28,6 +28,10 @@ from src.ui.catalog import (
 ReconocimientoView (mixins). Heredado por ReconocimientoView
 (src/ui/reconocimiento_view.py)."""
 
+# Alto fijo del area de tabs de resultados (px). ft.Tabs es un viewport y
+# necesita alto finito; ver _renderizar_tabs_resultado.
+_ALTURA_TABS_RESULTADO = 640
+
 
 def mapear_nc_existente(factura_val, doc_to_nc: dict) -> str:
     """Notas (NC/NDB) ya emitidas contra la factura de referencia.
@@ -188,6 +192,8 @@ class _ViewHandlers:
         self._historico_config = HistorialConfig.from_caso(CATALOGO[self.tipo_actual])
         self.resultado = None
         self.resultados_container.visible = False
+        if hasattr(self, "_result_panel"):
+            self._result_panel.visible = False
         self.alertas_container.visible = False
         try:
             self._renderizar_ui()
@@ -303,8 +309,12 @@ class _ViewHandlers:
     def _invalidar_resultado_por_config(self, mensaje):
         """No permitir exportar un resultado calculado con checks anteriores."""
         self.resultado = None
+        self._firma_ejecucion = None
+        self._set_btn_expediente(False)
         if hasattr(self, "resultados_container"):
             self.resultados_container.visible = False
+        if hasattr(self, "_result_panel"):
+            self._result_panel.visible = False
         if hasattr(self, "alertas_container"):
             self.alertas_container.visible = False
         if hasattr(self, "lbl_ejecutar_hint"):
@@ -448,6 +458,13 @@ class _ViewHandlers:
         self._asignar_insumo(tipo, ruta)
         self._actualizar_ui_insumo(tipo, name, labels, ruta)
         self._renderizar_lista_insumos()
+        # Un insumo entra al calculo: el resultado previo quedo obsoleto (se
+        # ejecutaria con la lista anterior). Sin esto la vista previa sigue
+        # mostrando los numeros viejos y el expediente sale con esa mezcla.
+        if getattr(self, "resultado", None):
+            self._invalidar_resultado_por_config(
+                "Cambiaste los insumos; vuelve a ejecutar el cálculo."
+            )
         self._verificar_puede_ejecutar()
 
     def _clasificar_archivo_insumo(self, ruta: str, name: str) -> str:
@@ -595,6 +612,12 @@ class _ViewHandlers:
             # (es la alternativa, no un sustituto permanente).
             self.descuento_pct.disabled = False
         self._renderizar_lista_insumos()
+        # Simetrico de _agregar_insumo: quitar un insumo tambien deja obsoleto
+        # el resultado (puede cambiar el calculo entero).
+        if getattr(self, "resultado", None):
+            self._invalidar_resultado_por_config(
+                "Cambiaste los insumos; vuelve a ejecutar el cálculo."
+            )
         self._verificar_puede_ejecutar()
         if self.app.page:
             self.app.page.update()
@@ -741,7 +764,7 @@ class _ViewHandlers:
             puede = puede and len(self.requerimientos_paths) > 0
         if self.tipo_actual == "ANF":
             puede = puede and self._hist_fragmento is not None
-            puede = puede and self._hist_fragmento.get("facturas", 0) == 1
+            puede = puede and self._hist_fragmento.get("facturas", 0) >= 1
         if self.tipo_actual == "DO":
             tiene_pct = self._descuento_pct_valido()
             puede = puede and (
@@ -789,10 +812,10 @@ class _ViewHandlers:
                     "Falta cargar la lista de precios requerida por este caso."
                 )
         elif self.tipo_actual == "ANF" and (
-            self._hist_fragmento is None or self._hist_fragmento.get("facturas", 0) != 1
+            self._hist_fragmento is None or self._hist_fragmento.get("facturas", 0) < 1
         ):
             self.lbl_ejecutar_hint.value = (
-                "Anulación requiere exactamente una factura en el historial."
+                "Anulación requiere al menos una factura en el historial."
             )
         elif self.tipo_actual == "DO":
             self.lbl_ejecutar_hint.value = (
@@ -1154,6 +1177,8 @@ class _ViewHandlers:
         if exp.resultado and not exp.resultado.dataframe.empty:
             self._agrupar_resultado_por_cliente(exp)
             self._mostrar_resultado()
+            self._log_estado_resultado()
+            self._desplazar_a_resultados()
         else:
             alertas_ordenadas = sorted(
                 exp.alertas or [],
@@ -1166,13 +1191,166 @@ class _ViewHandlers:
         if self.app.page:
             self.app.page.update()
 
-    def _omitir_activo(self):
-        chk = getattr(self, "chk_omitir_sin_dif", None)
+    def _log_estado_resultado(self):
+        """Deja en el log COMO quedo la vista de resultados.
+
+        El panel va al final de una columna muy larga: cuando el usuario no
+        lo ve no hay forma de saber si fallo el render o si esta por debajo
+        del pliegue. Este log dice que se pinto y con que datos, por tab.
+        """
+        import logging
+
+        log = logging.getLogger(__name__)
+        cont = getattr(self, "resultados_container", None)
+        if cont is None:
+            log.info("resultados: sin contenedor")
+            return
+        panel = getattr(self, "_result_panel", None)
+        df = None
+        res = getattr(self, "resultado", None)
+        if res is not None and getattr(res, "resultado", None) is not None:
+            df = res.resultado.dataframe
+        n_filas = 0 if df is None else len(df)
+        btn = getattr(self, "btn_expediente", None)
+        tabs = getattr(self, "_result_tabs", None)
+        n_tabs = len(tabs.tabs) if tabs is not None and getattr(tabs, "tabs", None) else 0
+        donde = "%d tabs" % n_tabs if n_tabs else "panel unico"
+        panel_content = getattr(panel, "content", None)
+        resumen = getattr(self, "_result_summary", None)
+        hijos = getattr(resumen, "controls", None)
+        log.info(
+            "resultados: visible=%s inner=%s tipo=%s modalidad=%s ocultar0=%s nd=%s "
+            "filas=%s %s sel=%s tabh=%s boton=%s card=%s panel=%s summary_hijos=%s",
+            getattr(cont, "visible", None),
+            getattr(panel, "visible", None),
+            getattr(self, "tipo_actual", "?"),
+            getattr(self, "modalidad_actual", "?"),
+            self._ocultar_cero_activo(),
+            self._marcar_nd(),
+            n_filas,
+            donde,
+            (getattr(tabs, "selected_index", "?") if n_tabs else "-"),
+            (_ALTURA_TABS_RESULTADO if n_tabs else "-"),
+            ("habilitado" if btn is not None and not btn.disabled else "DESHABILITADO"),
+            type(getattr(cont, "content", None)).__name__,
+            type(panel_content).__name__,
+            (len(hijos) if isinstance(hijos, list) else "?"),
+        )
+        if n_tabs:
+            sets = getattr(self, "_result_controles_por_cliente", {}) or {}
+            por_cli = getattr(self, "_resultado_por_cliente", {}) or {}
+            for i, tab in enumerate(tabs.tabs):
+                cid = (getattr(self, "_resultado_clientes_order", []) or [None] * n_tabs)[i]
+                contenido = getattr(tab, "content", None)
+                contenido_int = getattr(contenido, "content", None)
+                tbl = (sets.get(cid) or {}).get("tabla")
+                exp_cli = por_cli.get(cid)
+                df_cli = (
+                    exp_cli.resultado.dataframe
+                    if exp_cli is not None and getattr(exp_cli, "resultado", None) is not None
+                    else None
+                )
+                bcli = self.btn_gen_exp
+                log.info(
+                    "resultados: tab[%d] cli=%s df_filas=%s tab_content=%s inner=%s "
+                    "tabla_filas=%s btn=%s",
+                    i,
+                    cid,
+                    (len(df_cli) if df_cli is not None else "?"),
+                    type(contenido).__name__,
+                    type(contenido_int).__name__,
+                    (len(tbl.rows) if tbl is not None else "?"),
+                    ("habilitado" if bcli is not None and not bcli.disabled else "DESHABILITADO"),
+                )
+
+    def _desplazar_a_resultados(self):
+        """Lleva el scroll de la vista hasta la card de resultados.
+
+        Tras ejecutar, el usuario se queda donde esta el boton (abajo) y la
+        vista previa queda fuera de pantalla. No hace nada sin pagina
+        (tests) ni si el scroll aun no existe.
+        """
+        self._desplazar_a("g360_resultados")
+
+    def _desplazar_a(self, key: str) -> bool:
+        """Scroll hasta el control con `key` dentro de la vista. False sin pagina."""
+        try:
+            col = getattr(self, "_workflow_scroll", None)
+            page = getattr(self.app, "page", None)
+            if col is None or page is None:
+                return False
+            col.scroll_to(key=key, duration=300)
+            page.update()
+            return True
+        except Exception:
+            logging.getLogger(__name__).exception("scroll a %s fallo", key)
+            return False
+
+    def ir_a_reporte(self) -> bool:
+        """Entrada del boton del header: cambia a la vista de Reporte."""
+        return self.mostrar_reporte()
+
+    def mostrar_reporte(self) -> bool:
+        """Cambia a la vista Reporte (la abre si esta colapsada).
+
+        Las zonas no comparten scroll: el sustento queda montado en su
+        raiz y el reporte en la suya, asi que ningun control cambia de
+        padre al alternar. Devuelve False si la vista aun no se construyo.
+        """
+        try:
+            panel = getattr(self, "reporte_panel", None)
+            cont = getattr(self, "container", None)
+            if panel is None or cont is None:
+                return False
+            abrir = getattr(panel, "abrir", None)
+            if abrir is not None:
+                abrir()
+            self._vista_actual = "reporte"
+            cont.content = self._raiz_reporte()
+            if self.app.page:
+                self.app.page.update()
+            return True
+        except Exception:
+            logging.getLogger(__name__).exception("mostrar reporte fallo")
+            return False
+
+    def mostrar_sustento(self) -> bool:
+        """Vuelve a la vista Sustento (flujo de creacion).
+
+        Monta la raiz COMPLETA (scroll + barra sticky), no el scroll suelto:
+        con solo `_workflow_scroll` los botones de la barra (Ejecutar /
+        Generar expediente) quedaban fuera del arbol y solo volvian al
+        cambiar el tipo de caso.
+        """
+        try:
+            cont = getattr(self, "container", None)
+            raiz = getattr(self, "_raiz_sustento", None)
+            if cont is None or raiz is None:
+                return False
+            self._vista_actual = "sustento"
+            cont.content = raiz
+            if self.app.page:
+                self.app.page.update()
+            return True
+        except Exception:
+            logging.getLogger(__name__).exception("mostrar sustento fallo")
+            return False
+
+    def _ocultar_cero_activo(self):
+        chk = getattr(self, "chk_ocultar_cero", None)
         return bool(chk is not None and chk.value)
 
     def _nd_activo(self):
         chk = getattr(self, "chk_gen_nd", None)
         return bool(chk is not None and chk.value)
+
+    def _solo_nd_activo(self):
+        chk = getattr(self, "chk_solo_ndb", None)
+        return bool(chk is not None and chk.value)
+
+    def _marcar_nd(self):
+        """Vista con marcado ND: check ND o Solo-NDB (implica ND)."""
+        return self._nd_activo() or self._solo_nd_activo()
 
     def _agrupar_resultado_por_cliente(self, exp):
         """Agrupar resultado por cliente para vista multi-cliente.
@@ -1243,27 +1421,36 @@ class _ViewHandlers:
     def _resultado_efectivo(self):
         """Resultado para pantalla aplicando las OPCIONES DE CÁLCULO.
 
-        Con "Omitir SKUs sin diferencia" activo se clona el resultado ya
-        filtrado (mismo criterio que usa la generación), para que la tabla,
-        totales y la verificación pre-exportación coincidan con el expediente.
-        Devuelve None si tras omitir no queda nada visible.
+        Con "Solo NDB" se clona solo con negativas (lo que se ve es lo que
+        se genera en modo solo-NDB). Si no, con "Ocultar diferencias 0.00"
+        se clona ya filtrado (mismo criterio que usa la generación), para
+        que la tabla, totales y la verificación pre-exportación coincidan
+        con el expediente. Devuelve None si no queda nada visible.
         """
-        if not self._omitir_activo():
-            return self.resultado
         try:
-            from src.ui.expediente_service import _clonar_sin_diferencia
+            from src.ui.expediente_service import _clonar_sin_cero, _clonar_solo_nd
         except ImportError:
             return self.resultado
+
+        def _valido(vista):
+            if vista is None or not vista.resultado:
+                return None
+            df = vista.resultado.dataframe
+            if df is None or getattr(df, "empty", True):
+                return None
+            return vista
+
+        if self._solo_nd_activo():
+            try:
+                return _valido(_clonar_solo_nd(self.resultado))
+            except Exception:
+                return self.resultado
+        if not self._ocultar_cero_activo():
+            return self.resultado
         try:
-            clon = _clonar_sin_diferencia(self.resultado)
+            return _valido(_clonar_sin_cero(self.resultado))
         except Exception:
             return self.resultado
-        if clon is None or not clon.resultado:
-            return None
-        df = clon.resultado.dataframe
-        if df is None or getattr(df, "empty", True):
-            return None
-        return clon
 
     def _on_opciones_calculo_change(self, e=None):
         """Actualiza la vista de resultados al cambiar los checks de cálculo."""
@@ -1305,7 +1492,7 @@ class _ViewHandlers:
         vista = self._resultado_efectivo()
         if vista is None:
             self.app.show_snackbar(
-                "Tras omitir SKUs sin diferencia no quedan filas visibles.",
+                "Tras ocultar 0.00 no quedan filas visibles.",
                 self.app.G360_WARNING,
             )
             return
@@ -1316,11 +1503,17 @@ class _ViewHandlers:
             self.df_historial,
             self.app.G360_ACCENT,
             self.app.G360_SUCCESS,
-            marcar_nd=self._nd_activo() and not self._omitir_activo(),
+            marcar_nd=self._marcar_nd(),
         )
 
         self._renderizar_panel_compartido(result)
-        self.resultados_container.content = self._result_summary
+        self._result_panel.content = self._result_summary
+        # Firma de las entradas con las que se calculo: el paso final la
+        # compara antes de generar (guard contra resultado desfasado).
+        self._marcar_firma_ejecucion()
+        # El panel interno nace visible=False: sin esto la card aparece con
+        # solo el encabezado y la vista previa nunca se pinta.
+        self._result_panel.visible = True
         self.resultados_container.visible = True
         self._set_btn_expediente(True)
 
@@ -1333,6 +1526,7 @@ class _ViewHandlers:
 
         if result["content"] is None:
             self.resultados_container.visible = False
+            self._result_panel.visible = False
             return
 
         # Toggles (rebate)
@@ -1392,30 +1586,43 @@ class _ViewHandlers:
         badge = self._construir_badge_clientes(clientes)
         tabs = self._construir_tabs(clientes)
 
+        # Altura ACOTADA: ft.Tabs es un viewport y exige alto finito. Dentro
+        # de la columna con scroll de la vista el alto es infinito y el
+        # cliente Flet no lo puede maquetar: el area queda en blanco sin
+        # ningun error en Python (por eso el log decia exito y los tests
+        # pasaban). Mismo patron que el dialogo de Configuracion (480px):
+        # contenedor fijo + scroll interno por tab.
         self._result_tabs_container = ft.Column(
             [
                 ft.Row([badge], alignment=ft.MainAxisAlignment.END),
-                tabs,
+                ft.Container(content=tabs, height=_ALTURA_TABS_RESULTADO),
             ],
             spacing=8,
-            expand=True,
         )
         self._result_tabs = tabs
         self._result_clientes = clientes
 
-        self.resultados_container.content = self._result_tabs_container
+        self._result_panel.content = self._result_tabs_container
+        # Ver rama individual: el panel interno nace visible=False.
+        self._result_panel.visible = True
         self.resultados_container.visible = True
 
         # Se pintan TODOS los tabs, no solo el primero: si no, el segundo
         # cliente se quedaba en el placeholder "Cargando..." hasta que el
         # usuario lo abria, y se leia como que la vista previa no existia.
         # Los datos ya estan en memoria, asi que no cuesta nada.
-        for cid in clientes:
-            self._actualizar_tab_resultado(cid)
+        # Se selecciona el primero CON contenido: si el tab 0 quedo vacio
+        # (ej: ocultar 0.00 filtra todo) y se deja seleccionado, la vista previa
+        # parece rota aunque el tab 1 si tenga la tabla.
+        pintados = [cid for cid in clientes if self._actualizar_tab_resultado(cid)]
         if clientes:
+            # Igual que en el panel unico: la firma se toma con las entradas
+            # que efectivamente producen este resultado.
+            self._marcar_firma_ejecucion()
+            visible = pintados[0] if pintados else clientes[0]
             # Los handlers quedan apuntando al tab visible.
-            self._activar_controles_resultado(clientes[0])
-            self._result_tabs.selected_index = 0
+            self._activar_controles_resultado(visible)
+            self._result_tabs.selected_index = clientes.index(visible)
         self._set_btn_expediente(True)
 
     def _construir_badge_clientes(self, clientes):
@@ -1440,16 +1647,17 @@ class _ViewHandlers:
             border_radius=G360Theme.RADIUS_CHIP,
         )
 
-    def _construir_tabs(self, clientes):
-        """Construye el widget ft.Tabs con placeholders de carga por cliente."""
+    def _placeholder_carga_tab(self):
+        """Placeholder 'Cargando...' NUEVO por tab.
+
+        Compartir un mismo contenedor entre tabs repite el bug de controles
+        compartidos: Flet lo reasigna al ultimo padre y el otro tab queda
+        con contenido ajeno o vacio. Sin expand: dentro de ft.Tab no hay un
+        Flex padre que lo resuelva.
+        """
         import flet as ft
 
-        def _on_tab_change(e):
-            idx = e.control.selected_index
-            if idx >= 0 and idx < len(clientes):
-                self._actualizar_tab_resultado(clientes[idx])
-
-        loading_state = ft.Container(
+        return ft.Container(
             content=ft.Column(
                 [
                     ft.Row(
@@ -1465,30 +1673,65 @@ class _ViewHandlers:
                         alignment=ft.MainAxisAlignment.CENTER,
                     ),
                 ],
-                expand=True,
             ),
-            expand=True,
         )
+
+    def _construir_tabs(self, clientes):
+        """Construye el widget ft.Tabs con placeholders de carga por cliente."""
+        import flet as ft
+
+        def _on_tab_change(e):
+            idx = e.control.selected_index
+            if idx >= 0 and idx < len(clientes):
+                self._actualizar_tab_resultado(clientes[idx])
 
         return ft.Tabs(
             selected_index=0,
             on_change=_on_tab_change,
             animation_duration=200,
-            tabs=[ft.Tab(text=cid, content=loading_state) for cid in clientes],
+            tabs=[ft.Tab(text=cid, content=self._placeholder_carga_tab()) for cid in clientes],
         )
 
-    def _actualizar_tab_resultado(self, cliente_id):
-        """Refresca el contenido de un tab específico."""
-        vista = self._obtener_vista_cliente(cliente_id)
-        if vista is None:
-            return
+    def _filas_cliente(self, cliente_id) -> int:
+        """Filas del resultado agrupado para un cliente (0 si no hay)."""
+        por_cli = getattr(self, "_resultado_por_cliente", {}) or {}
+        exp_cli = por_cli.get(cliente_id)
+        if exp_cli is None or getattr(exp_cli, "resultado", None) is None:
+            return 0
+        df = exp_cli.resultado.dataframe
+        return 0 if df is None else len(df)
 
+    def _actualizar_tab_resultado(self, cliente_id) -> bool:
+        """Refresca el contenido de un tab específico.
+
+        Devuelve True si el tab quedo pintado con contenido, False si quedo
+        con el aviso de vacio (para que el render multi seleccione el primer
+        tab que si tenga que mostrar).
+        """
         # Cada tab se arma con sus propios controles: compartir la tabla hacia
         # que los tabs se pisen entre si (un control de Flet no puede estar en
         # dos padres) y solo se viera el ultimo cliente pintado.
+        # Va ANTES del chequeo de vista para que hasta los tabs vacios tengan
+        # su set (log y boton uniformes en todos los tabs).
         activar = getattr(self, "_activar_controles_resultado", None)
         if activar is not None:
             activar(cliente_id)
+
+        vista = self._obtener_vista_cliente(cliente_id)
+        if vista is None:
+            # Sin vista (ej: "Ocultar 0.00" vacio al cliente): avisar
+            # en el tab en vez de dejar el "Cargando..." para siempre.
+            n = self._filas_cliente(cliente_id)
+            detalle = (
+                f" ({n} {'fila' if n == 1 else 'filas'} omitidas por las opciones de cálculo)"
+                if n
+                else ""
+            )
+            self._mostrar_tab_vacio(
+                cliente_id,
+                "Sin filas visibles para este cliente con las opciones actuales." + detalle,
+            )
+            return False
 
         from src.ui.resultados_view import render_resultado
 
@@ -1498,11 +1741,15 @@ class _ViewHandlers:
             self.df_historial,
             self.app.G360_ACCENT,
             self.app.G360_SUCCESS,
-            marcar_nd=self._nd_activo() and not self._omitir_activo(),
+            marcar_nd=self._marcar_nd(),
         )
 
         if result["content"] is None:
-            return
+            self._mostrar_tab_vacio(
+                cliente_id,
+                "Sin filas visibles para este cliente con las opciones actuales.",
+            )
+            return False
 
         self._renderizar_labels_cliente(result)
         self._renderizar_tabla_cliente(result)
@@ -1511,6 +1758,37 @@ class _ViewHandlers:
         self._renderizar_alertas_cliente(result)
         self._rearmar_result_summary(result)
         self._insertar_en_tab(cliente_id)
+        return True
+
+    def _mostrar_tab_vacio(self, cliente_id, mensaje):
+        """Pinta un aviso en el tab cuando no hay nada que mostrar.
+
+        Dejar el placeholder "Cargando..." se lee como vista previa rota.
+        """
+        import flet as ft
+
+        if not hasattr(self, "_result_tabs") or not self._result_tabs:
+            return
+        try:
+            idx = getattr(self, "_resultado_clientes_order", []).index(cliente_id)
+        except ValueError:
+            return
+        self._result_tabs.tabs[idx].content = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.INFO_OUTLINED, size=16, color=G360Theme.text_muted_color()),
+                    ft.Text(mensaje, size=12, color=G360Theme.text_muted_color()),
+                ],
+                spacing=8,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            padding=24,
+        )
+        try:
+            if self.app.page:
+                self.app.page.update()
+        except Exception:
+            logging.getLogger(__name__).exception("page.update tras tab vacio fallo")
 
     def _obtener_vista_cliente(self, cliente_id):
         """Retorna el expediente clonado con el DF del cliente y las opciones de cálculo aplicadas, o None."""
@@ -1521,11 +1799,18 @@ class _ViewHandlers:
         if not exp_cli.resultado or exp_cli.resultado.dataframe.empty:
             return None
         vista = exp_cli
-        if self._omitir_activo():
+        if self._solo_nd_activo():
             try:
-                from src.ui.expediente_service import _clonar_sin_diferencia
+                from src.ui.expediente_service import _clonar_solo_nd
 
-                vista = _clonar_sin_diferencia(exp_cli)
+                vista = _clonar_solo_nd(exp_cli)
+            except Exception:
+                vista = exp_cli
+        elif self._ocultar_cero_activo():
+            try:
+                from src.ui.expediente_service import _clonar_sin_cero
+
+                vista = _clonar_sin_cero(exp_cli)
             except Exception:
                 vista = exp_cli
         if vista is None or not vista.resultado or vista.resultado.dataframe.empty:
@@ -1587,8 +1872,11 @@ class _ViewHandlers:
         # en el placeholder "Cargando..." para siempre (solo con 2+ clientes,
         # porque con uno se usa el panel unico).
         idx = getattr(self, "_resultado_clientes_order", []).index(cliente_id)
+        # Scroll interno: el tab vive en un area de alto fijo (ver
+        # _ALTURA_TABS_RESULTADO) y el resumen con la tabla puede ser mucho
+        # mas alto. Sin este scroll el contenido se recorta.
         tab_content = ft.Container(
-            content=self._result_summary,
+            content=ft.Column([self._result_summary], scroll=ft.ScrollMode.AUTO),
             padding=ft.padding.only(top=8),
         )
         self._result_tabs.tabs[idx].content = tab_content
@@ -1596,24 +1884,27 @@ class _ViewHandlers:
             if self.app.page:
                 self.app.page.update()
         except Exception:
-            pass
+            # No tragar el error: si el arbol no serializa (ej: un None como
+            # hijo), la pantalla queda intacta y el log es la unica pista.
+            logging.getLogger(__name__).exception("page.update tras insertar tab fallo")
 
     def _extraer_componentes_resultado(self, content):
         """Extrae los componentes estáticos del panel renderizado por nombres.
 
-        El content de render_resultado tiene estructura fija; esta función lo
-        mapea a claves legibles para evitar acceso por índices mágicos.
+        El content de render_resultado tiene estructura fija (arranca en el
+        panel de resumen: el header "RESULTADO" se elimino por duplicar el
+        titulo de la card); esta función lo mapea a claves legibles para
+        evitar acceso por índices mágicos.
         """
         controls = content.controls if content is not None else []
         return {
-            "header": controls[0] if len(controls) > 0 else None,
-            "summary_cards": controls[1] if len(controls) > 1 else None,
-            "audit_panel": controls[2] if len(controls) > 2 else None,
-            "divider1": controls[3] if len(controls) > 3 else None,
-            "legend": controls[4] if len(controls) > 4 else None,
-            "divider2": controls[5] if len(controls) > 5 else None,
-            "divider3": controls[7] if len(controls) > 7 else None,
-            "verification": controls[8] if len(controls) > 8 else None,
+            "summary_cards": controls[0] if len(controls) > 0 else None,
+            "audit_panel": controls[1] if len(controls) > 1 else None,
+            "divider1": controls[2] if len(controls) > 2 else None,
+            "legend": controls[3] if len(controls) > 3 else None,
+            "divider2": controls[4] if len(controls) > 4 else None,
+            "divider3": controls[6] if len(controls) > 6 else None,
+            "verification": controls[7] if len(controls) > 7 else None,
         }
 
     def _rearmar_result_summary(self, result):
@@ -1629,30 +1920,36 @@ class _ViewHandlers:
 
         parts = self._extraer_componentes_resultado(content)
 
+        # Cinturon: ninguna pieza None llega al arbol (Flet no serializa None
+        # y el page.update() posterior fallaria dejando la pantalla intacta).
         self._result_summary = ft.Column(
             [
-                parts["header"],
-                parts["summary_cards"],
-                parts["audit_panel"],
-                parts["divider1"],
-                parts["legend"],
-                parts["divider2"],
-                self._result_table_wrap,
-                self._result_warn_row,
-                self._result_load_more_row,
-                parts["divider3"],
-                parts["verification"],
-                self._result_btn_row,
+                c
+                for c in [
+                    parts["summary_cards"],
+                    parts["audit_panel"],
+                    parts["divider1"],
+                    parts["legend"],
+                    parts["divider2"],
+                    self._result_table_wrap,
+                    self._result_warn_row,
+                    self._result_load_more_row,
+                    parts["divider3"],
+                    parts["verification"],
+                    self._result_btn_row,
+                ]
+                if c is not None
             ],
             spacing=10,
         )
 
     def _result_load_more(self, e):
         """Carga el siguiente lote de filas de la tabla bajo demanda."""
-        from src.ui.resultados_view import _build_standard_table
+        from src.ui.resultados_view import _build_standard_table, con_monto_nd
 
         res = self.resultado.resultado
-        df = res.dataframe
+        marcar = self._marcar_nd()
+        df = con_monto_nd(res.dataframe, marcar_nd=marcar)
         current = len(self.resultados_table.rows)
         batch = 30
         max_rows = current + batch
@@ -1663,6 +1960,7 @@ class _ViewHandlers:
             max_rows=max_rows,
             sort_col=self._result_sort_col,
             sort_asc=self._result_sort_asc,
+            marcar_nd=marcar,
         )
         # Only append new rows (columns already set)
         for row in new_rows[current:]:
@@ -1692,10 +1990,11 @@ class _ViewHandlers:
 
     def _refresh_sorted_table(self):
         """Reconstruye las filas de la tabla aplicando el orden actual (solo visibles)."""
-        from src.ui.resultados_view import _build_standard_table
+        from src.ui.resultados_view import _build_standard_table, con_monto_nd
 
         res = self.resultado.resultado
-        df = res.dataframe
+        marcar = self._marcar_nd()
+        df = con_monto_nd(res.dataframe, marcar_nd=marcar)
         # Rebuild from scratch with sort
         columns, rows, info = _build_standard_table(
             df,
@@ -1704,6 +2003,7 @@ class _ViewHandlers:
             max_rows=len(df),
             sort_col=self._result_sort_col,
             sort_asc=self._result_sort_asc,
+            marcar_nd=marcar,
         )
         self.resultados_table.columns.clear()
         for col in columns:
@@ -1717,6 +2017,17 @@ class _ViewHandlers:
 
     def _generar_expediente(self, e):
         if not self.resultado or not self.resultado.resultado:
+            return
+        # Guard de firma (red de seguridad): los invalidadores por evento
+        # cubren insumos, documentos, vendedor, modalidad e historial; si aun
+        # asi las entradas cambiaron, el expediente se armaria con un
+        # calculo viejo y el texto nuevo. Se corta aca en vez de escribir.
+        if getattr(self, "_expediente_desfasado", None) and self._expediente_desfasado():
+            self.app.show_snackbar(
+                "Las entradas cambiaron después del último cálculo. "
+                "Vuelve a ejecutar el reconocimiento antes de generar el expediente.",
+                self.app.G360_WARNING,
+            )
             return
         self.app.show_loading("Generando Expediente...")
         threading.Thread(target=self._tarea_generar_expediente, daemon=True).start()
@@ -1741,8 +2052,9 @@ class _ViewHandlers:
                 antecedentes=self.antecedentes.value or "",
                 observaciones=self.observaciones.value or "",
                 desktop_path=self.app._get_desktop_path(),
-                omitir_sin_diferencia=self.chk_omitir_sin_dif.value,
-                generar_nota_debito=self.chk_gen_nd.value,
+                ocultar_cero=self.chk_ocultar_cero.value,
+                generar_nota_debito=self.chk_gen_nd.value or self.chk_solo_ndb.value,
+                solo_ndb=self.chk_solo_ndb.value,
             )
 
             self._mostrar_notificacion_generacion(exp_dirs)
@@ -1907,6 +2219,8 @@ class _ViewHandlers:
                 self._historico_config = HistorialConfig.from_caso(CATALOGO[self.tipo_actual])
                 self.resultado = None
                 self.resultados_container.visible = False
+                if hasattr(self, "_result_panel"):
+                    self._result_panel.visible = False
                 self.alertas_container.visible = False
                 self._verificar_puede_ejecutar()
                 if self.container:

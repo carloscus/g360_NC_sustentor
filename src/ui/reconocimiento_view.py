@@ -35,6 +35,8 @@ class ReconocimientoView(_ViewHelpers, _ViewPanels, _ViewHandlers):
         self.container = None
         self.df_historial = None
         self.resultado = None
+        # Vista visible: "sustento" (flujo) o "reporte" (zona independiente).
+        self._vista_actual = "sustento"
 
     def build(self):
         self._init_controls()

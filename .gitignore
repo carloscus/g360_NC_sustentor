@@ -51,5 +51,8 @@ Thumbs.db
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
 
-# Runtime: single-instance lock (se crea al arrancar la app).
+# Runtime: single-instance (se crean al arrancar la app).
+# El .pid lo escribe la instancia viva para que un arranque bloqueado pueda
+# decir a quien cerrar en vez de obligar a buscarlo en el Administrador.
 .app_instance.lock
+.app_instance.pid

@@ -1,8 +1,30 @@
 """Fixtures para tests de la capa de datos local (SQLite + captura)."""
 
 import os
+import tempfile
 
 import pytest
+
+# El log se aparta ANTES de que cualquier test importe `main`: main engancha el
+# RotatingFileHandler de %APPDATA% a los loggers "src" y "g360" en tiempo de
+# import, y ese handler vive hasta que muere el proceso. Sin esto, correr los
+# tests escribia en el app.log de produccion (medido: +330 bytes por archivo de
+# test, y 3.372 lineas de ruido de pytest accumulated en el log real).
+#
+# Va a nivel de modulo, no en una fixture: una fixture corre cuando empieza el
+# primer test, y para entonces el import ya ocurrio. Es el mismo aislamiento que
+# hace `_aislar_db_real` para la DB, del lado del log.
+_LOG_DIR_REAL = os.environ.get("G360_LOG_DIR")
+_LOG_DIR_TEST = tempfile.mkdtemp(prefix="g360-test-log-")
+os.environ["G360_LOG_DIR"] = _LOG_DIR_TEST
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Devuelve G360_LOG_DIR a como estaba y borra el log de la sesion."""
+    if _LOG_DIR_REAL is None:
+        os.environ.pop("G360_LOG_DIR", None)
+    else:
+        os.environ["G360_LOG_DIR"] = _LOG_DIR_REAL
 
 
 @pytest.fixture(autouse=True)

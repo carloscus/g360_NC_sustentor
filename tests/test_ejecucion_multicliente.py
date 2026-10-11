@@ -153,6 +153,9 @@ def test_dc_2_clientes_con_nc_no_muestra_error(tmp_db, tmp_path):
     assert view.resultado.resultado is not None
     assert not view.resultado.resultado.dataframe.empty
     assert view.resultados_container.visible is True
+    # El panel interno nace visible=False: debe encenderse al pintar.
+    assert view._result_panel.visible is True
+    assert view._result_panel.content is not None
 
 
 def test_dc_2_clientes_agrupa_en_2_tabs(tmp_db, tmp_path):
@@ -165,6 +168,9 @@ def test_dc_2_clientes_agrupa_en_2_tabs(tmp_db, tmp_path):
     view._ejecutar_tarea()
 
     assert sorted(view._resultado_clientes_order) == sorted(c for c, _r, _n in CLIENTES)
+
+    # La rama multi-cliente tambien debe encender el panel interno.
+    assert view._result_panel.visible is True
 
     # Un set por cliente, mas el global (clave None) del panel unico.
     sets = view._result_controles_por_cliente

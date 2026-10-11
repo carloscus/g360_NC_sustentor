@@ -24,8 +24,14 @@ except ImportError:
 
 _logger = logging.getLogger("g360.app")
 _fmt = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
+# Override de ruta (mismo patron que G360_DATA_DIR). El chequeo va ANTES de
+# construir el Path: `Path(os.environ.get(...) or ...)` evaluaria Path(None)
+# antes de que el `or` pueda elegir, y reventaria al arrancar.
+_log_dir_override = os.environ.get("G360_LOG_DIR")
 _log_dir = (
-    Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+    Path(_log_dir_override)
+    if _log_dir_override
+    else Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
     / "g360-erp-nc-sustentor"
 )
 
@@ -96,6 +102,70 @@ _cap_logger.setLevel(_APP_LOG_LEVEL)
 # ── Single instance (multi-PC: evitar dobles capturas por abrir 2 veces) ─────
 
 LOCK_FILE = BASE_DIR / ".app_instance.lock"
+# El PID va en OTRO archivo a proposito: escribir en el archivo bloqueado
+# libera el lock (Windows invalida los byte-range locks cuando el archivo se
+# modifica), y ahi se caeria la proteccion de instancia unica. El lock se
+# abre y se bloquea, y no se vuelve a tocar.
+PID_FILE = BASE_DIR / ".app_instance.pid"
+
+
+def _leer_pid_bloqueante() -> int | None:
+    """PID de quien tiene el lock, si se puede leer.
+
+    El mensaje de "ya existe una instancia" obligaba a ir al Administrador de
+    tareas a buscar un python.exe a ciegas. Con el PID en un archivo al lado el
+    arranque bloqueado dice a quien cerrar.
+    """
+    try:
+        crudo = PID_FILE.read_text(encoding="utf-8").strip()
+        return int(crudo) if crudo else None
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_vivo(pid: int | None) -> bool:
+    """True si el proceso existe. En Windows: OpenProcess sin error."""
+    if not pid:
+        return False
+    try:
+        import ctypes
+
+        h = ctypes.windll.kernel32.OpenProcess(
+            0x1000, False, pid
+        )  # PROCESS_QUERY_LIMITED_INFORMATION
+        if h:
+            ctypes.windll.kernel32.CloseHandle(h)
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _mensaje_instancia_duplicada() -> str:
+    """Mensaje del arranque bloqueado, segun si hay o no un dueto visible."""
+    pid = _leer_pid_bloqueante()
+    if not pid:
+        return (
+            "Ya existe una instancia de la aplicacion en ejecucion.\n\n"
+            "Cierra la ventana abierta de G360 NC Sustentor y vuelve a intentar."
+        )
+    if _pid_vivo(pid):
+        return (
+            f"Ya existe una instancia de la aplicacion en ejecucion "
+            f"(proceso {pid}).\n\n"
+            "Cierra la ventana de G360 NC Sustentor. Si no aparece, el proceso "
+            f"quedo sin ventana: terminálo desde el Administrador de tareas "
+            f"(proceso {pid}) y vuelve a intentar."
+        )
+    # El lock lo libera Windows al morir el proceso, asi que un lock tomado
+    # con PID muerto casi nunca ocurre. Si aparece, es otro programa con el
+    # archivo abierto: no prometo un cierre que no puedo hacer.
+    return (
+        "El archivo de instancia unica esta tomado por otro proceso, pero el "
+        f"PID registrado ({pid}) ya no existe.\n\n"
+        "Cierra cualquier programa que este usando la carpeta del proyecto y "
+        "vuelve a intentar."
+    )
 
 
 def _acquire_instance_lock() -> bool:
@@ -109,7 +179,13 @@ def _acquire_instance_lock() -> bool:
         except OSError:
             _fh.close()
             return False
+        # A PARTIR DE ACA no se escribe en LOCK_FILE: modificar el archivo
+        # invalida el byte-range lock y la proteccion se desactiva sola.
         globals()["_instance_fh"] = _fh  # mantener abierto mientras vivimos
+        try:
+            PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+        except OSError:
+            pass  # es solo diagnostico: sin PID el arranque sigue igual
         return True
     except Exception:
         return True  # si falla el mecanismo, no bloquear el arranque
@@ -120,6 +196,21 @@ def _log_inicio():
     _logger.info("Arranque de aplicacion (PID %s)", os.getpid())
     _logger.info("Python: %s | flet: %s", sys.version.split()[0], _flet_version())
     _logger.info("DB local: %s (existe=%s)", _db_path_str(), Path(_db_path_str()).exists())
+
+
+def _icono_ventana() -> str | None:
+    """Ruta absoluta del .ico de la ventana (barra/tarea), o None si no hay.
+
+    El acceso directo ya usa este .ico (create_shortcut.vbs); esto lo pone
+    tambien en la ventana en ejecucion (page.window.icon, solo desktop).
+    """
+    ico = BASE_DIR / "assets" / "images" / "cipsa.ico"
+    try:
+        if ico.is_file() and ico.stat().st_size > 0:
+            return str(ico)
+    except OSError:
+        pass
+    return None
 
 
 class G360App:
@@ -178,6 +269,12 @@ class G360App:
         self.page.window.height = 810
         self.page.window.min_width = 950
         self.page.window.min_height = 640
+        icono = _icono_ventana()
+        if icono:
+            try:
+                self.page.window.icon = icono
+            except Exception:
+                _logger.debug("no se pudo fijar el icono de ventana", exc_info=True)
         self._aplicar_tema()
 
     def _aplicar_tema(self):
@@ -489,6 +586,28 @@ class G360App:
             ),
         )
 
+        reporte_btn = ft.OutlinedButton(
+            content=ft.Row(
+                [
+                    ft.Icon(
+                        ft.Icons.INSIGHTS_OUTLINED,
+                        size=14,
+                        color=G360Theme.accent_color(),
+                    ),
+                    ft.Text("Reporte de compras", size=13, color=G360Theme.accent_color()),
+                ],
+                spacing=6,
+            ),
+            height=34,
+            style=_btn_style(
+                padding=ft.padding.symmetric(horizontal=14),
+                shape=ft.RoundedRectangleBorder(radius=12),
+                side=ft.BorderSide(1, G360Theme.accent_color()),
+            ),
+            on_click=lambda _: self._ir_a_reporte(),
+            tooltip="Ir a la zona de Reporte de compras",
+        )
+
         return ft.Container(
             height=64,
             bgcolor=G360Theme.surface_color(),
@@ -538,6 +657,8 @@ class G360App:
                     self._badge_api,
                     ft.Container(width=6),
                     plantillas_btn,
+                    ft.Container(width=6),
+                    reporte_btn,
                     ft.Container(width=6),
                     reset_btn,
                     ft.Container(width=6),
@@ -678,10 +799,68 @@ class G360App:
             icon_size=18,
             tooltip="Reiniciar",
             on_click=lambda _: self.reset_app(None),
-            style=ft.ButtonStyle(
+            style=_btn_style(
                 color=ft.Colors.ON_SURFACE_VARIANT,
                 bgcolor={"hovered": ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)},
                 padding=ft.padding.all(8),
+            ),
+        )
+
+        return ft.Container(
+            height=64,
+            bgcolor=G360Theme.surface_color(),
+            border=ft.border.only(bottom=ft.border.BorderSide(1, G360Theme.border_subtle_color())),
+            padding=ft.padding.symmetric(horizontal=16),
+            content=ft.Row(
+                [
+                    ft.Row(
+                        [
+                            ft.Container(
+                                content=ft.Image(
+                                    src="/images/Logo_cipsa_solid.png",
+                                    width=44,
+                                    height=44,
+                                    fit=ft.ImageFit.CONTAIN,
+                                ),
+                            ),
+                            ft.Container(width=12),
+                            ft.Row(
+                                [
+                                    ft.Text(
+                                        "NC Sustentor",
+                                        size=19,
+                                        weight=ft.FontWeight.W_800,
+                                        color=ft.Colors.ON_SURFACE,
+                                    ),
+                                    ft.Container(width=4),
+                                    ft.Container(
+                                        width=1,
+                                        height=20,
+                                        bgcolor=G360Theme.border_color(),
+                                    ),
+                                    ft.Container(width=8),
+                                    ft.Text(
+                                        "Reconocimiento Comercial",
+                                        size=14,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                spacing=0,
+                                vertical_alignment=_align(ft.CrossAxisAlignment.CENTER),
+                            ),
+                        ],
+                        vertical_alignment=_align(ft.CrossAxisAlignment.CENTER),
+                    ),
+                    ft.Container(expand=True),
+                    self._badge_api,
+                    ft.Container(width=6),
+                    plantillas_btn,
+                    ft.Container(width=6),
+                    reset_btn,
+                    ft.Container(width=6),
+                    self._theme_button,
+                ],
+                vertical_alignment=_align(ft.CrossAxisAlignment.CENTER),
             ),
         )
 
@@ -905,6 +1084,19 @@ class G360App:
 
     # ── Reset ─────────────────────────────────────────────────────────────
 
+    def _ir_a_reporte(self):
+        """Botón del header: lleva a la zona de Reporte de compras."""
+        try:
+            view = getattr(self, "reco_view", None)
+            ir = getattr(view, "ir_a_reporte", None)
+            if ir is None:
+                self.show_snackbar("Vista no disponible", self.G360_WARNING)
+                return
+            if not ir():
+                self.show_snackbar("No se pudo ir al reporte", self.G360_WARNING)
+        except Exception:
+            pass
+
     def reset_app(self, e=None):
         from src.ui.reconocimiento_view import ReconocimientoView
 
@@ -921,6 +1113,12 @@ class G360App:
             expand=True,
             spacing=0,
         )
+        # El header habla con `self.reco_view`, no con lo que esta montado en
+        # body. Sin esto seguia apuntando a la vista ANTERIOR: su container
+        # ya no estaba en el arbol, asi que "Reporte de compras" no lanzaba
+        # error ni aviso, simplemente no cambiaba de zona (mismo sintoma que un
+        # clic que no llega, pero era un bug de aqui).
+        self.reco_view = view
         if self.page:
             self.page.update()
         self.show_snackbar("App reiniciado", self.G360_SUCCESS)
@@ -1136,11 +1334,7 @@ def _dump_control_tree(control, label="", depth=0):
 if __name__ == "__main__":
     try:
         if not _acquire_instance_lock():
-            msg = (
-                "Ya existe una instancia de la aplicacion en ejecucion.\n\n"
-                "Cierra la ventana abierta de G360 NC Sustentor (o el proceso "
-                "python.exe desde el Administrador de tareas) y vuelve a intentar."
-            )
+            msg = _mensaje_instancia_duplicada()
             print(msg, flush=True)
             _logger.warning("Segundo arranque bloqueado (single instance)")
             try:
