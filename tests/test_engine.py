@@ -568,14 +568,16 @@ class TestPipeline:
         assert result.resultado is not None
 
 
-from src.ui.expediente_service import _clonar_sin_diferencia
+from src.ui.expediente_service import _clonar_sin_cero
 from types import SimpleNamespace
 
 
-class TestClonarSinDiferencia:
-    """El filtro omitir_sin_diferencia debe excluir:
+class TestClonarSinCero:
+    """El filtro ocultar_cero debe excluir:
     - |DIFERENCIA| <= 0.001 (coincidencia exacta, AL02)
     - ALERTA == "AL11" (redondeo acumulable dentro de tolerancia)
+
+    Las negativas SE CONSERVAN (candidatas ND) aunque su MONTO_NC sea 0.
     """
 
     def _make_res(self, diferencias, alertas, cantidad=1):
@@ -603,7 +605,7 @@ class TestClonarSinDiferencia:
     def test_excluye_al02_coincidencia_exacta(self):
         res = self._make_res([0.0005], ["AL02 - Precios coinciden"])
         exp = SimpleNamespace(resultado=res, datos=res.dataframe, contexto={})
-        sub = _clonar_sin_diferencia(exp)
+        sub = _clonar_sin_cero(exp)
         # Todas las filas filtradas -> retorna None
         assert sub is None
 
@@ -612,14 +614,14 @@ class TestClonarSinDiferencia:
             [0.004], ["AL11 - Redondeo acumulable (unit. S/ 0.004, total S/ 0.00)"]
         )
         exp = SimpleNamespace(resultado=res, datos=res.dataframe, contexto={})
-        sub = _clonar_sin_diferencia(exp)
+        sub = _clonar_sin_cero(exp)
         # Todas las filas filtradas -> retorna None
         assert sub is None
 
     def test_mantiene_al01_diferencia_real(self):
         res = self._make_res([0.05], ["AL01 - Diferencia positiva S/ 0.05"])
         exp = SimpleNamespace(resultado=res, datos=res.dataframe, contexto={})
-        sub = _clonar_sin_diferencia(exp)
+        sub = _clonar_sin_cero(exp)
         assert sub is not None
         assert not sub.resultado.dataframe.empty
         assert len(sub.resultado.dataframe) == 1
@@ -631,7 +633,7 @@ class TestClonarSinDiferencia:
             ["AL01 - Diferencia positiva S/ 0.05", "AL11 - Redondeo acumulable"],
         )
         exp = SimpleNamespace(resultado=res, datos=res.dataframe, contexto={})
-        sub = _clonar_sin_diferencia(exp)
+        sub = _clonar_sin_cero(exp)
         assert sub is not None
         assert len(sub.resultado.dataframe) == 1
         assert "AL01" in sub.resultado.dataframe["ALERTA"].iloc[0]
@@ -639,26 +641,82 @@ class TestClonarSinDiferencia:
     def test_devuelve_none_si_todo_se_filtra(self):
         res = self._make_res([0.0001, 0.003], ["AL02", "AL11"])
         exp = SimpleNamespace(resultado=res, datos=res.dataframe, contexto={})
-        sub = _clonar_sin_diferencia(exp)
+        sub = _clonar_sin_cero(exp)
         assert sub is None
 
-    def test_excluye_diferencia_negativa_monto_cero(self):
-        """Diferencia negativa (-0.021) genera MONTO_NC=0 por clip -> se excluye."""
+    def test_mantiene_diferencia_negativa(self):
+        """Diferencia negativa (-0.02128) se conserva: es candidata a ND."""
         res = self._make_res([-0.02128], ["AL02 - Diferencia negativa, sin NC"])
         exp = SimpleNamespace(resultado=res, datos=res.dataframe, contexto={})
-        sub = _clonar_sin_diferencia(exp)
-        assert sub is None, "Se debio filtrar la fila con MONTO_NC=0"
+        sub = _clonar_sin_cero(exp)
+        assert sub is not None
+        assert len(sub.resultado.dataframe) == 1
 
-    def test_mantiene_al01_con_monto_real(self):
-        """AL01 con MONTO_NC > 0 se mantiene aunque haya diferencia negativa en otra fila."""
+    def test_mantiene_al01_y_negativa(self):
+        """AL01 y negativa conviven: el filtro solo saca el 0.00."""
         res = self._make_res(
             [-0.02128, 0.05],
             ["AL02 - Diferencia negativa", "AL01 - Diferencia positiva S/ 0.05"],
         )
         exp = SimpleNamespace(resultado=res, datos=res.dataframe, contexto={})
-        sub = _clonar_sin_diferencia(exp)
+        sub = _clonar_sin_cero(exp)
         assert sub is not None
-        assert len(sub.resultado.dataframe) == 1
+        assert len(sub.resultado.dataframe) == 2
+
+
+class TestClonarSoloNd:
+    """El modo Solo NDB conserva unicamente filas con diferencia negativa."""
+
+    def _make_exp(self):
+        import pandas as pd
+        from src.domain import RecognitionResult
+        from src.ui.expediente_service import _clonar_solo_nd
+
+        df = pd.DataFrame(
+            {
+                "SKU": ["NEG", "POS", "CERO"],
+                "DIFERENCIA": [-0.2, 0.1, 0.0],
+                "MONTO_NC": [0.0, 5.0, 0.0],
+                "CANTIDAD": [10, 2, 5],
+            }
+        )
+        res = RecognitionResult(dataframe=df)
+        res.resumen = {"total_nc": 5.0, "skus_afectados": 1}
+        exp = SimpleNamespace(resultado=res, datos=df, contexto={})
+        return _clonar_solo_nd, exp
+
+    def test_solo_negativas(self):
+        _clonar_solo_nd, exp = self._make_exp()
+        sub = _clonar_solo_nd(exp)
+        assert sub is not None
+        assert sub.resultado.dataframe["SKU"].tolist() == ["NEG"]
+
+    def test_sin_negativas_devuelve_none(self):
+        import pandas as pd
+        from src.domain import RecognitionResult
+        from src.ui.expediente_service import _clonar_solo_nd
+
+        df = pd.DataFrame({"SKU": ["A"], "DIFERENCIA": [0.1], "MONTO_NC": [5.0]})
+        res = RecognitionResult(dataframe=df)
+        res.resumen = {"total_nc": 5.0, "skus_afectados": 1}
+        exp = SimpleNamespace(resultado=res, datos=df, contexto={})
+        assert _clonar_solo_nd(exp) is None
+
+    def test_resultado_efectivo_solo_nd(self):
+        from src.ui.reconocimiento_view import ReconocimientoView
+
+        _, exp = self._make_exp()
+        fake = SimpleNamespace(
+            resultado=exp,
+            chk_solo_ndb=SimpleNamespace(value=True),
+            chk_ocultar_cero=SimpleNamespace(value=True),
+        )
+        # Metodos reales enlazados al fake: cubre el cableado de los checks.
+        fake._solo_nd_activo = ReconocimientoView._solo_nd_activo.__get__(fake)
+        fake._ocultar_cero_activo = ReconocimientoView._ocultar_cero_activo.__get__(fake)
+        vista = ReconocimientoView._resultado_efectivo(fake)
+        assert vista is not None
+        assert vista.resultado.dataframe["SKU"].tolist() == ["NEG"]
 
 
 class TestRenderOpcionesCalculo:
@@ -749,3 +807,96 @@ class TestRenderOpcionesCalculo:
         assert r["total_nc"] == "S/ 5.00"
         assert len(r["table_rows"]) == 3
         assert r["status_counts"]["n_nd"] == 1
+
+    @staticmethod
+    def _texto_celda(cell):
+        import flet as ft
+
+        c = cell.content
+        if isinstance(c, ft.Container):
+            c = c.content
+        return c.value
+
+    @staticmethod
+    def _textos(control):
+        import flet as ft
+
+        out = []
+        v = getattr(control, "value", None)
+        if isinstance(v, str):
+            out.append(v)
+        for attr in ("controls", "content"):
+            h = getattr(control, attr, None)
+            if isinstance(h, ft.Control):
+                out.extend(TestRenderOpcionesCalculo._textos(h))
+            elif isinstance(h, (list, tuple)):
+                for x in h:
+                    if isinstance(x, ft.Control):
+                        out.extend(TestRenderOpcionesCalculo._textos(x))
+        return out
+
+    def _render(self, marcar_nd):
+        from src.ui.resultados_view import render_resultado
+        from src.domain import RecognitionResult
+
+        df = self._make_df()
+        res = RecognitionResult(dataframe=df.copy(), dataframe_excel=df.copy())
+        res.resumen = {"total_nc": 5.0, "skus_afectados": 1}
+        res.alertas = []
+        res.metricas = {}
+        exp = SimpleNamespace(resultado=res, datos=df.copy(), contexto={"config": {}})
+        return render_resultado(
+            exp, "descuento_precio", df.copy(), "#123456", "#34d399", marcar_nd=marcar_nd
+        )
+
+    def test_columna_monto_nd_y_tile(self):
+        # Fila B: |-0.20| x 10 = 2.00; A y C en 0.
+        r = self._render(True)
+        nombres = [c.label.value for c in r["table_columns"]]
+        assert "MONTO_ND" in nombres
+        assert nombres.index("MONTO_ND") == nombres.index("MONTO_NC") + 1
+        idx = nombres.index("MONTO_ND")
+        assert [self._texto_celda(row.cells[idx]) for row in r["table_rows"]] == [
+            "0.00",
+            "2.00",
+            "0.00",
+        ]
+        textos = self._textos(r["content"])
+        assert "Total ND" in textos
+        assert "S/ 2.00" in textos
+
+    def test_sin_marcar_nd_no_hay_columna_ni_tile(self):
+        r = self._render(False)
+        nombres = [c.label.value for c in r["table_columns"]]
+        assert "MONTO_ND" not in nombres
+        assert "Total ND" not in self._textos(r["content"])
+
+    def test_ordenar_por_monto_nd(self):
+        from src.ui.resultados_view import _build_standard_table, con_monto_nd
+
+        df = con_monto_nd(self._make_df(), marcar_nd=True)
+        _, rows, _ = _build_standard_table(
+            df,
+            pd.DataFrame(),
+            "descuento_precio",
+            sort_col="MONTO_ND",
+            sort_asc=False,
+            marcar_nd=True,
+        )
+        assert self._texto_celda(rows[0].cells[0]) == "B"
+
+    def test_alerta_nd_potencial_sin_check(self):
+        # Fila B: |-0.20| x 10 = 2.00 de potencial aunque el check este apagado.
+        r = self._render(False)
+        assert r["status_counts"]["n_negativas"] == 1
+        assert r["status_counts"]["monto_nd_potencial"] == 2.00
+        w = r["expediente_warning"]
+        assert w is not None
+        txt = " ".join(self._textos(w))
+        assert "S/ 2.00" in txt
+        assert "petición" in txt
+
+    def test_con_check_no_hay_aviso_de_peticion(self):
+        # Mixto con ND activo: las filas ya se marcan, no hace falta banner.
+        r = self._render(True)
+        assert r["expediente_warning"] is None

@@ -158,7 +158,8 @@ def generar_historico_clasico(
 
     Args:
         reclamados: conjunto de tuplas (factura_id, sku) incluidas en el
-            Cálculo; esas filas se resaltan con relleno y leyenda.
+            Cálculo; esas filas se resaltan con relleno y leyenda. Sin filas
+            congeladas en ninguna hoja (politica general de reportes xlsx).
     """
     from src.core.fechas import fecha_ui
 
@@ -325,9 +326,7 @@ def generar_historico_clasico(
         if "FECHA" in df.columns and len(df):
             from src.core.fechas import a_fecha as _a_fecha
 
-            fechas_reales = all(
-                _a_fecha(v) is not None for v in df["FECHA"].tolist()
-            )
+            fechas_reales = all(_a_fecha(v) is not None for v in df["FECHA"].tolist())
 
         r = hdr_row + 1
         tot_cant = 0.0
@@ -444,9 +443,8 @@ def generar_historico_clasico(
         ws.page_setup.fitToPage = True
         ws.page_setup.fitToWidth = 1
         ws.sheet_view.showGridLines = False
-        # Cabecera fija: al partir por año las hojas son largas y sin esto se
-        # pierde el encabezado al hacer scroll.
-        ws.freeze_panes = f"A{hdr_row + 1}"
+        # Sin filas congeladas: los reportes xlsx no llevan freeze panes
+        # (politica general del ecosistema).
 
     # ── Hojas: una por año calendar ──
     # Con un solo año se mantiene la hoja única "Historico" de siempre.

@@ -158,11 +158,12 @@ def test_el_resaltado_de_reclamo_queda_en_su_hoja(tmp_path):
     assert "SKU4" not in amarillas, "el reclamo se pintó en la hoja equivocada"
 
 
-def test_cabecera_fija_y_area_de_impresion_por_hoja(tmp_path):
+def test_sin_filas_congeladas_y_area_de_impresion_por_hoja(tmp_path):
     wb = _generar(MULTI, tmp_path)
     for hoja in wb.sheetnames:
         ws = wb[hoja]
-        assert ws.freeze_panes == "A13", hoja
+        # Politica general: los reportes xlsx no llevan filas congeladas.
+        assert ws.freeze_panes is None, hoja
         assert ws.print_area.endswith("$J$%d" % int(ws.print_area.split("$J$")[1]))
 
 

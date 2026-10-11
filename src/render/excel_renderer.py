@@ -57,7 +57,11 @@ def _build_qr_data(
     ruc_adq: str,
     tipo_doc: str = "01",
 ) -> str:
-    """Construye la cadena QR SUNAT (pipe-delimited, hash vacío como placeholder)."""
+    """Construye la cadena QR SUNAT (pipe-delimited, hash vacío como placeholder).
+
+    El pipe final reproduce el formato del QR impreso de SUNAT: 11 campos con
+    el último vacío (tras el hash del CDR).
+    """
     mont_igv = round(monto_total * 0.18 / 1.18, 2)
     return "|".join(
         [
@@ -70,6 +74,7 @@ def _build_qr_data(
             fecha,
             "6",
             ruc_adq,
+            "",
             "",
         ]
     )
@@ -817,6 +822,7 @@ class ExcelRenderer(_CalculoWriter):
             periodo=periodo,
             antecedentes=antecedentes,
             observaciones=observaciones,
+            fecha_qr=(resultado.metricas or {}).get("fecha_factura", ""),
         )
 
         if tipo == "rebate_volumen" and resultado.metricas:
@@ -1014,24 +1020,40 @@ class ExcelRenderer(_CalculoWriter):
         ws_res.sheet_view.showGridLines = False
 
     def _insert_qr_anf(
-        self, df: pd.DataFrame, doc_ref: str, monto_total: float, ruc_cliente: str
+        self,
+        df: pd.DataFrame,
+        doc_ref: str,
+        monto_total: float,
+        ruc_cliente: str,
+        fecha_factura: str = "",
     ) -> Optional[BytesIO]:
-        """Genera imagen QR SUNAT paraANF, referenciando la factura original."""
-        # Parsear serie y numero de doc_ref (formato "F204-64777")
+        """Genera imagen QR SUNAT para ANF, referenciando la factura original.
+
+        `fecha_factura` (metricas del motor) tiene prioridad: es la fecha de
+        emision de la factura original, no la fecha de generacion del
+        expediente (el dataframe resultado no trae FECHA).
+        """
+        # Parsear serie y numero de doc_ref. Formato real 3 partes
+        # ("F01-204-69002" = TIPO-SERIE-NUMERO); legacy 2 partes ("F204-69002").
         serie, numero = "", ""
         if "-" in doc_ref:
-            serie_part, numero = doc_ref.rsplit("-", 1)
-            serie = serie_part[1:] if len(serie_part) > 1 else serie_part  # "204" from "F204"
-        # Extraer fecha de la factura desde el dataframe
-        fecha = ""
-        for col in ("FECHA", "fecha"):
-            if col in df.columns and not df[col].isna().all():
-                val = df[col].iloc[0]
-                if hasattr(val, "date"):
-                    fecha = val.date().isoformat()
-                else:
-                    fecha = str(val)[:10]
-                break
+            partes = doc_ref.split("-")
+            if len(partes) >= 3:
+                serie, numero = partes[1], partes[2]
+            else:
+                serie = partes[0][1:] if len(partes[0]) > 1 else ""
+                numero = partes[1]
+        # Fecha de emision de la factura: metricas > dataframe > hoy.
+        fecha = (fecha_factura or "").strip()
+        if not fecha:
+            for col in ("FECHA", "fecha"):
+                if col in df.columns and not df[col].isna().all():
+                    val = df[col].iloc[0]
+                    if hasattr(val, "date"):
+                        fecha = val.date().isoformat()
+                    else:
+                        fecha = str(val)[:10]
+                    break
         if not fecha:
             fecha = datetime.now().strftime("%Y-%m-%d")
         qr_data = _build_qr_data(
@@ -1056,9 +1078,14 @@ class ExcelRenderer(_CalculoWriter):
         periodo="",
         antecedentes="",
         observaciones="",
+        fecha_qr="",
     ):
         """Header corporativo: barra título, DATOS DE LA OPERACIÓN (izq.) y
-        TOTALES (der.) en formulas SUM vivas; antecedentes debajo."""
+        TOTALES (der.) en formulas SUM vivas; antecedentes debajo.
+
+        `fecha_qr` (metricas del motor, ANF) lleva la fecha de emisión de la
+        factura original para el QR SUNAT.
+        """
         ws = self.ws
         label_tipo = _label_tipo(tipo).replace("NC por ", "")
         subtitulo = _naming(tipo, "subtitulo", "")
@@ -1127,6 +1154,19 @@ class ExcelRenderer(_CalculoWriter):
         _panel_title(r, 1, "DATOS DE LA OPERACIÓN", 4)
         _panel_title(r, tl_col, "TOTALES", tv_col)
 
+        # ANF: QR en I3 (alineado con el panel TOTALES)
+        if tipo == "anular_factura":
+            qr_buf = self._insert_qr_anf(df, doc_ref, total_nc, ruc or "", fecha_factura=fecha_qr)
+            if qr_buf:
+                qr_img = XlImage(qr_buf)
+                qr_img.width = 90
+                qr_img.height = 90
+                ws.add_image(qr_img, "I3")
+                ws.cell(row=3, column=max_col, value="QR SUNAT\n(Factura ref.)").font = Font(
+                    size=7, color=EXP_FAINT, italic=True
+                )
+                ws.cell(row=3, column=max_col).alignment = Alignment(horizontal="center")
+
         _field(4, 1, 2, "Cliente", cliente or "—")
         _field(5, 1, 2, "RUC", ruc or "—")
         _field(6, 1, 2, "Vendedor", vendedor or "—")
@@ -1154,6 +1194,27 @@ class ExcelRenderer(_CalculoWriter):
         self._hdr_sub_row, self._hdr_igv_row, self._hdr_tot_row = 4, 5, 6
         self._hdr_sub_col = self._hdr_igv_col = self._hdr_tot_col = tv_col
 
+        # ANF: fila NC debajo de los totales — demuestra la aplicación directa
+        # (NC = 100% de la factura: misma cifra que el SUM de la columna MONTO).
+        # Va DESPUES de _total_row para no ser pisada, y _fijar_totales_formulas
+        # no toca la fila 7, asi que la fórmula sobrevive.
+        if tipo == "anular_factura":
+            nc_lbl = ws.cell(row=7, column=tl_col, value="NC (100% de la factura):")
+            nc_lbl.font = Font(bold=True, size=10, color=EXP_NAVY)
+            nc_lbl.alignment = Alignment(horizontal="right", vertical="center")
+            nc_lbl.fill = PatternFill(
+                start_color=EXP_TOTAL_BG, end_color=EXP_TOTAL_BG, fill_type="solid"
+            )
+            nc_lbl.border = THIN_BORDER
+            nc_val = ws.cell(
+                row=7,
+                column=tv_col,
+                value=f"={get_column_letter(tv_col)}{self._hdr_sub_row}",
+            )
+            nc_val.number_format = S_PEN
+            nc_val.font = Font(bold=True, size=11, color=EXP_NAVY)
+            nc_val.border = THIN_BORDER
+
         r = 10  # fila en blanco antes del bloque de sustento
 
         # ── Sustento (solo narrativa; sin bloque de observaciones: estas
@@ -1177,20 +1238,10 @@ class ExcelRenderer(_CalculoWriter):
         ws.row_dimensions[r].height = min(150, max(30, n_lineas * 15))
         r += 2
 
-        # ── QR Code SUNAT (ANF: referencia a factura original) ─────────
-        if tipo == "anular_factura":
-            r_qr = r + 1
-            qr_buf = self._insert_qr_anf(df, doc_ref, total_nc, ruc or "")
-            if qr_buf:
-                qr_img = XlImage(qr_buf)
-                qr_img.width = 110
-                qr_img.height = 110
-                ws.add_image(qr_img, f"{get_column_letter(max_col)}{r_qr}")
-                ws.cell(row=r_qr, column=max_col, value="QR SUNAT\n(Factura ref.)").font = Font(
-                    size=7, color=EXP_FAINT, italic=True
-                )
-                ws.cell(row=r_qr, column=max_col).alignment = Alignment(horizontal="center")
-            r = r_qr + 2
+        # ── QR Code SUNAT (ANF) ────────────────────────────────────────
+        # El QR ya se colocó en I3 en el encabezado. Sin filas en blanco
+        # extra: la tabla arranca en la fila 12 (justificación en 10,
+        # separador en 11).
 
         # Column widths
         ws.column_dimensions["A"].width = 14
@@ -1519,4 +1570,3 @@ class ExcelRenderer(_CalculoWriter):
 
         ws.column_dimensions["A"].width = 24
         ws.column_dimensions["B"].width = 58
-        ws.freeze_panes = "A2"

@@ -6,11 +6,26 @@ from src.domain import (
     generar_texto_alerta,
 )
 
+import pandas as pd
+
+
+def _parse_factura_id(factura_id) -> tuple[str, str]:
+    """(tipo_prefix, nro) desde "TIPO-SERIE-NRO" (tolerante)."""
+    fid = str(factura_id).strip()
+    if "-" in fid:
+        serie_nro, nro_part = fid.rsplit("-", 1)
+        tipo_prefix = serie_nro[0].upper() if serie_nro else "F"
+    else:
+        tipo_prefix, nro_part = "F", fid
+    nro_norm = nro_part.strip().lstrip("0") or "0"
+    return tipo_prefix, nro_norm
+
 
 class CancelInvoiceStrategy:
     """
-    Genera NC por el 100% del valor de una factura específica.
-    No necesita lista de precios ni SKU — solo historial + selección de factura.
+    Genera NC por el 100% del valor de una o varias facturas específicas,
+    de uno o varios clientes. No necesita lista de precios ni SKU —
+    solo historial + selección de factura(s).
     """
 
     def process(self, expediente: ExpedienteComercial) -> RecognitionResult:
@@ -19,8 +34,13 @@ class CancelInvoiceStrategy:
         alertas = []
         trazabilidad = []
 
-        factura_id = config.get("factura_id", "")
-        if not factura_id:
+        factura_ids = config.get("factura_ids") or []
+        if isinstance(factura_ids, str):
+            factura_ids = [factura_ids]
+        if not factura_ids and config.get("factura_id"):
+            factura_ids = [config.get("factura_id")]
+        factura_ids = [str(f).strip() for f in factura_ids if str(f).strip()]
+        if not factura_ids:
             return RecognitionResult(
                 alertas=[
                     BusinessAlert(
@@ -33,44 +53,63 @@ class CancelInvoiceStrategy:
                 resumen={"total_nc": 0, "skus_afectados": 0},
             )
 
-        trazabilidad.append(f"Anulando factura: {factura_id}")
+        trazabilidad.append(f"Anulando {len(factura_ids)} factura(s): {', '.join(factura_ids)}")
 
-        # Parsear factura seleccionada
-        if "-" in factura_id:
-            serie_nro, nro_part = factura_id.rsplit("-", 1)
-            tipo_prefix = serie_nro[0]  # "F" for "F01204"
-        else:
-            tipo_prefix, nro_part = "F", factura_id
+        # Una o varias facturas (quizas de varios clientes): se filtran por
+        # separado y se concatenan, etiquetando cada fila con su factura.
+        # El numero se compara sin ceros ("067375" y "67375" son el mismo).
+        partes = []
+        for fid in factura_ids:
+            tipo_prefix, nro_norm = _parse_factura_id(fid)
+            mask = (
+                df["TIPO_DOC"].astype(str).str.strip().str.upper().str.startswith(tipo_prefix)
+                & (df["SERIE"].astype(str).str.strip() != "")
+                & (
+                    df["NUMERO"].astype(str).str.strip().str.lstrip("0").replace("", "0")
+                    == nro_norm
+                )
+            )
+            sub = df[mask].copy()
+            if sub.empty:
+                alertas.append(
+                    BusinessAlert(
+                        tipo="warning",
+                        severidad="media",
+                        mensaje=f"Factura {fid} no encontrada en historial",
+                        motor="CancelInvoice",
+                    )
+                )
+                continue
+            sub["_factura_label"] = fid
+            partes.append(sub)
 
-        # Filtrar historial por esa factura (usar startswith + numeric nro)
-        mask_tipo = df["TIPO_DOC"].astype(str).str.strip().str.upper().str.startswith(tipo_prefix)
-        mask_serie = df["SERIE"].astype(str).str.strip() != ""
-        mask_nro = df["NUMERO"].astype(str).str.strip() == nro_part
-        mask = mask_tipo & mask_serie & mask_nro
-
-        factura_df = df[mask].copy()
-        if factura_df.empty:
+        if not partes:
+            detalle = factura_ids[0] if len(factura_ids) == 1 else ", ".join(factura_ids)
             return RecognitionResult(
                 alertas=[
                     BusinessAlert(
                         tipo="error",
                         severidad="alta",
-                        mensaje=f"Factura {factura_id} no encontrada en historial",
+                        mensaje=f"Factura {detalle} no encontrada en historial",
                         motor="CancelInvoice",
                     )
                 ],
                 resumen={"total_nc": 0, "skus_afectados": 0},
             )
 
+        factura_df = pd.concat(partes, ignore_index=True)
+
         # Calcular total
         total_factura = factura_df["SOLES"].sum()
         total_cantidad = factura_df["CANTIDAD"].sum()
         skus = factura_df["CODIGO"].nunique()
-        factura_label = factura_id
 
-        trazabilidad.append(
-            f"Factura {factura_label}: {skus} SKU, {total_cantidad:.0f} unid, S/ {total_factura:.2f}"
-        )
+        for fid in sorted(factura_df["_factura_label"].unique()):
+            sub = factura_df[factura_df["_factura_label"] == fid]
+            trazabilidad.append(
+                f"Factura {fid}: {sub['CODIGO'].nunique()} SKU, "
+                f"{sub['CANTIDAD'].sum():.0f} unid, S/ {sub['SOLES'].sum():.2f}"
+            )
 
         # Construir resultado: cada línea de factura (sin agrupar)
         cols_base = ["CODIGO", "ARTICULO", "CANTIDAD", "PRECIO_UNITARIO", "SOLES"]
@@ -78,10 +117,21 @@ class CancelInvoiceStrategy:
         resultado = factura_df[cols_disponibles].copy()
         if "LINEA" in factura_df.columns:
             resultado["LINEA"] = factura_df["LINEA"]
+        # Cliente por fila (el historial trae ambas variantes de nombre):
+        # habilita tabs por cliente y expedientes separados.
+        for dst, srcs in (
+            ("CLIENTE", ("nom_cliente", "CLIENTE")),
+            ("COD_CLIENTE", ("id_cliente", "COD_CLIENTE")),
+            ("DOC_CLIENTE", ("doc_cliente", "DOC_CLIENTE")),
+        ):
+            for s in srcs:
+                if s in factura_df.columns:
+                    resultado[dst] = factura_df[s]
+                    break
         resultado = resultado.rename(
             columns={"CODIGO": "SKU", "PRECIO_UNITARIO": "PRECIO_HIST", "SOLES": "MONTO_FACTURA"}
         )
-        resultado["FACTURA"] = factura_label
+        resultado["FACTURA"] = factura_df["_factura_label"]
         resultado["MONTO_NC"] = resultado["MONTO_FACTURA"]  # 100% del valor
         resultado["ALERTA"] = generar_texto_alerta("OK")
 
@@ -96,23 +146,31 @@ class CancelInvoiceStrategy:
         )
         igv_factura = round(total_factura * 0.18 / 1.18, 2)  # IGV incluido en SOLES
 
-        rec = ReconocimientoPorCondicion(
-            condicion_id="anular_factura",
-            fuente=factura_label,
-            estrategia="CancelInvoice",
-            monto_reconocido=float(total_factura),
-            cantidad_aplicada=float(total_cantidad),
-            skus=factura_df["CODIGO"].unique().tolist(),
-            documentos=[factura_label],
-        )
+        recs = []
+        encontradas = [f for f in factura_ids if f in set(factura_df["_factura_label"])]
+        for fid in encontradas:
+            sub = factura_df[factura_df["_factura_label"] == fid]
+            recs.append(
+                ReconocimientoPorCondicion(
+                    condicion_id="anular_factura",
+                    fuente=fid,
+                    estrategia="CancelInvoice",
+                    monto_reconocido=float(sub["SOLES"].sum()),
+                    cantidad_aplicada=float(sub["CANTIDAD"].sum()),
+                    skus=sub["CODIGO"].unique().tolist(),
+                    documentos=[fid],
+                )
+            )
 
         return RecognitionResult(
             dataframe=resultado,
-            por_condicion=[rec],
+            por_condicion=recs,
             resumen={"total_nc": float(total_factura), "skus_afectados": skus},
             metricas={
                 "total_cantidad": float(total_cantidad),
-                "factura": factura_label,
+                "factura": encontradas[0]
+                if len(encontradas) == 1
+                else f"{len(encontradas)} facturas",
                 "fecha_factura": fecha_factura,
                 "ruc_cliente": ruc_cliente,
                 "igv_factura": igv_factura,

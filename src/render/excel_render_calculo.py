@@ -208,7 +208,8 @@ class _CalculoWriter:
             if "width" in col_def:
                 ws.column_dimensions[get_column_letter(i)].width = col_def["width"]
 
-        ws.freeze_panes = f"A{r + 1}"
+        # Sin filas congeladas: los reportes xlsx no llevan freeze panes
+        # (politica general del ecosistema).
         data_start = r + 1
         r = data_start
 
@@ -366,6 +367,7 @@ class _CalculoWriter:
                         "META",
                         "MONTO REBATE",
                         "MONTO FACTURA",
+                        "TOTAL FACTURA",
                     ):
                         val = self._obtener_valor(row, *keys, default=0)
                     elif col_def["header"] in (
@@ -376,6 +378,8 @@ class _CalculoWriter:
                         "PRECIO RECONOC.",
                         "PRECIO APLICABLE",
                         "PRECIO UNID.",
+                        "P. UNITARIO",
+                        "P. UNITARIO NETO",
                         "PRECIO NETO",
                         "PRECIO ATENDIDO",
                         "DIF. UNITARIA",
@@ -1000,7 +1004,6 @@ class _CalculoWriter:
             if cd.get("width"):
                 ws.column_dimensions[get_column_letter(i)].width = cd["width"]
 
-        ws.freeze_panes = f"A{r + 1}"
         r += 1
 
         base_col = get_column_letter(4)
