@@ -465,7 +465,31 @@ class TestExpedienteLog:
         assert any("sin filas con diferencia" in m for m in msgs)
 
     def test_solo_ndb_sin_nc_genera_solo_calculond(self, caplog, tmp_path):
-        """Todo negativo + ND: expediente solo-NDB (unicamente CalculoND)."""
+        """Todo negativo + ND + check Solo NDB: expediente solo-NDB (unicamente CalculoND).
+
+        El modo solo-NDB es MANUAL: sin el check no se fuerza, aunque el
+        monto NC sea 0. Antes habia un automatico que lo activaba solo.
+        """
+        _nivel(caplog, logging.INFO, LOG_EXP)
+        exp, hist, policy = _exp_real()
+        df = exp.resultado.dataframe
+        df["DIFERENCIA"] = -0.5
+        if "MONTO_NC" in df.columns:
+            df["MONTO_NC"] = 0.0
+        exp.resultado.resumen["total_nc"] = 0.0
+        dirs = _gen(exp, hist, policy, tmp_path, generar_nota_debito=True, solo_ndb=True)
+        assert len(dirs) == 1
+        nombres = sorted(p.name for p in dirs[0].iterdir() if p.is_file())
+        assert len(nombres) == 1 and "CalculoND" in nombres[0]
+        msgs = _avisos(caplog, LOG_EXP, logging.INFO)
+        assert any("solo-NDB" in m for m in msgs)
+
+    def test_sin_check_no_hay_solo_ndb_aunque_no_haya_nc(self, caplog, tmp_path):
+        """Sin el check, el expediente sale normal aunque el monto NC sea 0.
+
+        Sin este test, el automatico viejo volvia: todo negativo generaba
+        solo CalculoND sin que nadie lo pidiera.
+        """
         _nivel(caplog, logging.INFO, LOG_EXP)
         exp, hist, policy = _exp_real()
         df = exp.resultado.dataframe
@@ -476,9 +500,10 @@ class TestExpedienteLog:
         dirs = _gen(exp, hist, policy, tmp_path, generar_nota_debito=True)
         assert len(dirs) == 1
         nombres = sorted(p.name for p in dirs[0].iterdir() if p.is_file())
-        assert len(nombres) == 1 and "CalculoND" in nombres[0]
-        msgs = _avisos(caplog, LOG_EXP, logging.INFO)
-        assert any("solo-NDB" in m for m in msgs)
+        assert any("CalculoND" in n for n in nombres)
+        assert any("Calculo" in n and "CalculoND" not in n for n in nombres), (
+            "sin el check tiene que salir tambien el calculo normal, no solo el ND"
+        )
 
     def test_solo_ndb_explicito_con_nc_genera_solo_calculond(self, caplog, tmp_path):
         """Con NC y ND: el check Solo NDB genera unicamente el CalculoND."""

@@ -75,8 +75,10 @@ def generar_expediente(
     Consolidado: un expediente por cliente.
 
     `solo_ndb` (check Solo NDB): aunque haya monto NC, el expediente sale
-    unicamente con CalculoND. Sin el check, el modo solo-NDB igual aplica
-    automatico cuando el monto NC es 0 y hay ND. Por defecto solo se hace NC.
+    unicamente con CalculoND. Es MANUAL a proposito: sin el check nunca se
+    fuerza ese modo, ni siquiera cuando el monto NC es 0 (un automatico
+    silencioso confundia: el usuario esperaba el expediente normal y recibia
+    otro). Por defecto solo se hace NC.
     """
     res = resultado.resultado
     df_res = res.dataframe if res is not None else pd.DataFrame()
@@ -662,8 +664,8 @@ def _generar_uno(
 ) -> Path:
     """Genera UN expediente (Excel + DOCX) y retorna el directorio.
 
-    Naming: ver el docstring del módulo. Con `solo_ndb` pedido (o monto NC
-    en cero con ND presente) sale unicamente el CalculoND.
+    Naming: ver el docstring del módulo. Con `solo_ndb` pedido sale
+    unicamente el CalculoND; sin el check, nunca se fuerza ese modo.
     """
     res = resultado.resultado
     cliente = _resolve_cliente(cliente_value, res, df_historial)
@@ -722,7 +724,11 @@ def _generar_uno(
     if df_nd is not None and not df_nd.empty:
         nd_sub = _filtrar_nd_scope(df_nd, cliente, doc_ref, modalidad)
     hay_nd = nd_sub is not None and not nd_sub.empty
-    solo_nd = (solo_ndb or nc_total <= 0.001) and hay_nd
+    # Solo-NDB es MANUAL: solo cuando el usuario marco el check. Antes habia
+    # un automatico (nc_total <= 0.001) que sacaba unicamente CalculoND sin
+    # avisar, y eso confunde: el usuario espera el expediente normal y recibe
+    # otro sin haberlo pedido.
+    solo_nd = _decidir_solo_nd(solo_ndb, hay_nd)
     if solo_nd:
         logger.info(
             "expediente %s: modo solo-NDB (sin monto NC%s)",
@@ -848,6 +854,16 @@ def _generar_calculo(
     )
 
 
+def _decidir_solo_nd(solo_ndb: bool, hay_nd: bool) -> bool:
+    """¿El expediente sale unicamente con CalculoND?
+
+    MANUAL a proposito: solo si el usuario marco "Solo NDB" y hay negativas
+    para calcular. Sin el check, nunca se fuerza ese modo: antes habia un
+    automatico (monto NC en cero) que cambiaba los archivos sin avisar.
+    """
+    return bool(solo_ndb) and bool(hay_nd)
+
+
 def _filtrar_nd_scope(df_nd, cliente, doc_ref, modalidad):
     """Filtra el dataframe ND al alcance del expediente actual (cliente y opcionalmente factura)."""
     d = df_nd
@@ -890,7 +906,7 @@ def _generar_calculo_nd(nd_sub, tipo, cliente, vendedor, doc_ref, ruc, nd_path):
     ws.cell(row=1, column=1, value="NOTA DE DÉBITO — CÁLCULO")
     ws.cell(row=1, column=1).font = Font(bold=True, size=13, color=EXP_WHITE)
     ws.cell(row=1, column=1).fill = header_fill
-    ws.merge_cells("A1:H1")
+    ws.merge_cells("A1:I1")
     ws.row_dimensions[1].height = 26
 
     info = [
@@ -921,6 +937,10 @@ def _generar_calculo_nd(nd_sub, tipo, cliente, vendedor, doc_ref, ruc, nd_path):
         "CANTIDAD",
         "PRECIO FACTURADO",
         "PRECIO NETO",
+        # DIFERENCIA INVERSA: en NC la diferencia es HIST-NETO (lo cobrado de
+        # mas); en NDB es NETO-HIST (lo cobrado de menos). Se muestra en
+        # positivo porque un debito es un importe a cobrar, no un negativo.
+        "DIF. UNITARIA",
         "MONTO ND",
     ]
     for ci, h in enumerate(headers, 1):
@@ -929,7 +949,7 @@ def _generar_calculo_nd(nd_sub, tipo, cliente, vendedor, doc_ref, ruc, nd_path):
         c.fill = header_fill
         c.border = thin
         c.alignment = Alignment(horizontal="center", wrap_text=True)
-    widths = [15, 14, 12, 32, 10, 14, 14, 13]
+    widths = [15, 14, 12, 32, 10, 14, 14, 13, 13]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w
 
@@ -958,14 +978,18 @@ def _generar_calculo_nd(nd_sub, tipo, cliente, vendedor, doc_ref, ruc, nd_path):
     for idx, (_, row) in enumerate(nd_sub.iterrows(), 1):
         monto_nd = _val(row, "MONTO_ND")
         gran_total += monto_nd
+        hist = _val(row, "PRECIO_HIST", "PRECIO_UNITARIO", "PRECIO")
+        neto = _val(row, "PRECIO_NETO", "PRECIO_BASE")
+        dif_nd = round(max(0.0, neto - hist), 6)
         values = [
             idx,
             _txt(row, "FACTURA", "FACTURAS"),
             _txt(row, "SKU", "CODIGO"),
             _txt(row, "ARTICULO", "DESCRIPCION")[:40],
             _val(row, "CANTIDAD"),
-            _val(row, "PRECIO_HIST", "PRECIO_UNITARIO", "PRECIO"),
-            _val(row, "PRECIO_NETO", "PRECIO_BASE"),
+            hist,
+            neto,
+            dif_nd,
             monto_nd,
         ]
         for ci, val in enumerate(values, 1):
@@ -974,9 +998,9 @@ def _generar_calculo_nd(nd_sub, tipo, cliente, vendedor, doc_ref, ruc, nd_path):
             c.font = Font(size=9)
             if ci == 1:
                 c.alignment = Alignment(horizontal="center")
-            if ci in (5, 6, 7):
+            if ci in (5, 6, 7, 8):
                 c.number_format = "#,##0.00"
-            if ci == 8:
+            if ci == 9:
                 c.number_format = "#,##0.00"
                 c.fill = total_fill
                 c.font = Font(bold=True, size=9, color=EXP_ERR_TX)
@@ -987,8 +1011,8 @@ def _generar_calculo_nd(nd_sub, tipo, cliente, vendedor, doc_ref, ruc, nd_path):
     c.fill = label_fill
     c.border = thin
     c.alignment = Alignment(horizontal="right")
-    ws.merge_cells(f"A{r}:G{r}")
-    t = ws.cell(row=r, column=8, value=round(gran_total, 2))
+    ws.merge_cells(f"A{r}:H{r}")
+    t = ws.cell(row=r, column=9, value=round(gran_total, 2))
     t.font = Font(bold=True, size=10, color=EXP_ERR_TX)
     t.fill = total_fill
     t.border = thin
