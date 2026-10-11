@@ -904,7 +904,15 @@ class _ViewHandlers:
         condiciones = []
         cfg = TIPO_CONFIG.get(legacy_tipo, {})
         if cfg.get("necesita_lista", False) and self.lista_path:
-            condiciones.append(read_erp_file(self.lista_path))
+            # `leer_lista_precios` prueba primero la plantilla oficial y SOLO
+            # si el archivo no la cumple cae a la contingencia posicional
+            # (proveedores sin encabezados, con categorias entre filas). El
+            # camino normal no cambia; `origen` se guarda para avisarlo.
+            from src.core.lista_contingencia import leer_lista_precios
+
+            df_lista, origen = leer_lista_precios(self.lista_path)
+            self._origen_lista = origen
+            condiciones.append(df_lista)
         if legacy_tipo in ("diferencia_cantidad", "diferencia_stock") and self.stock_cliente_path:
             # Override opcional de cantidades (SKU + CANTIDAD).
             # Condiciones[0] del motor CantidadDeterminada; este archivo manda si existe.
