@@ -19,7 +19,7 @@ from typing import Optional
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XlImage
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
 from src.render.g360_styles import (
     EXP_NAVY,
@@ -41,13 +41,7 @@ WHITE = "FFFFFF"
 
 _HEADER_FONT = Font(name="Calibri", bold=True, size=11, color="FFFFFF")
 _BODY_FONT = Font(name="Calibri", size=9, color="334155")
-_SMALL_FONT = Font(name="Calibri", size=8, color="94A3B8")
-
 _HEADER_FILL = exp_fill(EXP_NAVY)
-_ACCENT_FILL = PatternFill(start_color=ACCENT_GREEN, end_color=ACCENT_GREEN, fill_type="solid")
-_LIGHT_FILL = PatternFill(start_color=LIGHT_BG, end_color=LIGHT_BG, fill_type="solid")
-_WHITE_FILL = PatternFill(start_color=WHITE, end_color=WHITE, fill_type="solid")
-
 THIN_BORDER = Border(
     left=Side(style="thin", color=BORDER_COLOR),
     right=Side(style="thin", color=BORDER_COLOR),
@@ -84,56 +78,6 @@ def _etiqueta_operacion(tipo_operacion: str) -> str:
     except Exception:
         pass
     return tipo_operacion
-
-
-def _write_header_row(ws, row, cols_config):
-    """Escribe la fila de encabezados de columna con formato estándar."""
-    for col_idx, cfg in enumerate(cols_config, 1):
-        c = ws.cell(row=row, column=col_idx, value=cfg["header"])
-        c.font = _HEADER_FONT
-        c.fill = _HEADER_FILL
-        c.alignment = Alignment(
-            horizontal=cfg.get("align", "left"), vertical="center", wrap_text=True
-        )
-        c.border = THIN_BORDER
-        if cfg.get("width"):
-            ws.column_dimensions[get_column_letter(col_idx)].width = cfg["width"]
-
-
-def _write_data_rows(ws, start_row, df, cols_config):
-    """Escribe las filas de datos alternando el color de fondo por fila."""
-    for i, (_, row) in enumerate(df.iterrows()):
-        r = start_row + i
-        fill = _LIGHT_FILL if i % 2 == 0 else _WHITE_FILL
-        for col_idx, cfg in enumerate(cols_config, 1):
-            key = cfg.get("key", cfg["header"])
-            val = row.get(key, "")
-            if val is None:
-                val = ""
-            if isinstance(val, float):
-                fmt = cfg.get("fmt")
-                if fmt:
-                    try:
-                        text = fmt.format(val)
-                    except (ValueError, TypeError):
-                        text = f"{val}"
-                else:
-                    text = f"{val:,.2f}"
-            elif isinstance(val, (int, float)) and cfg.get("pct"):
-                text = f"{val:.2%}"
-            elif isinstance(val, (int, float)) and cfg.get("currency"):
-                text = f"S/ {val:,.2f}"
-            else:
-                text = str(val)[:60]
-
-            c = ws.cell(row=r, column=col_idx, value=text)
-            c.font = _BODY_FONT
-            c.fill = fill
-            c.border = THIN_BORDER
-            c.alignment = Alignment(
-                horizontal=cfg.get("align", "left"),
-                vertical="center",
-            )
 
 
 def generar_historico_clasico(

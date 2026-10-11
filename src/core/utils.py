@@ -396,32 +396,6 @@ def sanitize_label(label: str) -> str:
     return label.replace(" ", "_").replace("/", "-")
 
 
-def build_expediente_dir(desktop_path, doc_ref, cliente, nombre_corto=""):
-    """Construye el directorio del expediente comercial."""
-    from datetime import datetime
-
-    ts = datetime.now().strftime("%d%m%Y_%H%M%S")
-    cliente_clean = sanitize_label(cliente or "CLIENTE")
-    factura_clean = sanitize_label(doc_ref or "DOC")
-    prefix = f"NC_{nombre_corto}" if nombre_corto else "EXP"
-    folder = f"{prefix}_{cliente_clean}_{factura_clean}_{ts}"
-    exp_dir = desktop_path / folder
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    return exp_dir
-
-
-def build_excel_filename(doc_ref, cliente, nombre_corto=""):
-    """Construye el nombre del archivo Excel del expediente."""
-    from datetime import datetime
-
-    fecha_str = datetime.now().strftime("%d%m%Y")
-    factura_clean = sanitize_label(doc_ref or "SIN_DOCP")
-    cliente_clean = sanitize_label(cliente or "CLIENTE")
-    if nombre_corto:
-        return f"NC_{sanitize_label(nombre_corto)}_{factura_clean}_{cliente_clean}_{fecha_str}.xlsx"
-    return f"{factura_clean}_{cliente_clean}_{fecha_str}.xlsx"
-
-
 def format_id_name(id_val, name_val, field_name: str = None) -> str:
     """
     Centraliza el formato visual 'ID - NOMBRE' utilizando el diccionario de datos.

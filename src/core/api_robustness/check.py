@@ -92,10 +92,6 @@ class DiagnoseResult:
 # ---------------------------------------------------------------------------
 
 
-def _now_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
 def _parse_iso(s: str) -> Optional[datetime]:
     from datetime import timezone
 

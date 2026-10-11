@@ -122,9 +122,6 @@ EXP_NOTE_TX = "92400E"
 EXP_HIST_NOTA_BG = "E7E6E6"
 EXP_ACCENT = "34D399"
 
-EXP_T_BASE = 10
-
-
 def exp_fill(hex6: str) -> PatternFill:
     """Relleno sólido openpyxl desde un token de la regla."""
     return PatternFill(start_color=hex6, end_color=hex6, fill_type="solid")

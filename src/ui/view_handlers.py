@@ -450,7 +450,6 @@ class _ViewHandlers:
     def _agregar_insumo(self, ruta: str):
         """Agrega un archivo XLSX y lo asigna al insumo correspondiente del caso."""
         from pathlib import Path
-        from src.ui.catalog import CATALOGO
 
         name = Path(ruta).name
         tipo = self._clasificar_archivo_insumo(ruta, name)
@@ -469,7 +468,6 @@ class _ViewHandlers:
 
     def _clasificar_archivo_insumo(self, ruta: str, name: str) -> str:
         """Determina qué tipo de insumo representa el archivo basado en su nombre."""
-        from pathlib import Path
         from src.ui.catalog import CATALOGO
 
         lower = name.lower()
@@ -1134,7 +1132,6 @@ class _ViewHandlers:
 
     def _señalizar_facturas_con_notas(self, exp):
         """Añade una alerta de primer nivel si hay facturas con NC/ND en el historial."""
-        from src.core.g360_theme import G360Theme
         from src.domain import BusinessAlert
 
         if self.df_historial is None:

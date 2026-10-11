@@ -39,11 +39,6 @@ from typing import Optional
 MODALIDAD_INDIVIDUAL = "individual"
 MODALIDAD_CONSOLIDADO = "consolidado"
 
-MODALIDAD_LABEL = {
-    MODALIDAD_INDIVIDUAL: "Individual — por factura",
-    MODALIDAD_CONSOLIDADO: "Consolidado — varias facturas",
-}
-
 # ── Insumos ────────────────────────────────────────────────────────────────
 # Lista cerrada de insumos que pueden aparecer en la pantalla de creación.
 INSUMOS = [

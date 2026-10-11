@@ -183,10 +183,6 @@ _FACTURA_EXISTE = (
     " AND f.nro_doc = ventas.factura_ref_nro)"
 )
 _DOC_FYB = "substr(tpo_doc,1,1) || serie_doc || '-' || nro_doc"
-_DOC_NOTA = (
-    "(CASE WHEN serie_doc LIKE substr(tpo_doc,1,1) || '%' THEN '' "
-    "ELSE substr(tpo_doc,1,1) END) || serie_doc || '-' || nro_doc"
-)
 _REF_NOTA = "'F' || factura_ref_serie || '-' || factura_ref_nro"
 
 

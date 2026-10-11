@@ -56,3 +56,6 @@ Thumbs.db
 # decir a quien cerrar en vez de obligar a buscarlo en el Administrador.
 .app_instance.lock
 .app_instance.pid
+
+# Cache de ruff (0 KB pero aparece como untracked en cada `git status`).
+.ruff_cache/
