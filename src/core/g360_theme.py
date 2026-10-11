@@ -50,7 +50,8 @@ class G360Theme:
     """Paleta centralizada de colores y estilos G360.
 
     Colores de marca (siempre igual):
-        ACCENT=#34d399, SUCCESS=#34d399, WARNING=#fbbf24, ERROR=#f87171
+        ACCENT=#3b82f6 (azul), SUCCESS=#34d399 (verde; BLUE lo guarda por
+        legacy), WARNING=#fbbf24, ERROR=#f87171
 
     Colores de superficie (adaptables al tema):
         En dark mode usan hex fijos; en light mode se pueden reemplazar
@@ -71,6 +72,15 @@ class G360Theme:
     ACCENT_TEXT = "#60A5FA"  # azul claro: texto en dark
     ACCENT_2_BRIGHT = "#A78BFA"  # violeta claro: texto en dark
     ACCENT_2_LIGHT = "#6D28D9"  # violeta oscuro: texto en light
+    # Texto sobre el acento de seccion (botones del reporte): el fondo es
+    # brillante en dark y oscuro en light, asi que el texto tambien alterna
+    # (blanco fijo sobre #A78BFA apenas llega a 2.7:1).
+    SECTION_BTN_FG_DARK = "#1a2333"
+    # Hex y NO el literal "white": `_color_map` mapea por valor exacto, y el
+    # literal "white" lo usan los overlays y varios botones. Mapearlo
+    # convertiria esos "white" en el color de este boton. Como token propio
+    # si puede ir en el mapa para que el boton vuelva a dark correctamente.
+    SECTION_BTN_FG_LIGHT = "#FFFFFF"
     ACCENT_3_LIGHT = "#155E75"  # cyan oscuro: texto en light
     OK_LIGHT = "#047857"  # verde oscuro: texto en light
 
@@ -78,7 +88,7 @@ class G360Theme:
     PRIMARY_HOVER = "#2563eb"
 
     ACCENT_LIGHT = "#1e3a5f"
-    WARNING_LIGHT = "#b45309"
+    WARNING_LIGHT = "#92400e"  # ambar oscuro: #b45309 no llega a 4.5:1 sobre variante light
     ERROR_LIGHT = "#b91c1c"
 
     SURFACE = "#1a1f2e"
@@ -93,6 +103,7 @@ class G360Theme:
     TEXT_MUTED = "white60"
     TEXT_SECONDARY = "white70"
     TEXT_PRIMARY = "#F1F5FB"
+    TEXT_PRIMARY_LIGHT = "#0F172A"
 
     SHADOW_COLOR = ft.Colors.with_opacity(0.06, ft.Colors.BLACK)
     SHADOW_BLUR = 20
@@ -113,6 +124,8 @@ class G360Theme:
     RADIUS_PILL = 999  # badges y pills (se recortan con el alto)
 
     TYPE_KPI = 18  # valor numerico destacado
+    TYPE_H2 = 18  # titulo de seccion de pagina (banner dashboard, header)
+    TYPE_H3 = 14  # subtitulo de bloque dentro de una seccion
     TYPE_TITLE = 16  # titulo de card (subió desde 14: paso de 1px no jerarquiza)
     TYPE_SECTION = 13  # header de seccion dentro de una card
     TYPE_BODY = 12  # texto corriente
@@ -251,6 +264,15 @@ class G360Theme:
         return cls.ACCENT_2_BRIGHT if cls._is_dark else cls.ACCENT_2_LIGHT
 
     @classmethod
+    def section_button_fg(cls) -> str:
+        """Texto sobre el acento de sección (botones del reporte).
+
+        Oscuro en dark (fondo violeta brillante, 5.8:1) y blanco en light
+        (fondo violeta oscuro, 7.1:1).
+        """
+        return cls.SECTION_BTN_FG_DARK if cls._is_dark else cls.SECTION_BTN_FG_LIGHT
+
+    @classmethod
     def section_surface_color(cls, opacity: float = 0.06) -> str:
         """Fondo de la sección: un velo del acento sobre la superficie.
 
@@ -312,7 +334,7 @@ class G360Theme:
 
     @classmethod
     def text_primary_color(cls) -> str:
-        return cls.TEXT_PRIMARY if cls._is_dark else "#0F172A"
+        return cls.TEXT_PRIMARY if cls._is_dark else cls.TEXT_PRIMARY_LIGHT
 
     @classmethod
     def accent_soft_color(cls, opacity: float = 0.08) -> str:
@@ -492,7 +514,9 @@ class G360Theme:
             spacing=6,
         )
         if sub_text:
-            inner.controls.append(ft.Text(sub_text, size=10, color=cls.text_muted_color()))
+            inner.controls.append(
+                ft.Text(sub_text, size=cls.TYPE_SUBTITLE, color=cls.text_muted_color())
+            )
         return ft.Container(
             content=inner,
             padding=ft.padding.symmetric(horizontal=20, vertical=14),
@@ -627,7 +651,7 @@ class G360Theme:
         bg_c = bg or (cls.primary_color() if accent else cls.surface_variant_color())
         txt_c = color or ("white" if (accent or cls._is_dark) else "#1a2333")
         return ft.Container(
-            content=ft.Text(text, size=10, weight=ft.FontWeight.W_700, color=txt_c),
+            content=ft.Text(text, size=cls.TYPE_SUBTITLE, weight=ft.FontWeight.W_700, color=txt_c),
             padding=ft.padding.symmetric(horizontal=10, vertical=6),
             bgcolor=bg_c,
             border_radius=6,
@@ -711,6 +735,20 @@ class G360Theme:
         return {
             cls.SURFACE: cls.surface_color(),
             cls.SURFACE_VARIANT: cls.surface_variant_color(),
+            # El par sunken va en AMBOS sentidos a proposito. Si solo se
+            # mapea el valor dark, un input construido en claro queda con el
+            # tono claro y al volver a dark no vuelve al suyo (el mapa es
+            # por valor exacto, no por rol).
+            cls.SURFACE_SUNKEN: cls.surface_sunken_color(),
+            cls.SURFACE_VARIANT_LIGHT: cls.surface_sunken_color(),
+            # Pares que tambien van en los dos sentidos: el mapa es por valor
+            # exacto, asi que solo mapear el lado dark deja al control con el
+            # color del tema con el que se construyo (texto claro sobre
+            # superficie clara).
+            cls.TEXT_PRIMARY: cls.text_primary_color(),
+            cls.TEXT_PRIMARY_LIGHT: cls.text_primary_color(),
+            cls.SECTION_BTN_FG_DARK: cls.section_button_fg(),
+            cls.SECTION_BTN_FG_LIGHT: cls.section_button_fg(),
             cls.BORDER: cls.border_color(),
             cls.BORDER_SUBTLE: cls.border_subtle_color(),
             cls.TEXT_MUTED: cls.text_muted_color(),
