@@ -84,6 +84,39 @@ def _alertar_pct(codigo: str, origen: str, alertas: list, *, skus=()) -> None:
         )
 
 
+def _descartar_sku_vacios(df, col, origen, alertas):
+    """Saca las filas sin SKU antes del merge y lo avisa.
+
+    Una fila en blanco del XLSX llega como NaN y, si la OTRA tabla tambien
+    trae una, el inner merge las casa ("" con "") y nace una fila fantasma en
+    el reconocimiento con todo NaN. Nunca es dato: es el Enter que quedo
+    pisado entre dos SKU.
+    """
+    if df is None or col not in df.columns or df.empty:
+        return df
+    llave = df[col].astype(str).str.strip().str.lower()
+    vacias = llave.isin(["", "nan", "none"])
+    n_vacias = int(vacias.sum())
+    if n_vacias:
+        # Se filtra AUNQUE todo sea hueco: una lista toda vacia no es "la
+        # lista sin filas validas", es que no vino nada util. El llamador
+        # decide con el DataFrame vacio (sin SKUs coincidentes, no un crash
+        # de tipos en el merge).
+        alertas.append(
+            BusinessAlert(
+                tipo="info",
+                severidad="baja",
+                mensaje=(
+                    f"{origen}: se ignoraron {n_vacias} fila(s) sin SKU "
+                    "(filas vacias en el archivo cargado)."
+                ),
+                motor="PriceDifference",
+            )
+        )
+        return df.loc[~vacias].copy()
+    return df
+
+
 class PriceDifferenceStrategy:
     """
     Estrategia unificada para comparación de precios.
@@ -116,6 +149,12 @@ class PriceDifferenceStrategy:
 
         lista_precios = expediente.condiciones[0] if len(expediente.condiciones) > 0 else None
         requerimiento = expediente.condiciones[1] if len(expediente.condiciones) > 1 else None
+
+        # La plantilla de precios llega con encabezados raw (CODIGO_SKU,
+        # DESCUENTO_PORCENTAJE): sin normalizar, _determinar_modo la clasifica
+        # como "comparar" y el merge se vacia (DO sale sin resultados). Se
+        # renombra a DESCUENTO/CODIGO para que caiga en descuento_simple.
+        df_hist = _descartar_sku_vacios(df_hist, "CODIGO", "el historial", alertas)
 
         # La plantilla de descuentos llega con encabezados raw (CODIGO_SKU,
         # DESCUENTO_PORCENTAJE): sin normalizar, _determinar_modo la clasifica
@@ -469,6 +508,50 @@ class PriceDifferenceStrategy:
         en un documento, sale en filas independientes). La modalidad
         "consolidado" agrupa por SKU al final (ver _consolidar_por_sku).
         """
+        # Las filas en blanco de los XLSX llegan como NaN y el merge las casa
+        # ("" con "") si ambos lados traen una: nace una fila fantasma con
+        # todo NaN en el reconocimiento. Se sacan acá, donde el invariante
+        # cubre TODOS los llamados (process y los directos). La lista puede
+        # venir con CODIGO (via process, renombrada de CODIGO_SKU) o con SKU
+        # (llamados directos y tests): se filtra la que exista.
+        if "CODIGO" in df_hist.columns:
+            df_hist = _descartar_sku_vacios(df_hist, "CODIGO", "el historial", alertas)
+        if lista_precios is not None:
+            for _col in ("SKU", "CODIGO"):
+                if _col in lista_precios.columns:
+                    lista_precios = _descartar_sku_vacios(
+                        lista_precios, _col, "la lista de precios", alertas
+                    )
+                    break
+            # Una fila de SUBTITULO ("FORROS VINIFAN" con precio NaN) no la
+            # saca el filtro de SKU porque el texto no esta vacio. Pero sin
+            # PRECIO_BASE no puede entrar al merge con sentido: si el
+            # historial trae el mismo texto, casan y nace una fila con
+            # MONTO_NC NaN en el reconocimiento. Solo vale en modo comparar,
+            # que exige PRECIO_BASE; las listas solo-descuento (DO) no pasan
+            # por aca con ese requisito.
+            if "PRECIO_BASE" in lista_precios.columns and not lista_precios.empty:
+                pre = pd.to_numeric(lista_precios["PRECIO_BASE"], errors="coerce")
+                n_sin = int(pre.isna().sum())
+                if n_sin and len(lista_precios) > n_sin:
+                    alertas.append(
+                        BusinessAlert(
+                            tipo="info",
+                            severidad="baja",
+                            mensaje=(
+                                "la lista de precios: se ignoraron "
+                                f"{n_sin} fila(s) sin precio "
+                                "(subtitulos o categorias pegadas en la plantilla)."
+                            ),
+                            motor="PriceDifference",
+                        )
+                    )
+                    lista_precios = lista_precios.loc[pre.notna()].copy()
+        if lista_precios is None or lista_precios.empty:
+            # Todo eran huecos (o no vino lista util): no hay con que
+            # mergear. Sin este corto, el merge revienta por tipos (una
+            # columna toda-NaN es float64 y la del historial es object).
+            return pd.DataFrame(), [], pd.DataFrame()
         if "SKU" not in lista_precios.columns or "PRECIO_BASE" not in lista_precios.columns:
             alertas.append(
                 BusinessAlert(tipo="error", severidad="alta", mensaje="Lista sin SKU o PRECIO_BASE")
