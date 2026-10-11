@@ -721,6 +721,26 @@ class TestPuenteBusquedaReporte:
         assert v._sel_clientes == [(CLIENTE_A, "MULTICOPIAS")]
         assert v.busq_btn_reporte.disabled is False
 
+    def test_jerarquia_entre_buscar_y_llevar_al_reporte(self, vista_real):
+        """El peso visual dice cual termina el flujo.
+
+                    "Buscar" APLICA los filtros y es lo unico que produce el historial,
+        asi que va relleno. "Llevar al reporte" es un atajo SECUNDARIO: abre
+                el reporte con la seleccion ya hecha. Antes los dos eran ghost, del
+                mismo peso y con el mismo rotulo que el boton del header, y no se
+                distinguia consultar de llevarse lo consultado.
+        """
+        import flet as ft
+
+        v = vista_real
+        assert isinstance(v.busq_btn, ft.ElevatedButton)
+        assert v.busq_btn.style.bgcolor, "Buscar debe ser la accion principal (relleno)"
+        assert isinstance(v.busq_btn_reporte, ft.OutlinedButton)
+        assert v.busq_btn_reporte.text == "Llevar al reporte"
+        assert v.busq_btn_reporte.text != v.busq_btn.text
+        # Que el nombre diga que hay un handoff de por medio.
+        assert "seleccionados" in (v.busq_btn_reporte.tooltip or "")
+
     def test_quitar_el_ultimo_lo_vuelve_a_apagar(self, vista_real, monkeypatch):
         """Quitar el chip del ultimo cliente deshabilita el boton otra vez."""
         v = vista_real
@@ -757,6 +777,9 @@ class TestPuenteBusquedaReporte:
         assert panel.state["hasta"] == datetime(2026, 10, 31)
         assert panel._abierto is True
         assert "2 cliente(s)" in panel.status.value
+        # El puente lleva a la vista de reporte (zonas separadas).
+        assert v._vista_actual == "reporte"
+        assert v.container.content is v._raiz_reporte()
 
         panel._exportar()
         _esperar(lambda: _export_listo(panel), msg="el export no termino")
@@ -775,6 +798,36 @@ class TestPuenteBusquedaReporte:
         """Si no esta montado el usuario no lo encuentra."""
         v = vista_real
         assert "Reporte de compras" in "\n".join(_textos_ui(v.container))
+
+
+def test_preview_filtrada_por_sku(panel):
+    """E2E: SKU en el campo filtra la vista previa (vendedor+cliente+rango+SKU)."""
+    panel.sku_field.value = "014850"
+    _abrir(panel, [(CLIENTE_A, "MULTICOPIAS")])
+    assert "SKU 014850" in panel.status.value
+    tablas = [
+        x
+        for c in panel.resultados.controls
+        if isinstance(c, ft.Row)
+        for x in c.controls
+        if isinstance(x, ft.DataTable)
+    ]
+    assert len(tablas) == 1
+    assert tablas[0].columns[1].label.controls[0].value == "014850"
+
+    panel.sku_field.value = "999999"
+    panel._generar()
+    _esperar(lambda: _preview_listo(panel), msg="el preview filtrado no termino")
+    assert any("para SKU 999999" in t for t in _textos_ui(panel.resultados))
+
+
+def test_preview_sku_estricto_y_sugiere_variante(panel):
+    """E2E: '14850' no iguala a '014850' (estricto) y sugiere la variante."""
+    panel.sku_field.value = "14850"
+    _abrir(panel, [(CLIENTE_A, "MULTICOPIAS")])
+    textos = _textos_ui(panel.resultados)
+    assert any("para SKU 14850" in t for t in textos)
+    assert any("014850" in t for t in textos if "quisiste decir" in t)
 
 
 # ══ 4. Separacion por cliente (2 clientes, misma lista de precios) ════

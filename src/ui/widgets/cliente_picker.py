@@ -91,7 +91,9 @@ def abrir_picker_clientes(
         scroll=ft.ScrollMode.AUTO,
         expand=True,
     )
-    status = ft.Text("Cargando clientes…", size=10, color=G360Theme.text_muted_color())
+    status = ft.Text(
+        "Cargando clientes…", size=G360Theme.TYPE_BODY, color=G360Theme.text_muted_color()
+    )
 
     def _refresh():
         try:

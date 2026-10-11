@@ -180,7 +180,7 @@ def _mock_view():
     view._result_warn_row = SimpleNamespace(controls=[])
     view._result_load_more_btn = SimpleNamespace(text="", visible=False)
     view._result_summary = None
-    view._omitir_activo = lambda: False
+    view._ocultar_cero_activo = lambda: False
     view._nd_activo = lambda: False
     view._result_sort_col = None
     view._result_sort_asc = False

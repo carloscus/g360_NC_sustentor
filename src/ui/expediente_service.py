@@ -63,8 +63,9 @@ def generar_expediente(
     antecedentes: str,
     observaciones: str,
     desktop_path: Path,
-    omitir_sin_diferencia: bool = False,
+    ocultar_cero: bool = False,
     generar_nota_debito: bool = False,
+    solo_ndb: bool = False,
 ) -> list:
     """Genera expedientes comerciales (Excel + DOCX).
 
@@ -72,13 +73,16 @@ def generar_expediente(
 
     Individual: un expediente por (cliente × factura).
     Consolidado: un expediente por cliente.
+
+    `solo_ndb` (check Solo NDB): aunque haya monto NC, el expediente sale
+    unicamente con CalculoND. Sin el check, el modo solo-NDB igual aplica
+    automatico cuando el monto NC es 0 y hay ND. Por defecto solo se hace NC.
     """
     res = resultado.resultado
     df_res = res.dataframe if res is not None else pd.DataFrame()
 
     # Opcional: preparar cálculo de Nota de Débito a partir de diferencias negativas.
-    # Se calcula ANTES del filtrado (las filas negativas no son 0, así que el
-    # resultado es idéntico; pero así el clon no pierde las filas ND).
+    # Se calcula ANTES del filtrado para no depender de su criterio.
     df_nd = None
     if generar_nota_debito and not df_res.empty and "DIFERENCIA" in df_res.columns:
         nd = df_res[df_res["DIFERENCIA"].fillna(0) < -0.001].copy()
@@ -87,11 +91,11 @@ def generar_expediente(
             nd["MONTO_ND"] = (nd["DIFERENCIA"].abs() * cant).round(2)
             df_nd = nd
 
-    # Opcional: excluir filas sin diferencia (estado "coincide": |DIFERENCIA|≈0).
+    # Opcional: excluir filas en 0.00 (estado "coincide": |DIFERENCIA|≈0).
     # Se clona el resultado con dataframes filtrados para que los subresultados
-    # (por cliente / factura) hereden el filtrado.
-    if omitir_sin_diferencia:
-        resultado = _clonar_sin_diferencia(resultado)
+    # (por cliente / factura) hereden el filtrado. Las negativas se conservan.
+    if ocultar_cero:
+        resultado = _clonar_sin_cero(resultado)
         if resultado is None:
             logger.info("expediente: sin filas con diferencia; no se genera nada")
             return []
@@ -118,13 +122,13 @@ def generar_expediente(
 
     t_ini = time.perf_counter()
     logger.info(
-        "expediente inicio: caso=%s modalidad=%s cliente(s)=%d filas=%d nd=%s sin_dif=%s -> %s",
+        "expediente inicio: caso=%s modalidad=%s cliente(s)=%d filas=%d nd=%s ocultar0=%s -> %s",
         tipo_actual,
         modalidad,
         len(clientes),
         len(df_res),
         df_nd is not None and not df_nd.empty,
-        omitir_sin_diferencia,
+        ocultar_cero,
         desktop_path,
     )
 
@@ -143,6 +147,7 @@ def generar_expediente(
             desktop_path,
             df_nd=df_nd,
             cods=cods,
+            solo_ndb=solo_ndb,
         )
     # ── Consolidado: un expediente por cliente ──
     else:
@@ -159,6 +164,7 @@ def generar_expediente(
             desktop_path,
             df_nd=df_nd,
             cods=cods,
+            solo_ndb=solo_ndb,
         )
 
     logger.info(
@@ -203,14 +209,16 @@ def _recalcular_resumen(res_resumen, df, df_x=None, **extra):
     return resumen
 
 
-def _clonar_sin_diferencia(resultado):
-    """Clona el expediente excluyendo filas sin impacto monetario real.
+def _clonar_sin_cero(resultado):
+    """Clona el expediente excluyendo filas en 0.00.
 
     Excluye:
-    - |DIFERENCIA| ≈ 0 (coincidencia exacta, AL02 positiva o negativa)
-    - MONTO_NC == 0 (diferencia negativa: PRECIO_LISTA > PRECIO_HIST,
-      no genera NC pero el clip(lower=0) pone el monto en cero)
+    - |DIFERENCIA| ≈ 0 (coincidencia exacta, AL02)
     - ALERTA contiene "AL11" (redondeo acumulable dentro de tolerancia)
+
+    Las diferencias negativas SE CONSERVAN aunque su MONTO_NC sea 0: son
+    candidatas a Nota de Débito y ocultarlas vaciaba la vista y rompía el
+    flujo NDB (antes se filtraban por MONTO_NC == 0).
     """
     res = resultado.resultado
     if res is None:
@@ -225,12 +233,44 @@ def _clonar_sin_diferencia(resultado):
         # Excluir diferencia unitaria cercana a cero
         if "DIFERENCIA" in d.columns:
             keep &= d["DIFERENCIA"].fillna(0).abs() > 0.001
-        # Excluir Monto NC igual a cero (no hay NC que reconocer)
-        if "MONTO_NC" in d.columns:
+        elif "MONTO_NC" in d.columns:
+            # Sin columna de diferencia (rebate): el 0.00 es el monto mismo.
             keep &= pd.to_numeric(d["MONTO_NC"], errors="coerce").fillna(0) > 0.001
         # Excluir redondeo acumulable (AL11)
         if "ALERTA" in d.columns:
             keep &= ~d["ALERTA"].astype(str).str.contains("AL11", na=False)
+        return d[keep].copy()
+
+    df_f, df_x_f = _flt(df), _flt(df_x)
+    if (df_f is None or df_f.empty) and (df_x_f is None or df_x_f.empty):
+        return None
+    sub_res = RecognitionResult(
+        dataframe=df_f if df_f is not None else pd.DataFrame(),
+        dataframe_excel=df_x_f if df_x_f is not None else df_f,
+        resumen=_recalcular_resumen(res.resumen, df_f, df_x_f),
+        alertas=res.alertas,
+        trazabilidad=res.trazabilidad,
+    )
+    sub_res.metricas = getattr(res, "metricas", {}) or {}
+    return SimpleNamespace(resultado=sub_res, datos=resultado.datos, contexto=resultado.contexto)
+
+
+def _clonar_solo_nd(resultado):
+    """Clona el expediente con SOLO filas de diferencia negativa (candidatas ND).
+
+    Lo que se ve con el check "Solo NDB" es lo que se genera. Devuelve None
+    si no hay negativas.
+    """
+    res = resultado.resultado
+    if res is None:
+        return None
+    df = res.dataframe
+    df_x = res.get_excel() if hasattr(res, "get_excel") else pd.DataFrame()
+
+    def _flt(d):
+        if d is None or d.empty or "DIFERENCIA" not in d.columns:
+            return pd.DataFrame() if d is not None else d
+        keep = d["DIFERENCIA"].fillna(0) < -0.001
         return d[keep].copy()
 
     df_f, df_x_f = _flt(df), _flt(df_x)
@@ -260,6 +300,7 @@ def _generar_individual(
     desktop_path,
     df_nd=None,
     cods: dict | None = None,
+    solo_ndb: bool = False,
 ) -> list:
     """Individual: un Expediente por factura dentro de cada cliente."""
     dirs = []
@@ -290,6 +331,7 @@ def _generar_individual(
                     observaciones=observaciones,
                     desktop_path=desktop_path,
                     df_nd=df_nd,
+                    solo_ndb=solo_ndb,
                 )
                 dirs.append(exp_dir)
                 continue
@@ -312,6 +354,7 @@ def _generar_individual(
                     observaciones=observaciones,
                     desktop_path=desktop_path,
                     df_nd=df_nd,
+                    solo_ndb=solo_ndb,
                 )
                 dirs.append(exp_dir)
     except Exception:
@@ -339,6 +382,7 @@ def _generar_consolidado(
     desktop_path,
     df_nd=None,
     cods: dict | None = None,
+    solo_ndb: bool = False,
 ) -> list:
     """Consolidado: un Expediente por cliente (todas las facturas juntas)."""
     dirs = []
@@ -361,6 +405,7 @@ def _generar_consolidado(
                 observaciones=observaciones,
                 desktop_path=desktop_path,
                 df_nd=df_nd,
+                solo_ndb=solo_ndb,
             )
             dirs.append(exp_dir)
     except Exception:
@@ -613,10 +658,12 @@ def _generar_uno(
     observaciones: str,
     desktop_path: Path,
     df_nd=None,
+    solo_ndb: bool = False,
 ) -> Path:
     """Genera UN expediente (Excel + DOCX) y retorna el directorio.
 
-    Naming: ver el docstring del módulo.
+    Naming: ver el docstring del módulo. Con `solo_ndb` pedido (o monto NC
+    en cero con ND presente) sale unicamente el CalculoND.
     """
     res = resultado.resultado
     cliente = _resolve_cliente(cliente_value, res, df_historial)
@@ -658,52 +705,76 @@ def _generar_uno(
         "historico_config": historico_config.as_dict() if historico_config else {},
     }
 
-    # Generar Informe (DOCX)
-    docx_path = resolve_output_path(exp_dir / docx_name)
-    _generar_informe(
-        resultado,
-        tipo_actual,
-        excel_name,
-        datos_base,
-        docx_path,
-        nombre_historico=(
-            historico_name
-            if historico_config
-            and any(historico_config.incluir(d) for d in ("facturas", "nc", "ndb"))
-            else ""
-        ),
-    )
-
-    # Generar Cálculo (Excel)
-    excel_path = resolve_output_path(exp_dir / excel_name)
-    _generar_calculo(
-        resultado,
-        tipo_actual,
-        cliente,
-        vendedor_display,
-        doc_ref,
-        ruc,
-        excel_path,
-        df_historial,
-        periodo=periodo_txt,
-        antecedentes=antecedentes,
-        observaciones=observaciones,
-        modalidad=modalidad,
-    )
-
-    # Generar Cálculo de Nota de Débito (si hay filas de diferencias negativas)
+    # Alcance del expediente: modo solo-NDB (unicamente CalculoND) si se
+    # pidio explicito, o automatico cuando no hay monto NC pero si ND.
+    # Por defecto solo se hace NC. El monto se mide sobre el dataframe del
+    # sub caso (no el resumen, que puede venir del resultado global).
+    nc_total = 0.0
+    try:
+        df_sub = res.dataframe
+        if df_sub is not None and not df_sub.empty and "MONTO_NC" in df_sub.columns:
+            nc_total = float(pd.to_numeric(df_sub["MONTO_NC"], errors="coerce").fillna(0).sum())
+        else:
+            nc_total = float((getattr(res, "resumen", None) or {}).get("total_nc", 0) or 0)
+    except (TypeError, ValueError):
+        nc_total = 0.0
+    nd_sub = None
     if df_nd is not None and not df_nd.empty:
         nd_sub = _filtrar_nd_scope(df_nd, cliente, doc_ref, modalidad)
-        if nd_sub is not None and not nd_sub.empty:
-            nd_path = resolve_output_path(
-                exp_dir / build_documento_nombre(exp_id, "CalculoND", "xlsx")
-            )
-            _generar_calculo_nd(
-                nd_sub, tipo_actual, cliente, vendedor_display, doc_ref, ruc, nd_path
-            )
+    hay_nd = nd_sub is not None and not nd_sub.empty
+    solo_nd = (solo_ndb or nc_total <= 0.001) and hay_nd
+    if solo_nd:
+        logger.info(
+            "expediente %s: modo solo-NDB (sin monto NC%s)",
+            exp_id,
+            "" if nc_total <= 0.001 else ", pedido explícito",
+        )
+
+    if not solo_nd:
+        # Generar Informe (DOCX)
+        docx_path = resolve_output_path(exp_dir / docx_name)
+        _generar_informe(
+            resultado,
+            tipo_actual,
+            excel_name,
+            datos_base,
+            docx_path,
+            nombre_historico=(
+                historico_name
+                if historico_config
+                and any(historico_config.incluir(d) for d in ("facturas", "nc", "ndb"))
+                else ""
+            ),
+        )
+
+        # Generar Cálculo (Excel)
+        excel_path = resolve_output_path(exp_dir / excel_name)
+        _generar_calculo(
+            resultado,
+            tipo_actual,
+            cliente,
+            vendedor_display,
+            doc_ref,
+            ruc,
+            excel_path,
+            df_historial,
+            periodo=periodo_txt,
+            antecedentes=antecedentes,
+            observaciones=observaciones,
+            modalidad=modalidad,
+        )
+
+    # Generar Cálculo de Nota de Débito (si hay filas de diferencias negativas)
+    if nd_sub is not None and not nd_sub.empty:
+        nd_path = resolve_output_path(exp_dir / build_documento_nombre(exp_id, "CalculoND", "xlsx"))
+        _generar_calculo_nd(nd_sub, tipo_actual, cliente, vendedor_display, doc_ref, ruc, nd_path)
 
     # Generar Histórico opcional
-    if historico_config and any(historico_config.incluir(d) for d in ("facturas", "nc", "ndb")):
+    if (
+        not solo_nd
+        and historico_config
+        and any(historico_config.incluir(d) for d in ("facturas", "nc", "ndb"))
+    ):
         historico_path = resolve_output_path(exp_dir / historico_name)
         _generar_historico(
             resultado,

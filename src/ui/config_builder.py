@@ -114,8 +114,18 @@ def build_config(tipo_actual: str, ui: dict[str, Any]) -> dict:
             config["fecha_hasta"] = ui["fp_hasta"]
 
     if tipo_actual == "anular_factura":
-        # ANF usa la factura del fragmento (no dropdown legacy).
-        pass
+        # ANF usa las facturas del fragmento (no dropdown legacy): las del
+        # picker si hay elegidas, si no todas las del historial. Acepta una
+        # o varias, de uno o varios clientes. `factura_id` queda como la
+        # primera por compatibilidad con la estrategia.
+        facs = [str(f).strip() for f in (ui.get("facturas_sel") or []) if str(f).strip()]
+        if not facs and ui.get("factura_ci"):
+            facs = [str(ui.get("factura_ci")).strip()]
+        if not facs:
+            facs = _facturas_fragmento(ui.get("df_historial_full"))
+        facs = list(dict.fromkeys(facs))
+        config["factura_ids"] = facs
+        config["factura_id"] = facs[0] if facs else None
 
     if tipo_actual == "devolucion_fisica":
         # DF no usa lista de precios: el valor sale de la factura a la que se
@@ -155,9 +165,42 @@ def build_config(tipo_actual: str, ui: dict[str, Any]) -> dict:
         if lineas:
             config["lineas"] = lineas
         cats = ui.get("categorias_nc") or []
-        config["categorias_nc"] = cats
+        if cats:
+            config["categorias_nc"] = cats
 
     return config
+
+
+def _facturas_fragmento(df) -> list[str]:
+    """Facturas "TIPO-SERIE-NUMERO" del df (solo facturas, unicas y ordenadas).
+
+    Mismo formato que el picker (fetch_facturas_cliente: f"{tpo}-{serie}-{nro}")
+    y mismo criterio de conteo que el gate de la UI.
+    """
+    if df is None or getattr(df, "empty", True):
+        return []
+    for col in ("TIPO_DOC", "SERIE", "NUMERO"):
+        if col not in df.columns:
+            return []
+    fac = df
+    if "TIPO_CLASE" in df.columns:
+        fac = df[df["TIPO_CLASE"].astype(str).str.lower() == "factura"]
+    docs = (
+        fac["TIPO_DOC"].astype(str).str.strip()
+        + "-"
+        + fac["SERIE"].astype(str).str.strip()
+        + "-"
+        + fac["NUMERO"].astype(str).str.strip()
+    )
+    return sorted({d for d in docs if d.replace("-", "").strip()})
+
+
+def _factura_unica_fragmento(df) -> str | None:
+    """Una sola factura del fragmento, o None (0 o varias)."""
+    docs = _facturas_fragmento(df)
+    if len(docs) != 1:
+        return None
+    return docs[0]
 
 
 def build_datos_exp(

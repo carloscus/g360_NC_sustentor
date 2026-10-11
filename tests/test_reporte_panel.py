@@ -4,6 +4,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import flet as ft
+import pandas as pd
 
 from src.core.fechas import fecha_ui
 from src.ui import reporte_compras as rc
@@ -29,6 +30,23 @@ def _panel():
     return ReportePanel(_FakeApp(), SimpleNamespace())
 
 
+def _controles(raiz, profundidad: int = 4) -> list:
+    """Todos los controles del arbol (el body ahora usa bloques anidados)."""
+    out = []
+    if isinstance(raiz, ft.Control):
+        out.append(raiz)
+    if profundidad <= 0:
+        return out
+    for attr in ("controls", "content"):
+        hijo = getattr(raiz, attr, None)
+        if isinstance(hijo, ft.Control):
+            out.extend(_controles(hijo, profundidad - 1))
+        elif isinstance(hijo, list):
+            for c in hijo:
+                out.extend(_controles(c, profundidad - 1))
+    return out
+
+
 class TestCard:
     def test_colapsada_por_defecto_y_cacheada(self):
         p = _panel()
@@ -45,6 +63,16 @@ class TestCard:
         p.expandir()
         assert p._body.visible is True
         assert p._abierto is True
+
+    def test_abrir_sin_generar(self):
+        """Acceso directo del header: abre la colapsada sin generar nada."""
+        p = _panel()
+        p.construir_card()
+        assert p._abierto is False
+        p.abrir()
+        assert p._abierto is True
+        assert p._body.visible is True
+        assert p.state["datos"] == {}
 
     def test_expandir_prefill(self):
         p = _panel()
@@ -338,6 +366,123 @@ class TestSubtitulos:
         assert not any(t[:1].isdigit() and "REPORTES" in t for t in textos)
         assert any(t.startswith("Consulta directa a la base local") for t in textos)
 
+    def test_bajada_en_header_no_en_body(self):
+        """La bajada vive en el header (como el resto de cards), no en el body colapsable."""
+        import flet as ft
+
+        p = _panel()
+        card = p.construir_card()
+        header = card.content.controls[0]
+        assert isinstance(header, ft.Column)
+        assert any(getattr(t, "value", "").startswith("Consulta directa") for t in header.controls)
+        # El body arranca con el bloque de filtros (Column de filters_block),
+        # no con una fila suelta.
+        assert isinstance(p._body.content.controls[0], ft.Column)
+
+
+class TestFiltroSku:
+    """Filtro SKU de la vista previa (vendedor + cliente + rango + SKU)."""
+
+    def test_parse_skus(self):
+        from src.ui.reporte_compras import _parse_skus
+
+        assert _parse_skus("78339") == ["78339"]
+        assert _parse_skus("78339, 0078339 123;78339") == ["78339", "0078339", "123"]
+        assert _parse_skus("") == []
+        assert _parse_skus(None) == []
+
+    def test_filtrar_es_estricto_011019_vs_11019(self):
+        """011019 y 11019 son productos distintos: coincidencia exacta."""
+        from src.ui.reporte_compras import _filtrar_por_sku
+
+        df = pd.DataFrame(
+            {"COD_SKU": ["011019", "11019", "08034", "78339"], "SOLES": [1.0, 2.0, 3.0, 4.0]}
+        )
+        assert _filtrar_por_sku(df, ["11019"])["COD_SKU"].tolist() == ["11019"]
+        assert _filtrar_por_sku(df, ["011019"])["COD_SKU"].tolist() == ["011019"]
+        assert _filtrar_por_sku(df, ["08034"])["COD_SKU"].tolist() == ["08034"]
+        assert _filtrar_por_sku(df, ["8034"]).empty
+        assert _filtrar_por_sku(df, []) is df
+
+    def test_sugerir_variante_ceros(self):
+        from src.ui.reporte_compras import _sugerir_variante_ceros
+
+        existentes = ["011019", "11019", "08034", "78339"]
+        assert _sugerir_variante_ceros(["11019"], existentes) == ["011019"]
+        assert _sugerir_variante_ceros(["011019"], existentes) == ["11019"]
+        # El exacto no se sugiere a si mismo; sin variantes, vacio.
+        assert _sugerir_variante_ceros(["78339"], existentes) == []
+        assert _sugerir_variante_ceros(["999"], existentes) == []
+
+    def test_tabla_por_sku_muestra_codigo_completo(self):
+        from src.ui.reporte_compras import _construir_tabla
+
+        df = pd.DataFrame(
+            [
+                {
+                    "MES_REF": "2026-01",
+                    "COD_SKU": "78339",
+                    "SKU": "ITEM X",
+                    "SOLES": 100.0,
+                    "CANTIDAD": 10.0,
+                },
+                {
+                    "MES_REF": "2026-01",
+                    "COD_SKU": "014850",
+                    "SKU": "ITEM Y",
+                    "SOLES": 50.0,
+                    "CANTIDAD": 5.0,
+                },
+            ]
+        )
+        tabla = _construir_tabla(df, col_cod="COD_SKU", col_nom="SKU", codigo_completo=True)
+        headers = [c.label.controls[0].value for c in tabla.columns[1:-1]]
+        assert headers == ["78339", "014850"]
+        # Modo clásico intacto: sufijo de línea.
+        df_l = pd.DataFrame(
+            [
+                {
+                    "MES_REF": "2026-01",
+                    "COD_LINEA": "0101",
+                    "LINEA": "GASEOSAS",
+                    "SOLES": 100.0,
+                    "CANTIDAD": 10.0,
+                },
+            ]
+        )
+        tabla_l = _construir_tabla(df_l)
+        assert tabla_l.columns[1].label.controls[0].value == "01"
+
+    def test_panel_con_campo_sku_y_estado(self):
+        p = _panel()
+        p.construir_card()
+        assert p.state["skus"] == []
+        # El campo SKU vive en el bloque de filtros complementarios.
+        assert p.sku_field in _controles(p._body.content.controls[0])
+
+    def test_celda_muestra_precio_unitario(self):
+        from src.ui.reporte_compras import _construir_tabla, _pu_txt
+
+        assert _pu_txt(100.0, 10.0) == "P.U. 10.00000"
+        assert _pu_txt(100.0, 0.0) == "P.U. —"
+        df = pd.DataFrame(
+            [
+                {
+                    "MES_REF": "2026-01",
+                    "COD_SKU": "78339",
+                    "SKU": "ITEM X",
+                    "SOLES": 100.0,
+                    "CANTIDAD": 10.0,
+                },
+            ]
+        )
+        tabla = _construir_tabla(df, col_cod="COD_SKU", col_nom="SKU", codigo_completo=True)
+        celda = tabla.rows[0].cells[1].content.controls
+        assert [t.value for t in celda][2] == "P.U. 10.00000"
+        # Fila TOTAL tambien lo trae.
+        total = tabla.rows[-1].cells[1].content.controls
+        assert [t.value for t in total][2] == "P.U. 10.00000"
+
     def test_helper_section_header_sub(self):
         from src.core.g360_theme import G360Theme
 
@@ -438,12 +583,14 @@ class TestGeometriaHorizontal:
 
     def test_chips_hojas_igual_cliente(self):
         """Chips de hojas con el mismo estilo que los chips de cliente."""
+        from src.core.g360_theme import G360Theme
+
         p = _panel()
         p.construir_card()
         chip = p._chips["consolidado"]
         assert chip.padding == ft.padding.symmetric(horizontal=8, vertical=2)
         label = chip.label
-        assert label.size == 10
+        assert label.size == G360Theme.TYPE_SUBTITLE
 
     def test_cuerpo_padding_simetrico(self):
         p = _panel()
@@ -452,24 +599,75 @@ class TestGeometriaHorizontal:
         assert pad.left == pad.right == 8
 
     def test_body_ordenado_filtros_rango_hojas_acciones_salida(self):
+        """El cuerpo va: bloque de filtros, divisor, acciones, status, salida.
+
+        Los filtros usan el esqueleto de 3 bloques (filters_block):
+        principales (vendedor + clientes + rango), complementarios (SKU) y
+        salida (NC + hojas a exportar).
+        """
         import flet as ft
 
         p = _panel()
         p.construir_card()
         cols = p._body.content.controls
-        # 0 subtítulo, 1 filtros, 2 chips clientes, 3 rango,
-        # 4 "Hojas a exportar:", 5 chips, 6 divider, 7 acciones,
-        # 8 status, 9 resultados
-        assert isinstance(cols[1], ft.Row) and p.vend_dd in cols[1].controls
-        assert p.btn_buscar_cli in cols[1].controls
-        assert cols[2] is p.cli_chips
-        assert isinstance(cols[3], ft.Row) and p.nc_sw in cols[3].controls
-        assert getattr(cols[4], "value", "") == "Hojas a exportar:"
-        assert cols[5] is p._chips_row
-        assert isinstance(cols[7], ft.Row)
-        assert p.btn_generar in cols[7].controls
-        assert p.btn_exportar in cols[7].controls
-        assert cols[7].alignment == ft.MainAxisAlignment.END
+        # 0 bloque de filtros, 1 divisor, 2 acciones, 3 status, 4 resultados
+        bloque = cols[0]
+        assert isinstance(bloque, ft.Column)
+
+        # Cada bloque de filters_block es un par (header, contenido); el
+        # contenido se envuelve en Column solo si el bloque trae mas de un
+        # control.
+        assert len(bloque.controls) == 6  # 3 pares header + contenido
+
+        def _bloque_de(ctrl):
+            """Header y contenido del bloque que contiene `ctrl`."""
+            for i, header in enumerate(bloque.controls[:-1]):
+                contenido = bloque.controls[i + 1]
+                if ctrl in _controles(contenido):
+                    return header, contenido
+            raise AssertionError(f"{ctrl} no esta en ningun bloque")
+
+        # Orden: uso cotidiano, criterio especifico, empaque.
+        h_principales, c_principales = _bloque_de(p.vend_dd)
+        h_complementarios, c_complementarios = _bloque_de(p.sku_field)
+        h_salida, c_salida = _bloque_de(p.nc_sw)
+        assert bloque.controls.index(h_principales) < bloque.controls.index(h_complementarios)
+        assert bloque.controls.index(h_complementarios) < bloque.controls.index(h_salida)
+
+        # El SKU ya no compite en la fila del vendedor: el vendedor y sus
+        # clientes van en una Row de principales; el SKU, en otro bloque.
+        controles_principales = _controles(c_principales)
+        assert p.vend_dd in controles_principales
+        assert p.btn_buscar_cli in controles_principales
+        assert p.cli_chips in c_principales.controls
+        assert p.sku_field not in controles_principales
+        assert p.sku_field in _controles(c_complementarios)
+        assert p.nc_sw in _controles(c_salida)
+
+        assert isinstance(cols[1], ft.Divider)
+        assert isinstance(cols[2], ft.Row)
+        assert p.btn_generar in cols[2].controls
+        assert p.btn_exportar in cols[2].controls
+        assert cols[2].alignment == ft.MainAxisAlignment.END
+
+    def test_jerarquia_de_los_dos_pasos(self):
+        """ "Ver datos" consulta (secundario) y "Generar Excel" escribe (primario).
+
+        Antes los dos eran accent relleno con rótulos indistinguibles; el peso
+        visual es lo que dice cuál termina el flujo.
+        """
+        import flet as ft
+
+        p = _panel()
+        p.construir_card()
+
+        assert p.btn_generar.text == "Ver datos"
+        assert isinstance(p.btn_generar, ft.OutlinedButton), "el paso 1 es secundario"
+        assert p.btn_exportar.text == "Generar Excel"
+        assert isinstance(p.btn_exportar, ft.ElevatedButton), "el paso 2 es primario"
+        # El primario lleva el relleno de acento; el secundario, solo borde.
+        assert p.btn_exportar.style.bgcolor is not None
+        assert p.btn_generar.style.side is not None
 
     def test_fila_filtros_sin_wrap_ni_anidadas(self):
         """Regresión del bloque gris: la fila con el dropdown elástico no
@@ -478,10 +676,15 @@ class TestGeometriaHorizontal:
 
         p = _panel()
         p.construir_card()
-        fila = p._body.content.controls[1]
-        assert isinstance(fila, ft.Row)
-        assert fila.wrap is not True
-        assert not any(isinstance(c, ft.Row) for c in fila.controls)
+        # El bloque de filtros es una Column con un header + las filas.
+        bloque = p._body.content.controls[0]
+        filas = [c for c in bloque.controls if isinstance(c, ft.Row)]
+        assert filas, "el bloque de filtros debe traer sus filas"
+        for fila in filas:
+            # La fila del vendedor es la unica sin wrap (dropdown elastico).
+            if p.vend_dd in fila.controls:
+                assert fila.wrap is not True
+                assert not any(isinstance(c, ft.Row) for c in fila.controls)
 
     def test_fila_rango_cabe(self):
         # icono 14 + labels ~110×2 + botones 32×2 + switch ~180 + spacings
@@ -492,8 +695,11 @@ class TestGeometriaHorizontal:
 
         p = _panel()
         p.construir_card()
-        fila = p._body.content.controls[7]
-        assert isinstance(fila, ft.Row)
+        fila = next(
+            c
+            for c in p._body.content.controls
+            if isinstance(c, ft.Row) and p.btn_exportar in getattr(c, "controls", [])
+        )
         assert fila.alignment == ft.MainAxisAlignment.END
 
 

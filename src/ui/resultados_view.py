@@ -46,6 +46,26 @@ _COLS_PRECIO_UNIT = frozenset(
 )
 
 
+def con_monto_nd(df, marcar_nd=False):
+    """Copia del df con MONTO_ND calculado (|DIFERENCIA| x CANTIDAD en negativas).
+
+    Misma formula que la generacion del expediente. Se usa en el render y en
+    cada reconstruccion de tabla (ordenar, ver mas): sin esto, la columna
+    ND existe al pintar pero desaparece al reordenar, porque esos caminos
+    reconstruyen desde el dataframe original.
+    """
+    if not marcar_nd or df is None or getattr(df, "empty", True) or "DIFERENCIA" not in df.columns:
+        return df
+    df = df.copy()
+    dif = pd.to_numeric(df["DIFERENCIA"], errors="coerce").fillna(0.0)
+    if "CANTIDAD" in df.columns:
+        cant = pd.to_numeric(df["CANTIDAD"], errors="coerce").fillna(1.0)
+    else:
+        cant = 1.0
+    df["MONTO_ND"] = (dif.where(dif < -0.001, 0.0).abs() * cant).round(2)
+    return df
+
+
 def render_resultado(
     resultado, tipo_actual, df_historial, accent_color, success_color, marcar_nd=False
 ):
@@ -90,6 +110,12 @@ def render_resultado(
             "content": None,
         }
 
+    # Monto ND en la vista: la previa muestra el cuanto, no solo el que.
+    # Sin DIFERENCIA (rebate) no hay nada que mostrar.
+    mostrar_nd = bool(marcar_nd) and "DIFERENCIA" in df.columns
+    df = con_monto_nd(df, marcar_nd=marcar_nd)
+    total_nd = float(df["MONTO_ND"].sum()) if mostrar_nd else 0.0
+
     if tipo_actual == "rebate_volumen":
         columns, rows, toggles = _build_rebate_table(df)
         status_counts = {}
@@ -109,7 +135,13 @@ def render_resultado(
         accent_color,
         success_color,
     )
-    summary_panel = _build_summary_panel(total_nc_str, skus_str, alertas_str, accent_color)
+    summary_panel = _build_summary_panel(
+        total_nc_str,
+        skus_str,
+        alertas_str,
+        accent_color,
+        total_nd_str=f"S/ {total_nd:,.2f}" if mostrar_nd else None,
+    )
 
     # Build status legend banner
     n_genera = status_counts.get("n_genera", 0)
@@ -129,7 +161,7 @@ def render_resultado(
                         ),
                         ft.Text(
                             f"Genera NC ({n_genera})",
-                            size=10,
+                            size=G360Theme.TYPE_SUBTITLE,
                             color=G360Theme.ok_color(),
                             weight=ft.FontWeight.W_600,
                         ),
@@ -148,7 +180,7 @@ def render_resultado(
                         ),
                         ft.Text(
                             f"Genera ND ({n_nd})",
-                            size=10,
+                            size=G360Theme.TYPE_SUBTITLE,
                             color=G360Theme.warning_color(),
                             weight=ft.FontWeight.W_600,
                         ),
@@ -167,7 +199,7 @@ def render_resultado(
                         ),
                         ft.Text(
                             f"Sin NC / Alarma ({n_alarma})",
-                            size=10,
+                            size=G360Theme.TYPE_SUBTITLE,
                             color=G360Theme.error_color(),
                             weight=ft.FontWeight.W_600,
                         ),
@@ -189,7 +221,7 @@ def render_resultado(
                         ),
                         ft.Text(
                             f"Coincide ({n_coincide})",
-                            size=10,
+                            size=G360Theme.TYPE_SUBTITLE,
                             color=ft.Colors.ON_SURFACE_VARIANT,
                             weight=ft.FontWeight.W_600,
                         ),
@@ -213,6 +245,7 @@ def render_resultado(
 
     # Warning: no rows generate NC
     expediente_warning = None
+    warn_msg = None
     if n_genera == 0 and total_rows > 0:
         if n_nd > 0 and n_alarma == 0 and n_coincide == 0:
             warn_msg = (
@@ -233,6 +266,19 @@ def render_resultado(
             warn_msg = (
                 "No hay filas que generen NC. El expediente se creará como constancia de análisis."
             )
+    # Deteccion ND siempre, generacion a peticion: aunque el check este
+    # apagado se avisa cuantas filas negativas hay y su monto estimado.
+    n_neg = status_counts.get("n_negativas", 0)
+    pot = status_counts.get("monto_nd_potencial", 0) or 0
+    if not marcar_nd and n_neg > 0 and pot > 0:
+        fila_txt = "fila" if n_neg == 1 else "filas"
+        nd_msg = (
+            f"Diferencias negativas detectadas: {n_neg} {fila_txt} "
+            f"(potencial ND S/ {pot:,.2f}). Activa «Calcular Nota de Débito» "
+            "para generarlas: solo se generan a petición."
+        )
+        warn_msg = f"{warn_msg} {nd_msg}" if warn_msg else nd_msg
+    if warn_msg:
         expediente_warning = ft.Container(
             content=ft.Row(
                 [
@@ -248,19 +294,19 @@ def render_resultado(
             border_radius=10,
         )
 
+    # Sin encabezado "RESULTADO" propio: vive dentro de la card "Resultado
+    # del reconocimiento" y el titulo duplicado rompia la jerarquia
+    # (card > seccion con el mismo nombre). El resumen arranca en los tiles.
     content = ft.Column(
         [
-            ft.Row(
-                [
-                    ft.Icon(ft.Icons.ANALYTICS_OUTLINED, size=18, color=accent_color),
-                    ft.Text("RESULTADO", size=13, weight=ft.FontWeight.W_700),
-                ],
-                spacing=8,
-            ),
             summary_panel,
             nc_audit_panel,
             ft.Divider(height=12, color=G360Theme.border_subtle_color()),
-            legend_banner,
+            # Sin items no hay leyenda (rebate o todo coincide): un None como
+            # hijo revienta la serializacion de Flet y la pantalla no se
+            # actualiza, dejando la vista previa vacia. Contenedor vacio
+            # mantiene la posicion y no ocupa lugar.
+            legend_banner if legend_banner is not None else ft.Container(),
             ft.Divider(height=8, color=G360Theme.border_subtle_color()),
             ft.Container(
                 content=ft.Row([], scroll=ft.ScrollMode.ALWAYS),
@@ -377,7 +423,17 @@ def _build_standard_table(
         cols_disponibles = list(df.columns)[:5]
 
     cols_extras = [c for c in ["FACTURA", "FACTURAS", "AUDITORIA_NC"] if c in df.columns]
-    todas_cols = cols_disponibles + ["ESTADO"] + cols_extras
+    cols_datos = list(cols_disponibles)
+    # Columna ND junto al monto NC (solo existe si la vista la calculo).
+    # Va en cols_datos (no solo en el header): las filas se arman con esta
+    # lista y si la columna solo existiera en el encabezado, celdas y
+    # columnas quedarian desalineadas.
+    if "MONTO_ND" in df.columns and "MONTO_ND" not in cols_datos:
+        if "MONTO_NC" in cols_datos:
+            cols_datos.insert(cols_datos.index("MONTO_NC") + 1, "MONTO_ND")
+        else:
+            cols_datos.append("MONTO_ND")
+    todas_cols = cols_datos + ["ESTADO"] + cols_extras
 
     notas = None
     if df_historial is not None and not df_historial.empty:
@@ -432,6 +488,23 @@ def _build_standard_table(
         n_nd = row_statuses.count("nd")
         n_coincide = row_statuses.count("coincide")
 
+    # Potencial ND (alerta siempre, se genere o no): filas con diferencia
+    # negativa y su monto estimado con la misma formula de generacion.
+    # No depende de marcar_nd: la deteccion avisa, la generacion es a peticion.
+    n_negativas = 0
+    monto_nd_potencial = 0.0
+    if "DIFERENCIA" in _sort_df.columns:
+        _difs = pd.to_numeric(_sort_df["DIFERENCIA"], errors="coerce").fillna(0.0)
+        if "CANTIDAD" in _sort_df.columns:
+            _cants = pd.to_numeric(_sort_df["CANTIDAD"], errors="coerce").fillna(1.0)
+        else:
+            _cants = 1.0
+        _neg = _difs < -0.001
+        n_negativas = int(_neg.sum())
+        if n_negativas:
+            mult = _cants[_neg] if isinstance(_cants, pd.Series) else _cants
+            monto_nd_potencial = round(float((_difs[_neg].abs() * mult).sum()), 2)
+
     rows = []
     for idx, (_, row) in enumerate(_sort_df.iterrows()):
         if idx >= max_rows:
@@ -451,7 +524,7 @@ def _build_standard_table(
             row_bg = None
 
         celdas = []
-        for col in cols_disponibles + cols_extras:
+        for col in cols_datos + cols_extras:
             val = row.get(col, "")
             if isinstance(val, float):
                 if col in _COLS_PRECIO_UNIT:
@@ -484,6 +557,14 @@ def _build_standard_table(
                 elif monto <= 0.001:
                     color = G360Theme.error_color()
                     bg_cell = G360Theme.with_opacity(0.10, G360Theme.error_color())
+            elif col == "MONTO_ND":
+                try:
+                    _mnd = float(val or 0)
+                except (TypeError, ValueError):
+                    _mnd = 0.0
+                if _mnd > 0.001:
+                    color = G360Theme.warning_color()
+                    bg_cell = G360Theme.with_opacity(0.15, G360Theme.warning_color())
             elif col == "ALERTA":
                 txt = str(val).upper()
                 if "ERROR" in txt:
@@ -518,7 +599,7 @@ def _build_standard_table(
             spacing=4,
         )
         estado_cell = ft.DataCell(ft.Container(content=estado_content, padding=4, bgcolor=row_bg))
-        celdas.insert(len(cols_disponibles), estado_cell)
+        celdas.insert(len(cols_datos), estado_cell)
 
         # NC/ND column
         facturas_ids = _extraer_facturas(row)
@@ -552,6 +633,8 @@ def _build_standard_table(
             "n_alarma": n_alarma,
             "n_nd": n_nd,
             "n_coincide": n_coincide,
+            "n_negativas": n_negativas,
+            "monto_nd_potencial": monto_nd_potencial,
             "has_more": has_more,
             "total_rows": len(df),
             "shown_rows": len(rows),
@@ -703,7 +786,9 @@ def _build_verification_panel(resultado, tipo_actual, alertas, accent_color, suc
                                         [
                                             ft.Icon(icon, size=15, color=accent_color),
                                             ft.Text(
-                                                lbl, size=10, color=ft.Colors.ON_SURFACE_VARIANT
+                                                lbl,
+                                                size=G360Theme.TYPE_SUBTITLE,
+                                                color=ft.Colors.ON_SURFACE_VARIANT,
                                             ),
                                         ],
                                         spacing=4,
@@ -799,7 +884,9 @@ def _build_nc_audit_panel(nc_alertas, accent_color):
             items.append(
                 ft.Container(
                     content=ft.Text(
-                        f"  \u2022 {a.mensaje}", size=10, color=ft.Colors.ON_SURFACE_VARIANT
+                        f"  • {a.mensaje}",
+                        size=G360Theme.TYPE_SUBTITLE,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
                     ),
                     padding=ft.padding.only(left=20),
                 )
@@ -833,84 +920,46 @@ def _build_nc_audit_panel(nc_alertas, accent_color):
     )
 
 
-def _build_summary_panel(total_nc_str, skus_str, alertas_str, accent_color):
-    """Construye el panel de resumen (Total NC, SKU, Alertas)."""
-    return ft.Row(
-        [
-            ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text(
-                            "Total NC",
-                            size=12,
-                            color=ft.Colors.ON_SURFACE_VARIANT,
-                            weight=ft.FontWeight.W_500,
-                        ),
-                        ft.Text(
-                            total_nc_str, size=22, weight=ft.FontWeight.W_800, color=accent_color
-                        ),
-                    ],
-                    spacing=4,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                padding=ft.padding.symmetric(horizontal=24, vertical=16),
-                expand=True,
-                border_radius=14,
-                bgcolor=G360Theme.surface_variant_color(),
-                border=ft.border.all(1, G360Theme.border_subtle_color()),
+def _build_summary_panel(total_nc_str, skus_str, alertas_str, accent_color, total_nd_str=None):
+    """Construye el panel de resumen (Total NC, SKU, Alertas y Total ND opcional)."""
+    n_alertas = int(alertas_str.split()[0]) if alertas_str.split() else 0
+
+    def _tile(titulo, valor, color_valor):
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text(
+                        titulo,
+                        size=12,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                        weight=ft.FontWeight.W_500,
+                    ),
+                    ft.Text(
+                        valor,
+                        size=22,
+                        weight=ft.FontWeight.W_800,
+                        color=color_valor,
+                    ),
+                ],
+                spacing=4,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text(
-                            "SKU / Líneas",
-                            size=12,
-                            color=ft.Colors.ON_SURFACE_VARIANT,
-                            weight=ft.FontWeight.W_500,
-                        ),
-                        ft.Text(
-                            skus_str,
-                            size=22,
-                            weight=ft.FontWeight.W_800,
-                            color=ft.Colors.ON_SURFACE,
-                        ),
-                    ],
-                    spacing=4,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                padding=ft.padding.symmetric(horizontal=24, vertical=16),
-                expand=True,
-                border_radius=14,
-                bgcolor=G360Theme.surface_variant_color(),
-                border=ft.border.all(1, G360Theme.border_subtle_color()),
-            ),
-            ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text(
-                            "Alertas",
-                            size=12,
-                            color=ft.Colors.ON_SURFACE_VARIANT,
-                            weight=ft.FontWeight.W_500,
-                        ),
-                        ft.Text(
-                            alertas_str,
-                            size=22,
-                            weight=ft.FontWeight.W_800,
-                            color=ft.Colors.AMBER_400
-                            if int(alertas_str.split()[0]) > 0
-                            else ft.Colors.ON_SURFACE,
-                        ),
-                    ],
-                    spacing=4,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                padding=ft.padding.symmetric(horizontal=24, vertical=16),
-                expand=True,
-                border_radius=14,
-                bgcolor=G360Theme.surface_variant_color(),
-                border=ft.border.all(1, G360Theme.border_subtle_color()),
-            ),
-        ],
-        spacing=10,
-    )
+            padding=ft.padding.symmetric(horizontal=24, vertical=16),
+            expand=True,
+            border_radius=14,
+            bgcolor=G360Theme.surface_variant_color(),
+            border=ft.border.all(1, G360Theme.border_subtle_color()),
+        )
+
+    tiles = [
+        _tile("Total NC", total_nc_str, accent_color),
+        _tile("SKU / Líneas", skus_str, ft.Colors.ON_SURFACE),
+        _tile(
+            "Alertas",
+            alertas_str,
+            ft.Colors.AMBER_400 if n_alertas > 0 else ft.Colors.ON_SURFACE,
+        ),
+    ]
+    if total_nd_str is not None:
+        tiles.append(_tile("Total ND", total_nd_str, G360Theme.warning_color()))
+    return ft.Row(tiles, spacing=10)

@@ -117,7 +117,9 @@ class _ViewHelpers:
     @staticmethod
     def _badge(texto: str, color: str) -> ft.Container:
         return ft.Container(
-            content=ft.Text(texto, size=10, weight=ft.FontWeight.W_700, color=color),
+            content=ft.Text(
+                texto, size=G360Theme.TYPE_SUBTITLE, weight=ft.FontWeight.W_700, color=color
+            ),
             padding=ft.padding.symmetric(horizontal=7, vertical=3),
             border_radius=6,
             bgcolor=G360Theme.with_opacity(0.12, color),
@@ -245,9 +247,11 @@ class _ViewHelpers:
             "fp_desde": self.fp_desde.value,
             "fp_hasta": self.fp_hasta.value,
             "stock_cliente_path": self.stock_cliente_path,
-            # Factura unica por fragmento (legacy ya no usa dropdown; fallback a chip)
+            # Facturas del picker (una o varias; ANF las usa todas).
+            # factura_ci queda como la unica si hay exactamente una (legacy).
             "factura_ci": (self._sel_facturas[0][1] if len(self._sel_facturas) == 1 else None),
             "factura_df": (self._sel_facturas[0][1] if len(self._sel_facturas) == 1 else None),
+            "facturas_sel": [f for _, f in self._sel_facturas],
             "descuento_pct": self.descuento_pct.value,
             "desc_file_path": self.desc_file_path,
             "sku_filter_path": self.sku_filter_path,
@@ -284,3 +288,68 @@ class _ViewHelpers:
             if invalidar:
                 invalidar("Cambió la configuración del historial; vuelve a ejecutar el cálculo.")
         return config
+
+    # ── Guard de firma: el expediente nunca se arma con entradas desfasadas ──
+
+    def _firma_entradas(self) -> str:
+        """Huella de TODO lo que entra al cálculo, comparable entre corridas.
+
+        Los invalidadores por evento (insumos, documentos, vendedor,...) son la
+        primera barrera; esta firma es la red de seguridad para lo que se
+        escape: al ejecutar se guarda, y al generar se compara.
+        """
+        import hashlib
+        import json
+
+        partes = {
+            "caso": getattr(self, "tipo_actual", ""),
+            "modalidad": getattr(self, "modalidad_actual", ""),
+            "rango": [
+                str(getattr(self, "busq_fd", [None])[0]),
+                str(getattr(self, "busq_fh", [None])[0]),
+            ],
+            "vendedor": getattr(self, "_search_vend_id", None)
+            or getattr(getattr(self, "vendedor_dropdown", None), "value", None),
+            "insumos": sorted(
+                str(f.get("ruta"))
+                for f in (getattr(self, "_insumo_files", None) or [])
+                if isinstance(f, dict) and f.get("ruta")
+            ),
+            "seleccion": {
+                "clientes": sorted(str(c[0]) for c in getattr(self, "_sel_clientes", []) or []),
+                "facturas": sorted(str(f[1]) for f in getattr(self, "_sel_facturas", []) or []),
+                "pedidos": sorted(str(p[1]) for p in getattr(self, "_sel_pedidos", []) or []),
+                "ordenes": sorted(str(o[1]) for o in getattr(self, "_sel_ordenes", []) or []),
+            },
+            "flags": {
+                "ocultar_cero": bool(
+                    getattr(self, "chk_ocultar_cero", None) and self.chk_ocultar_cero.value
+                ),
+                "gen_nd": bool(getattr(self, "chk_gen_nd", None) and self.chk_gen_nd.value),
+                "solo_ndb": bool(getattr(self, "chk_solo_ndb", None) and self.chk_solo_ndb.value),
+                "descuento_pct": getattr(getattr(self, "descuento_pct", None), "value", None),
+                "meta": getattr(getattr(self, "meta_monto", None), "value", None),
+                "forzar_cant": bool(
+                    getattr(self, "chk_forzar_cant", None) and self.chk_forzar_cant.value
+                ),
+            },
+            "historico": self._leer_historico_config().as_dict()
+            if hasattr(self, "_leer_historico_config")
+            else {},
+        }
+        crudo = json.dumps(partes, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(crudo).hexdigest()[:16]
+
+    def _expediente_desfasado(self) -> bool:
+        """True si las entradas cambiaron despues de la ultima ejecucion."""
+        firma = getattr(self, "_firma_ejecucion", None)
+        if not firma:
+            return False  # sin ejecucion registrada: no hay con que comparar
+        return self._firma_entradas() != firma
+
+    def _marcar_firma_ejecucion(self) -> None:
+        """Se llama justo despues de un calculo exitoso."""
+        try:
+            self._firma_ejecucion = self._firma_entradas()
+        except Exception:
+            self._firma_ejecucion = None

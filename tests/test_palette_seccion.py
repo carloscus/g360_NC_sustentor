@@ -133,3 +133,21 @@ def test_el_velo_es_sutil():
     card = _parse(T.surface_color())[0]
     delta = max(abs(fondo[i] - card[i]) for i in range(3))
     assert delta <= 40, f"el velo movió el fondo {delta} niveles: ya no es sutil"
+
+
+def test_warning_cumple_sobre_variante(tema):
+    """El warning claro anterior (#b45309) no llegaba a 4.5:1 en light."""
+    fondo = _parse(T.surface_variant_color())[0]
+    c = _ratio(_sobre(T.warning_color(), fondo), fondo)
+    assert c >= 4.5, f"warning sobre variante: {c:.2f}:1 (min 4.5)"
+
+
+def test_texto_boton_seccion_cumple_en_ambos_temas(tema):
+    """Blanco fijo sobre violeta brillante apenas daba 2.7:1 en dark."""
+    if tema:  # dark: texto oscuro sobre acento brillante
+        fg, bg = T.SECTION_BTN_FG_DARK, T.ACCENT_2_BRIGHT
+    else:  # light: blanco sobre acento oscuro
+        fg, bg = "#ffffff", T.ACCENT_2_LIGHT
+    assert T.section_button_fg() == (T.SECTION_BTN_FG_DARK if tema else T.SECTION_BTN_FG_LIGHT)
+    c = _ratio(_sobre(fg, bg), _sobre(bg, bg))
+    assert c >= 4.5, f"texto de boton de seccion: {c:.2f}:1 (min 4.5)"

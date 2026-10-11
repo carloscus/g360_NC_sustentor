@@ -20,10 +20,26 @@ def workflow_section(
     description: str = "",
     action: ft.Control | None = None,
     divider: bool = True,
+    step: int | None = None,
 ) -> ft.Column:
-    """Build a labelled, non-card section within the primary workflow card."""
+    """Build a labelled, non-card section within the primary workflow card.
+
+    `step` (1-based) replaces the icon with a numeral in the same badge: en el
+    layout de 2 columnas el numero dice el orden de lectura (izquierda 1-2,
+    derecha 3-4, reglas 5), que el icono no communicate.
+    """
+    box_content = (
+        ft.Text(
+            str(step),
+            size=15,
+            weight=ft.FontWeight.W_700,
+            color=G360Theme.accent_color(),
+        )
+        if step is not None
+        else ft.Icon(icon, size=17, color=G360Theme.accent_color())
+    )
     icon_box = ft.Container(
-        content=ft.Icon(icon, size=17, color=G360Theme.accent_color()),
+        content=box_content,
         width=34,
         height=34,
         alignment=ft.alignment.center,

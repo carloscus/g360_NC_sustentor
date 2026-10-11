@@ -85,7 +85,24 @@ def _vista_2_clientes(tmp_db):
 
 
 def _columnas_tabs(view):
-    return [getattr(t.content, "content", None) for t in view._result_tabs.tabs]
+    """Resumen de cada tab (baja por el scroll interno del tab).
+
+    Estructura: Tab -> Container -> Column(scroll) -> [resumen Column].
+    Si el tab no tiene esa forma (placeholder o aviso), devuelve el contenido
+    tal cual para que el test que lo usa falle con mensaje claro.
+    """
+    cols = []
+    for t in view._result_tabs.tabs:
+        cont = getattr(t.content, "content", None)
+        if (
+            isinstance(cont, ft.Column)
+            and len(cont.controls) == 1
+            and isinstance(cont.controls[0], ft.Column)
+        ):
+            cols.append(cont.controls[0])
+        else:
+            cols.append(cont)
+    return cols
 
 
 def test_tabs_se_pintan_sin_excepcion(tmp_db):
@@ -97,9 +114,41 @@ def test_tabs_se_pintan_sin_excepcion(tmp_db):
     assert len(view._result_tabs.tabs) == 2
     primer = view._result_tabs.tabs[0].content
     assert isinstance(primer, ft.Container)
+    # Contenedor del tab -> columna con scroll interno -> resumen.
     inner = primer.content
     assert isinstance(inner, ft.Column), "el tab quedo con el placeholder de carga"
-    assert len(inner.controls) > 5, "el panel del tab salio vacio"
+    assert inner.scroll is not None, "el tab no tiene scroll interno"
+    resumen = inner.controls[0]
+    assert isinstance(resumen, ft.Column)
+    assert len(resumen.controls) > 5, "el panel del tab salio vacio"
+
+
+def test_tabs_con_altura_acotada(tmp_db):
+    """Los tabs viven en un area de alto fijo.
+
+    ft.Tabs es un viewport y exige alto finito: dentro de la columna con
+    scroll de la vista el cliente Flet dejaba el area en blanco sin error
+    en Python. El alto fijo + scroll interno lo evita.
+    """
+    from src.ui.view_handlers import _ALTURA_TABS_RESULTADO
+
+    view = _vista_2_clientes(tmp_db)
+
+    view._renderizar_tabs_resultado()
+
+    area = view._result_tabs_container.controls[1]
+    assert isinstance(area, ft.Container)
+    assert area.height == _ALTURA_TABS_RESULTADO
+
+
+def test_sin_header_resultado_duplicado(tmp_db):
+    """La card ya titula 'Resultado del reconocimiento': el contenido no repite 'RESULTADO'."""
+    view = _vista_2_clientes(tmp_db)
+
+    view._renderizar_tabs_resultado()
+
+    for tab in view._result_tabs.tabs:
+        assert "RESULTADO" not in _textos(tab.content)
 
 
 def test_cada_cliente_pinta_su_propio_tab(tmp_db):
@@ -134,23 +183,35 @@ def test_tabla_de_cada_tab_muestra_su_cliente(tmp_db):
             for c in col.controls
             if isinstance(c, ft.Container) and getattr(c, "content", None) is not None
         ]
-        tablas_en_tab = {
-            id(w.content.controls[0]) for w in wraps if isinstance(w.content, ft.Row)
-        }
+        tablas_en_tab = {id(w.content.controls[0]) for w in wraps if isinstance(w.content, ft.Row)}
         assert id(tabla) in tablas_en_tab, (
             f"el tab de {cid} no contiene su tabla: {tablas_en_tab} vs {id(tabla)}"
         )
 
 
-def test_boton_expediente_habilitado_en_todos_los_tabs(tmp_db):
+def test_boton_expediente_es_unico_y_global(tmp_db):
+    """Un solo boton de expediente (barra sticky), no uno por tab.
+
+    Antes cada tab tenia el suyo y TODOS generaban lo mismo: el handler usa
+    el `self.resultado` completo y `generar_expediente` separa por cliente.
+    Con 3 clientes eran 3 botones identicos.
+    """
     view = _vista_2_clientes(tmp_db)
     view._renderizar_tabs_resultado()
 
+    # El paso final es el control global de la barra sticky...
+    assert view.btn_expediente is view.btn_gen_exp
+    # ...y ningun tab lo lleva (solo la secundaria Auditoria).
     for activo in view._result_controles_por_cliente.values():
-        boton = activo["btn_row"].controls[0]
-        assert boton.disabled is False
-        # Cada tab tiene su propio boton (no compartido entre padres).
-        assert boton is not activo["btn_row"].controls[1]
+        fila = activo["btn_row"]
+        assert view.btn_gen_exp not in fila.controls
+        assert len(fila.controls) == 1, "solo queda la acción secundaria"
+
+    # Habilitarlo lo habilita una vez, sin depender del tab activo.
+    view._set_btn_expediente(False)
+    assert view.btn_gen_exp.disabled is True
+    view._set_btn_expediente(True)
+    assert view.btn_gen_exp.disabled is False
 
 
 def test_panel_unico_sigue_usando_el_set_global(tmp_db):
@@ -185,6 +246,10 @@ def test_panel_unico_sigue_usando_el_set_global(tmp_db):
 
     assert view._result_cliente_activo is None
     assert view.resultados_container.visible is True
+    # El panel interno nace visible=False: debe encenderse al pintar, si no
+    # la card muestra solo el encabezado y la vista previa nunca se ve.
+    assert view._result_panel.visible is True
+    assert view._result_panel.content is not None
     assert None in view._result_controles_por_cliente
 
 
@@ -201,3 +266,106 @@ def test_alternar_tabs_no_deja_el_boton_deshabilitado(tmp_db):
     assert view._result_controles_por_cliente[primero]["tabla"].rows
     assert view._result_controles_por_cliente[segundo]["tabla"].rows
     assert pytest is not None
+
+
+def test_placeholders_de_carga_son_distintos_por_tab(tmp_db):
+    """Cada tab nace con su propio placeholder (no un control compartido)."""
+    view = _vista_2_clientes(tmp_db)
+    tabs = view._construir_tabs(["CLI_A", "CLI_B"])
+    assert tabs.tabs[0].content is not tabs.tabs[1].content
+
+
+def _textos(control):
+    out = []
+    pila = [control]
+    while pila:
+        c = pila.pop()
+        if isinstance(c, ft.Text) and isinstance(c.value, str):
+            out.append(c.value)
+        for attr in ("controls", "content"):
+            h = getattr(c, attr, None)
+            if isinstance(h, ft.Control):
+                pila.append(h)
+            elif isinstance(h, (list, tuple)):
+                pila.extend(x for x in h if isinstance(x, ft.Control))
+    return out
+
+
+def test_tab_sin_vista_muestra_aviso_en_vez_de_cargando(tmp_db):
+    """Cliente sin vista (ocultar 0.00 lo vacio): el tab avisa, no queda en Cargando."""
+    view = _vista_2_clientes(tmp_db)
+    view._renderizar_tabs_resultado()
+    view._mostrar_tab_vacio(view._resultado_clientes_order[0], "Sin filas xyz")
+    contenido = view._result_tabs.tabs[0].content
+    assert "Cargando" not in " ".join(_textos(contenido))
+    assert any("Sin filas xyz" in t for t in _textos(contenido))
+
+
+def test_rearmar_filtra_piezas_none(tmp_db):
+    """Un contenido corto (piezas faltantes) no mete None al summary."""
+    view = _vista_2_clientes(tmp_db)
+    view._rearmar_result_summary({"content": ft.Column([ft.Text("solo")])})
+    assert all(isinstance(c, ft.Control) for c in view._result_summary.controls)
+
+
+def test_render_sin_leyenda_no_deja_none_en_el_arbol():
+    """rebate_volumen no arma leyenda: el contenido no debe tener hijos None.
+
+    Un None como hijo revienta la serializacion de Flet: el page.update()
+    falla, la pantalla queda intacta y la vista previa se ve vacia.
+    """
+    from types import SimpleNamespace
+
+    from src.ui.resultados_view import render_resultado
+
+    df = pd.DataFrame(
+        [
+            {
+                "LINEA": "GASEOSAS",
+                "SOLES": 1000.0,
+                "%_DEL_TOTAL": 50.0,
+                "MONTO_NC": 100.0,
+                "MONTO_NC_ND": 100.0,
+            }
+        ]
+    )
+    res = SimpleNamespace(
+        dataframe=df,
+        resumen={"total_nc": 100.0, "skus_afectados": 1},
+        alertas=[],
+        metricas={},
+    )
+    exp = SimpleNamespace(resultado=res, datos=None, contexto=None)
+    out = render_resultado(exp, "rebate_volumen", None, "#ffffff", "#00ff00")
+    assert out["content"] is not None
+    assert all(isinstance(c, ft.Control) for c in out["content"].controls)
+
+
+def test_selecciona_primer_tab_con_contenido(tmp_db, monkeypatch):
+    """Si el primer tab queda vacio (ocultar 0.00), se selecciona el que si pinta."""
+    view = _vista_2_clientes(tmp_db)
+    primero, segundo = view._resultado_clientes_order
+    real = view._obtener_vista_cliente
+    monkeypatch.setattr(
+        view, "_obtener_vista_cliente", lambda cid: None if cid == primero else real(cid)
+    )
+
+    view._renderizar_tabs_resultado()
+
+    assert view._result_tabs.selected_index == 1
+    assert view._result_cliente_activo == segundo
+    # El tab vacio avisa con el conteo omitido, no queda en Cargando.
+    textos = _textos(view._result_tabs.tabs[0].content)
+    assert not any("Cargando" in t for t in textos)
+    assert any("Sin filas" in t for t in textos)
+
+
+def test_todos_vacios_queda_el_primero(tmp_db, monkeypatch):
+    """Si ningun tab pinta, se queda el primero (comportamiento anterior)."""
+    view = _vista_2_clientes(tmp_db)
+    monkeypatch.setattr(view, "_obtener_vista_cliente", lambda cid: None)
+
+    view._renderizar_tabs_resultado()
+
+    assert view._result_tabs.selected_index == 0
+    assert view._result_cliente_activo == view._resultado_clientes_order[0]

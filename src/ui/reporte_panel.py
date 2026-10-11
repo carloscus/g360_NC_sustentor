@@ -30,7 +30,10 @@ from src.ui.reporte_compras import (
     _c_visible,
     _construir_tabla,
     _escribir_xlsx,
+    _filtrar_por_sku,
     _paquete_export,
+    _parse_skus,
+    _sugerir_variante_ceros,
     nombre_archivo_compras,
 )
 
@@ -42,14 +45,19 @@ class ReportePanel:
 
     # Hojas seleccionables del paquete de export (clave interna → etiqueta).
     # "resumen" no aparece: la portada se fuerza siempre que haya datos.
+    # Label corto: un chip de 33 chars ("Sucursales · Pareto + mes×línea/SKU")
+    # rompia la fila; el detalle del contenido va en el tooltip.
     HOJAS_EXPORT = (
         ("consolidado", "Consolidado"),
         ("comparativo", "Comparativo"),
-        ("sucursales", "Sucursales · Pareto + mes×línea/SKU"),
+        ("sucursales", "Sucursales (Pareto)"),
         ("ajustes", "Ajustes NC/NDB"),
         ("bd", "BD Registro"),
         ("facturas", "Facturas"),
     )
+    HOJAS_TOOLTIP = {
+        "sucursales": "Pareto del rango + desglose mes×línea y mes×SKU",
+    }
     TODAS = frozenset(k for k, _ in HOJAS_EXPORT)
     # El desglose sucursal×línea/SKU es opcional por volumen y por ser
     # un análisis especializado (supermercados/TAI LOY).
@@ -74,6 +82,8 @@ class ReportePanel:
             "incluir_nc": True,
             "hojas": set(self.DEFAULT_HOJAS),
             "datos": {},  # {cid: DataFrame} de la última generación
+            "skus": [],  # filtro SKU de la vista previa ("" = sin filtro)
+            "sku_sugerencias": {},  # {cid: [cods]} variantes en ceros si el filtro dio vacío
         }
 
     # ── página / actualizaciones (tolerante a tests sin page) ────────
@@ -88,6 +98,22 @@ class ReportePanel:
                 page.update()
         except Exception:
             pass
+
+    @staticmethod
+    def _sugerencias_sku(cli, cid, fd, fh, skus):
+        """Variantes en ceros existentes cuando el filtro SKU dio vacío.
+
+        Nunca relaja el filtro: solo sugiere ("¿quisiste decir 011019?")
+        para corregir el tipeo. Sin DB o sin variantes, lista vacía.
+        """
+        try:
+            ref = cli.fetch_skus_resumen_cliente(
+                cid, fecha_desde=fd, fecha_hasta=fh, incluir_nc=True
+            )
+            existentes = ref["COD_SKU"].tolist() if ref is not None and not ref.empty else []
+            return _sugerir_variante_ceros(skus, existentes)
+        except Exception:
+            return []
 
     def _snack(self, msg, color_attr="G360_SUCCESS"):
         try:
@@ -108,7 +134,7 @@ class ReportePanel:
         accent = G360Theme.section_accent_color()
         muted = G360Theme.text_muted_color()
 
-        self._resumen = ft.Text("", size=10, color=muted, expand=True)
+        self._resumen = ft.Text("", size=G360Theme.TYPE_BODY, color=muted, expand=True)
 
         def _fmt(d):
             return fecha_ui(d) if d else "todas"
@@ -134,24 +160,38 @@ class ReportePanel:
             ft.Icons.SEARCH,
             on_click=lambda _: self._abrir_picker_clientes(),
         )
-        self.nc_sw = ft.Switch(
-            label="Incluir NC/ND (neto)", value=True, label_style=ft.TextStyle(size=12)
+        self.sku_field = control_factory.text_field(
+            "SKU (opcional)",
+            width=control_factory.WIDTH_FIELD,
+            hint="Filtra vista previa: 78339, ...",
         )
-        self.btn_generar = ft.ElevatedButton(
-            "Generar",
-            icon=ft.Icons.PLAY_ARROW,
+        # Checkbox (no Switch): el mismo semántico "incluir/calcular NC" es
+        # checkbox en DOCUMENTOS DEL HISTORIAL. Un concepto, un control.
+        self.nc_sw = control_factory.checkbox("Incluir NC/ND (neto)", value=True)
+        # Jerarquia de los dos pasos: "Ver datos" consulta y pinta la vista
+        # previa (por cliente: meses, lineas, neto S/); "Generar Excel" escribe
+        # los archivos. Antes los dos eran accent relleno con rotulos
+        # ("Generar" / "Exportar Excel") que no decian cual era el final: el
+        # peso visual ahora lo dice, sin perder la verificacion previa.
+        self.btn_generar = ft.OutlinedButton(
+            "Ver datos",
+            icon=ft.Icons.VISIBILITY_OUTLINED,
             height=control_factory.HEIGHT,
-            style=ft.ButtonStyle(bgcolor=accent, color="white"),
+            style=ft.ButtonStyle(
+                color=accent,
+                side=ft.BorderSide(1, accent),
+                shape=ft.RoundedRectangleBorder(radius=G360Theme.BTN_RADIUS),
+            ),
             on_click=self._generar,
         )
         self.btn_exportar = ft.ElevatedButton(
-            "Exportar Excel",
+            "Generar Excel",
             icon=ft.Icons.GRID_ON,
             height=control_factory.HEIGHT,
-            style=ft.ButtonStyle(bgcolor=accent, color="white"),
+            style=ft.ButtonStyle(bgcolor=accent, color=G360Theme.section_button_fg()),
             on_click=self._exportar,
         )
-        self.status = ft.Text("", size=10, color=muted)
+        self.status = ft.Text("", size=G360Theme.TYPE_BODY, color=muted)
         self.resultados = ft.Column([], spacing=6, scroll=ft.ScrollMode.AUTO, expand=True)
 
         # Píldora icono+texto (un chevron solo no se identifica como botón).
@@ -184,15 +224,25 @@ class ReportePanel:
             ],
             spacing=8,
         )
-        header = ft.Row(
+        header = ft.Column(
             [
-                ft.GestureDetector(content=titulo, on_tap=lambda _: self._toggle()),
-                self._resumen,
-                btn_limpiar,
-                self._chevron,
+                ft.Row(
+                    [
+                        ft.GestureDetector(content=titulo, on_tap=lambda _: self._toggle()),
+                        self._resumen,
+                        btn_limpiar,
+                        self._chevron,
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=6,
+                ),
+                # Bajada en el header como el resto de cards: antes vivia como
+                # primer hijo del body colapsable y la card cerrada no explicaba nada.
+                G360Theme.subtitle(
+                    "Consulta directa a la base local: elige cliente, rango y hojas a exportar"
+                ),
             ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=6,
+            spacing=2,
         )
 
         # Chips de hojas a exportar (multiselección; todas marcadas por defecto)
@@ -200,63 +250,86 @@ class ReportePanel:
         self._chips_row = ft.Row([], wrap=True, spacing=6)
         for key, label in self.HOJAS_EXPORT:
             chip = ft.Chip(
-                label=ft.Text(label, size=10),
+                label=ft.Text(label, size=G360Theme.TYPE_SUBTITLE),
                 selected=key in self.state["hojas"],
                 show_checkmark=True,
                 data=key,
                 on_select=self._on_chip,
+                tooltip=self.HOJAS_TOOLTIP.get(key, ""),
                 padding=ft.padding.symmetric(horizontal=8, vertical=2),
             )
             self._chips[key] = chip
             self._chips_row.controls.append(chip)
 
+        # Bloques con jerarquia (filters_block): uso cotidiano, luego los
+        # criterios especificos y por ultimo como se empaqueta. Antes todo
+        # compite en la misma caja: el SKU (uso ocasional) estaba en la misma
+        # fila que el vendedor (uso diario).
+        bloque_filtros = control_factory.filters_block(
+            principales=[
+                # Sin wrap y sin filas anidadas: un hijo con expand dentro de
+                # un Row con wrap rompe el layout y pinta un bloque gris.
+                ft.Row(
+                    [self.vend_dd, self.btn_buscar_cli],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                self.cli_chips,
+                ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.CALENDAR_TODAY_OUTLINED,
+                            size=14,
+                            color=G360Theme.accent_color(),
+                        ),
+                        self.desde_label,
+                        self._picker_btn("desde", self.desde_label, "Desde"),
+                        self.hasta_label,
+                        self._picker_btn("hasta", self.hasta_label, "Hasta"),
+                    ],
+                    spacing=8,
+                    wrap=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ],
+            complementarios=[
+                ft.Row(
+                    [self.sku_field],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ],
+            salida=[
+                self.nc_sw,
+                # Botón Default: sin reset rápido, desmarcar 5 chips a mano
+                # era el path común.
+                ft.Row(
+                    [
+                        G360Theme.section_header(ft.Icons.LAYERS_OUTLINED, "Hojas a exportar"),
+                        ft.TextButton(
+                            "Default",
+                            on_click=self._restaurar_hojas_default,
+                            tooltip="Restaura las hojas por defecto (sucursales desactivada)",
+                        ),
+                    ],
+                    spacing=8,
+                ),
+                self._chips_row,
+            ],
+        )
+
         self._body = ft.Container(
             content=ft.Column(
                 [
-                    ft.Text(
-                        "Consulta directa a la base local: elige cliente, rango y hojas a exportar",
-                        size=10,
-                        color=G360Theme.text_muted_color(),
-                    ),
-                    # 1. Filtros: vendedor + búsqueda de clientes en una línea
-                    # (sin wrap y sin filas anidadas: un hijo con expand dentro
-                    # de un Row con wrap rompe el layout y pinta un bloque gris),
-                    # y debajo los clientes elegidos — igual que Búsqueda.
-                    ft.Row(
-                        [self.vend_dd, self.btn_buscar_cli],
-                        spacing=8,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    self.cli_chips,
-                    # 2. Rango + neto
-                    ft.Row(
-                        [
-                            ft.Icon(
-                                ft.Icons.CALENDAR_TODAY_OUTLINED,
-                                size=14,
-                                color=G360Theme.accent_color(),
-                            ),
-                            self.desde_label,
-                            self._picker_btn("desde", self.desde_label, "Desde"),
-                            self.hasta_label,
-                            self._picker_btn("hasta", self.hasta_label, "Hasta"),
-                            self.nc_sw,
-                        ],
-                        spacing=8,
-                        wrap=True,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    # 3. Hojas a exportar
-                    ft.Text("Hojas a exportar:", size=12, color=G360Theme.text_muted_color()),
-                    self._chips_row,
+                    bloque_filtros,
                     ft.Divider(height=4, color=G360Theme.border_subtle_color()),
-                    # 4. Acciones
+                    # Acciones: el paso 2 (Generar Excel) es el primario.
                     ft.Row(
                         [self.btn_generar, self.btn_exportar],
                         spacing=8,
                         alignment=ft.MainAxisAlignment.END,
                     ),
-                    # 5. Salida
+                    # Salida
                     self.status,
                     self.resultados,
                 ],
@@ -315,12 +388,29 @@ class ReportePanel:
         else:
             self.state["hojas"].discard(key)
 
+    def _restaurar_hojas_default(self):
+        """Restaura DEFAULT_HOJAS y repinta los chips."""
+        self.state["hojas"] = set(self.DEFAULT_HOJAS)
+        for key, _ in self.HOJAS_EXPORT:
+            self._chips[key].selected = key in self.state["hojas"]
+        self._update()
+
     # ── expandir / colapsar / limpiar ────────────────────────────────
 
     def _toggle(self):
         if self._abierto:
             self.colapsar()
         else:
+            self._mostrar()
+
+    def abrir(self):
+        """Abre la card sin generar (acceso directo del header).
+
+        La zona de reporte vive al final del flujo y colapsada no dice
+        nada: el boton del header abre y el scroll lo deja a la vista.
+        """
+        self.construir_card()
+        if not self._abierto:
             self._mostrar()
 
     def _set_chevron(self, abierto: bool):
@@ -361,6 +451,9 @@ class ReportePanel:
         con multi-selección. `expandir` los combina: la card nunca reemplaza una
         selección existente, la suma.
         """
+        # Asegura la card construida: con zonas en vistas separadas, expandir
+        # puede llegar antes del primer montaje (el puente de Busqueda).
+        self.construir_card()
         seleccionados = []
         if cliente:
             seleccionados.append(cliente)
@@ -426,12 +519,8 @@ class ReportePanel:
 
     def _pintar_cli_chips(self):
         self.cli_chips.controls = [
-            ft.Chip(
-                label=ft.Text(f"{nom[:28]} ({_c_visible(cid)})", size=10),
-                on_delete=lambda _, c=cid: self._quitar_cliente(c),
-                delete_icon_color=G360Theme.error_color(),
-                bgcolor=ft.Colors.with_opacity(0.12, G360Theme.section_accent_color()),
-                padding=ft.padding.symmetric(horizontal=8, vertical=2),
+            control_factory.chip_cliente(
+                cid, nom, on_delete=lambda _, c=cid: self._quitar_cliente(c)
             )
             for cid, nom in self.state["clientes"]
         ]
@@ -454,9 +543,12 @@ class ReportePanel:
             incluir_nc=True,
             hojas=set(self.DEFAULT_HOJAS),
             datos={},
+            skus=[],
+            sku_sugerencias={},
         )
         self._pintar_cli_chips()
         self.vend_dd.value = None
+        self.sku_field.value = ""
         if self._cargado:
             # Deja el dropdown como recién abierto: sin selección y con
             # las opciones recargadas desde la DB (el modal de clientes
@@ -537,6 +629,7 @@ class ReportePanel:
         if self._busy:
             return
         self.state["incluir_nc"] = bool(self.nc_sw.value)
+        self.state["skus"] = _parse_skus(getattr(self.sku_field, "value", "") or "")
         fd = self.state["desde"].strftime("%Y-%m-%d") if self.state["desde"] else None
         fh = self.state["hasta"].strftime("%Y-%m-%d") if self.state["hasta"] else None
         self.status.value = "Consultando…"
@@ -551,15 +644,31 @@ class ReportePanel:
             datos: dict = {}
             fallos: list = []
             t0 = time.perf_counter()
+            skus = list(self.state["skus"])
+            sug: dict = {}
             for cid, _nom in clientes:
                 try:
-                    datos[cid] = cli.fetch_compras_cliente(
-                        cid,
-                        fecha_desde=fd,
-                        fecha_hasta=fh,
-                        incluir_nc=self.state["incluir_nc"],
-                        solo_lineas_activas=False,
-                    )
+                    if skus:
+                        # Vista por SKU: grano mes×SKU (el agregado por línea
+                        # no trae SKU y no se puede filtrar). El export sale
+                        # completo: el filtro rige solo la vista previa.
+                        df = cli.fetch_compras_sku_mes_cliente(
+                            cid,
+                            fecha_desde=fd,
+                            fecha_hasta=fh,
+                            incluir_nc=self.state["incluir_nc"],
+                        )
+                        datos[cid] = _filtrar_por_sku(df, skus)
+                    else:
+                        datos[cid] = cli.fetch_compras_cliente(
+                            cid,
+                            fecha_desde=fd,
+                            fecha_hasta=fh,
+                            incluir_nc=self.state["incluir_nc"],
+                            solo_lineas_activas=False,
+                        )
+                    if skus and (datos[cid] is None or getattr(datos[cid], "empty", True)):
+                        sug[cid] = self._sugerencias_sku(cli, cid, fd, fh, skus)
                 except Exception as ex:
                     # Un cliente que falla no puede arrastrar a los otros: con
                     # multi-selección se perdían N-1 previews que sí funcionaban.
@@ -567,15 +676,17 @@ class ReportePanel:
                     datos[cid] = None
                     fallos.append(f"{_c_visible(cid)}: {ex}")
             self.state["datos"] = datos
+            self.state["sku_sugerencias"] = sug
             self.state["fallos"] = fallos
             # Antes de liberar los botones: si el log va despues, un lector que
             # espera al fin de la tarea puede ver la consulta "sin rastro".
             logger.info(
-                "reporte.preview %d cliente(s) fd=%s fh=%s nc=%s fallos=%d (%.1fs)",
+                "reporte.preview %d cliente(s) fd=%s fh=%s nc=%s sku=%s fallos=%d (%.1fs)",
                 len(clientes),
                 fd,
                 fh,
                 self.state["incluir_nc"],
+                ",".join(skus) if skus else "-",
                 len(fallos),
                 time.perf_counter() - t0,
             )
@@ -597,15 +708,23 @@ class ReportePanel:
         tot_cant = 0.0
         n_ok = 0
         caidos = {linea.split(":", 1)[0] for linea in fallos}
+        skus = list(self.state.get("skus") or [])
+        por_sku = bool(skus)
+        sku_txt = ",".join(skus)
         for cid, nombre in clientes:
             visible = _c_visible(cid)
             if visible in caidos:
                 continue  # se reporta al final, como error (no como "sin compras")
             df = datos.get(cid)
             if df is None or df.empty:
+                motivo = f" para SKU {sku_txt}" if por_sku else ""
+                if por_sku:
+                    cand = (self.state.get("sku_sugerencias") or {}).get(cid) or []
+                    if cand:
+                        motivo += f" — ¿quisiste decir {', '.join(cand)}?"
                 self.resultados.controls.append(
                     ft.Text(
-                        f"{nombre or cid} ({visible}) — sin compras en el rango",
+                        f"{nombre or cid} ({visible}) — sin compras en el rango{motivo}",
                         size=12,
                         color=G360Theme.text_muted_color(),
                     )
@@ -616,9 +735,15 @@ class ReportePanel:
             q = float(df["CANTIDAD"].sum())
             tot_soles += s
             tot_cant += q
+            if por_sku:
+                detalle = f" · {df['COD_SKU'].nunique()} SKU(s)"
+                tabla = _construir_tabla(df, col_cod="COD_SKU", col_nom="SKU", codigo_completo=True)
+            else:
+                detalle = f" · {df['COD_LINEA'].nunique()} línea(s)"
+                tabla = _construir_tabla(df)
             self.resultados.controls.append(
                 ft.Text(
-                    f"{nombre or cid} ({_c_visible(cid)}) · {df['COD_LINEA'].nunique()} línea(s)"
+                    f"{nombre or cid} ({_c_visible(cid)}){detalle}"
                     f" · {df['MES_REF'].nunique()} mes(es) · neto S/ {s:,.2f} · {q:,.0f} u",
                     size=12,
                     weight=ft.FontWeight.W_700,
@@ -626,7 +751,7 @@ class ReportePanel:
                 )
             )
             self.resultados.controls.append(
-                ft.Row([_construir_tabla(df)], scroll=ft.ScrollMode.AUTO, expand=False)
+                ft.Row([tabla], scroll=ft.ScrollMode.AUTO, expand=False)
             )
 
         # Los que no se pudieron consultar van al final, marcados como error y
@@ -646,6 +771,8 @@ class ReportePanel:
                 f"{n} cliente(s) · {n_ok} con compras · "
                 f"neto S/ {tot_soles:,.2f} · {tot_cant:,.0f} u"
             )
+            if por_sku:
+                self.status.value += f" · SKU {sku_txt} (solo vista previa)"
             if fallos:
                 self.status.value += f" · {len(fallos)} con error"
                 self.status.color = self.app.G360_WARNING

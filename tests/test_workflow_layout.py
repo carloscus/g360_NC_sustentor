@@ -29,7 +29,10 @@ def test_flujo_y_secciones_separadas():
     view.modalidad_radio = ft.RadioGroup(content=ft.Text("Modalidad"))
     view.config_container = ft.Container(content=ft.Text("Parámetros"))
     view.btn_ejecutar = ft.ElevatedButton("Ejecutar reconocimiento")
+    view.btn_gen_exp = ft.ElevatedButton("Generar expediente")
     view.lbl_ejecutar_hint = ft.Text("Completa los datos.")
+    view.antecedentes = ft.TextField(label="Antecedentes")
+    view.observaciones = ft.TextField(label="Observaciones")
     view.resultados_container = ft.Container(visible=False)
     view.reporte_panel = SimpleNamespace(construir_card=lambda: ft.Text("Reporte de compras"))
     view._construir_card_db = lambda async_=False: ft.Text("Historial local")
@@ -50,8 +53,10 @@ def test_flujo_y_secciones_separadas():
     )
     textos = _textos(layout)
 
-    assert textos.index("Historial local") < textos.index("Reporte de compras")
-    assert textos.index("Reporte de compras") < textos.index("Preparar expediente")
+    # Orden de flujo congruente: contexto, entradas, salida.
+    # La zona de reporte es otra vista y no vive en este layout.
+    assert textos.index("Historial local") < textos.index("Definición del caso")
+    assert "Reporte de compras" not in textos
     assert textos.index("Caso y modalidad") < textos.index("Datos del caso")
     assert textos.index("Datos del caso") < textos.index("Insumos")
     assert textos.index("Insumos") < textos.index("Configuración del caso")
@@ -142,3 +147,41 @@ def test_datos_del_caso_oculta_vendedor_si_no_hay_opciones(tmp_db):
     assert view.busq_exec_btn.visible is False
     assert view.insumo_list_wrapper.visible is False
     assert view.insumo_empty_state.visible is True
+
+
+def test_no_vuelve_el_atajo_de_rango_muerto(tmp_db):
+    """ "Ultimos 30 dias" era informacion visual rota: el rango vive en un picker.
+
+    El texto anunciaba un default que el usuario no podia ver ni cambiar desde
+    ahi, y ademas el rango NO se resetea en cada re-render (se preserva la
+    eleccion), asi que la etiqueta miente. Si vuelve, es copy pegado.
+    """
+
+    class App:
+        page = None
+        G360_ACCENT = G360Theme.accent_color()
+        G360_SUCCESS = G360Theme.ok_color()
+        G360_WARNING = G360Theme.warning_color()
+        G360_ERROR = G360Theme.error_color()
+        G360_ACCENT_2 = G360Theme.accent_2_color()
+
+        def show_snackbar(self, *args, **kwargs):
+            pass
+
+        def show_loading(self, *args, **kwargs):
+            pass
+
+        def hide_loading(self, *args, **kwargs):
+            pass
+
+        def _pick_files(self, *args, **kwargs):
+            return []
+
+        def _get_desktop_path(self):
+            from pathlib import Path
+
+            return Path.cwd()
+
+    view = ReconocimientoView(App())
+    view.build()
+    assert "ltimos 30 d" not in _textos(view._raiz_sustento)

@@ -115,26 +115,84 @@ def _sufijo(cod: str) -> str:
 # ── pivotes ──────────────────────────────────────────────────────────
 
 
-def _pivot_data(df):
-    """Devuelve dict con meses, lineas (cod->nombre), soles, cant y totales."""
+def _parse_skus(texto: str) -> list[str]:
+    """Códigos SKU desde texto libre ("78339, 0078339 123"): únicos, en orden.
+
+    Se conserva lo tecleado tal cual (incluidos ceros): "011019" y "11019"
+    son productos distintos y la comparación es exacta.
+    """
+    import re
+
+    vistos: list[str] = []
+    for pedazo in re.split(r"[,\s;]+", str(texto or "")):
+        pedazo = pedazo.strip()
+        if pedazo and pedazo not in vistos:
+            vistos.append(pedazo)
+    return vistos
+
+
+def _filtrar_por_sku(df, skus, col: str = "COD_SKU"):
+    """Filtra filas por SKU con coincidencia EXACTA (solo espacios fuera).
+
+    "011019" NO iguala a "11019": son productos distintos y mezclarlos
+    fue el error que motivo el filtro estricto. Sin skus, devuelve df tal cual.
+    """
+    if not skus or df is None or getattr(df, "empty", True) or col not in df.columns:
+        return df
+    pedidos = {str(s).strip() for s in skus if str(s).strip()}
+    return df[df[col].astype(str).str.strip().isin(pedidos)].copy()
+
+
+def _sugerir_variante_ceros(pedidos, existentes) -> list[str]:
+    """Códigos existentes que solo difieren en ceros de los pedidos.
+
+    Ej: pedido "11019" con "011019" en la DB sugiere "011019" (sin
+    igualarlos nunca en el filtro). Ordenados, sin repetir ni incluir
+    pedidos exactos.
+    """
+
+    def _n(cod) -> str:
+        s = str(cod).strip().lstrip("0")
+        return s or "0"
+
+    por_norma: dict[str, list[str]] = {}
+    for e in existentes:
+        e = str(e).strip()
+        if e:
+            por_norma.setdefault(_n(e), []).append(e)
+    pedidos_set = {str(p).strip() for p in pedidos}
+    sug: list[str] = []
+    for p in pedidos_set:
+        for e in sorted(por_norma.get(_n(p), [])):
+            if e != p and e not in sug:
+                sug.append(e)
+    return sug
+
+
+def _pivot_data(df, col_cod: str = "COD_LINEA", col_nom: str = "LINEA"):
+    """Devuelve dict con meses, claves (cod->nombre), soles, cant y totales.
+
+    Por defecto pivota mes × línea (vista previa clásica); con
+    col_cod/col_nom de SKU pivota mes × SKU (filtro SKU del reporte).
+    """
     df = df.copy()
-    df["COD_LINEA"] = df["COD_LINEA"].astype(str).str.strip()
+    df[col_cod] = df[col_cod].astype(str).str.strip()
     meses = sorted(df["MES_REF"].unique())
-    orden = df.groupby("COD_LINEA")["SOLES"].sum().sort_values(ascending=False).index.tolist()
-    lineas = [str(c) for c in orden]
-    nombres = df.groupby("COD_LINEA")["LINEA"].max().to_dict()
+    orden = df.groupby(col_cod)["SOLES"].sum().sort_values(ascending=False).index.tolist()
+    claves = [str(c) for c in orden]
+    nombres = df.groupby(col_cod)[col_nom].max().to_dict()
 
     soles = df.pivot_table(
-        index="MES_REF", columns="COD_LINEA", values="SOLES", aggfunc="sum", fill_value=0.0
+        index="MES_REF", columns=col_cod, values="SOLES", aggfunc="sum", fill_value=0.0
     )
     cant = df.pivot_table(
-        index="MES_REF", columns="COD_LINEA", values="CANTIDAD", aggfunc="sum", fill_value=0.0
+        index="MES_REF", columns=col_cod, values="CANTIDAD", aggfunc="sum", fill_value=0.0
     )
-    soles = soles.reindex(index=meses, columns=lineas, fill_value=0.0)
-    cant = cant.reindex(index=meses, columns=lineas, fill_value=0.0)
+    soles = soles.reindex(index=meses, columns=claves, fill_value=0.0)
+    cant = cant.reindex(index=meses, columns=claves, fill_value=0.0)
     return {
         "meses": meses,
-        "lineas": lineas,
+        "lineas": claves,
         "nombres": nombres,
         "soles": soles,
         "cant": cant,
@@ -146,20 +204,34 @@ def _pivot_data(df):
 # ── tabla de preview ────────────────────────────────────────────────
 
 
-def _construir_tabla(df) -> ft.DataTable:
-    p = _pivot_data(df)
+def _pu_txt(soles: float, cant: float) -> str:
+    """Precio unitario de la celda (5 decimales, convención de la app)."""
+    if not cant:
+        return "P.U. —"
+    return f"P.U. {soles / cant:,.5f}"
+
+
+def _construir_tabla(
+    df, col_cod: str = "COD_LINEA", col_nom: str = "LINEA", codigo_completo: bool = False
+) -> ft.DataTable:
+    """Tabla mes × clave (línea por defecto, SKU con `codigo_completo`).
+
+    En modo SKU el encabezado muestra el código completo ("78339", no el
+    sufijo de línea) y el orden es por neto descendente igual que en líneas.
+    """
+    p = _pivot_data(df, col_cod=col_cod, col_nom=col_nom)
     meses, lineas = p["meses"], p["lineas"]
 
     def _hdr(cod):
-        # Nombre de línea acotado: sin truncar, un nombre largo ensancha la
+        # Nombre acotado: sin truncar, un nombre largo ensancha la
         # columna y desborda el presupuesto horizontal de la card.
         nom = str(p["nombres"].get(cod, ""))[:12]
-        suf = _sufijo(cod)
+        titulo = str(cod) if codigo_completo else _sufijo(cod)
         return ft.DataColumn(
             ft.Column(
                 [
                     ft.Text(
-                        suf, size=10, weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER
+                        titulo, size=10, weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER
                     ),
                     ft.Text(
                         nom,
@@ -204,6 +276,12 @@ def _construir_tabla(df) -> ft.DataTable:
                                 color=G360Theme.text_muted_color(),
                                 text_align=ft.TextAlign.RIGHT,
                             ),
+                            ft.Text(
+                                _pu_txt(s, q),
+                                size=10,
+                                color=G360Theme.text_muted_color(),
+                                text_align=ft.TextAlign.RIGHT,
+                            ),
                         ],
                         spacing=0,
                         alignment=ft.MainAxisAlignment.CENTER,
@@ -226,6 +304,12 @@ def _construir_tabla(df) -> ft.DataTable:
                         ),
                         ft.Text(
                             f"{tq:,.0f}",
+                            size=10,
+                            color=G360Theme.text_muted_color(),
+                            text_align=ft.TextAlign.RIGHT,
+                        ),
+                        ft.Text(
+                            _pu_txt(ts, tq),
                             size=10,
                             color=G360Theme.text_muted_color(),
                             text_align=ft.TextAlign.RIGHT,
@@ -265,6 +349,12 @@ def _construir_tabla(df) -> ft.DataTable:
                             color=G360Theme.text_muted_color(),
                             text_align=ft.TextAlign.RIGHT,
                         ),
+                        ft.Text(
+                            _pu_txt(ts, tq),
+                            size=10,
+                            color=G360Theme.text_muted_color(),
+                            text_align=ft.TextAlign.RIGHT,
+                        ),
                     ],
                     spacing=0,
                     horizontal_alignment=ft.CrossAxisAlignment.END,
@@ -289,6 +379,13 @@ def _construir_tabla(df) -> ft.DataTable:
                         color=G360Theme.text_muted_color(),
                         text_align=ft.TextAlign.RIGHT,
                     ),
+                    ft.Text(
+                        _pu_txt(p["total_soles"], p["total_cant"]),
+                        size=10,
+                        weight=ft.FontWeight.W_600,
+                        color=G360Theme.text_muted_color(),
+                        text_align=ft.TextAlign.RIGHT,
+                    ),
                 ],
                 spacing=0,
                 horizontal_alignment=ft.CrossAxisAlignment.END,
@@ -305,8 +402,8 @@ def _construir_tabla(df) -> ft.DataTable:
         heading_row_color=G360Theme.with_opacity(0.08, G360Theme.ACCENT),
         column_spacing=_COL_SPACING,
         heading_row_height=44,
-        data_row_min_height=34,
-        data_row_max_height=40,
+        data_row_min_height=46,
+        data_row_max_height=58,
         horizontal_lines=ft.BorderSide(1, G360Theme.border_subtle_color()),
     )
 

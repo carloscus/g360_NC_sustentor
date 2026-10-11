@@ -48,11 +48,25 @@ def _msgs_cartucho(carpeta_export, r=None, ex=None) -> tuple[str, str]:
     if r is not None:
         filas = r.get("ventas_filas", 0)
         mb = r.get("zip_mb", 0)
+        # Un incremental DICE que lo es. Si el mensaje es igual que el del
+        # completo, el usuario cree que mando el historico entero y el
+        # cliente recibe una ventana y se queda sin el resto sin enterarse.
+        if r.get("incremental"):
+            rango = r.get("rango") or {}
+            desde = rango.get("desde", "?")
+            hasta = rango.get("hasta", "?")
+            return (
+                f"V Cartucho incremental creado\n{r.get('zip')}\n"
+                f"{filas:,} filas · {mb} MB · desde {desde} hasta {hasta}. "
+                f"Se SUMA a lo que ya tenga el cliente; no lo reemplaza.",
+                f"V Cartucho incremental ({filas:,} filas, {mb} MB, desde {desde}). "
+                f"Est� en {carpeta}",
+            )
         return (
-            f"✓ Cartucho creado\n{r.get('zip')}\n"
+            f"V Cartucho creado\n{r.get('zip')}\n"
             f"{filas:,} filas · {mb} MB. "
             f"Copialo a la otra PC (Importar cartucho).",
-            f"✓ Cartucho creado ({filas:,} filas, {mb} MB). Está en {carpeta}",
+            f"V Cartucho creado ({filas:,} filas, {mb} MB). Est� en {carpeta}",
         )
     previas = _cartucho_previas(carpeta_export)
     if previas:
@@ -69,7 +83,7 @@ def _msgs_cartucho(carpeta_export, r=None, ex=None) -> tuple[str, str]:
 
 
 def _correr_export_cartucho(
-    carpeta_export, status, btn_export, app, page, exportar
+    carpeta_export, status, btn_export, app, page, exportar, desde=None, hasta=None
 ) -> threading.Thread:
     """Exporta el cartucho en background avisando cada etapa.
 
@@ -77,6 +91,9 @@ def _correr_export_cartucho(
     y el segundo fallaria por nombre duplicado) y lo rehabilita SIEMPRE, en un
     finally: si solo se hiciera en el camino feliz, un error dejaria el boton
     muerto y habria que recargar la app para reintentar.
+
+    `desde`/`hasta` acotan el cartucho a un rango (incremental). Sin ellos es
+    completo, que es lo que necesita una PC que arranca de cero.
 
     `exportar` se inyecta para poder testear el flujo sin comprimir 3 GB.
     Devuelve el Thread (los tests hacen join).
@@ -89,7 +106,10 @@ def _correr_export_cartucho(
 
     def run():
         try:
-            r = exportar()
+            # Solo se pasan kwargs cuando hay rango: el cartucho completo es
+            # "sin argumentos" y los `exportar` inyectados en los tests no
+            # aceptan kwargs.
+            r = exportar(**({"desde": desde, "hasta": hasta} if desde or hasta else {}))
             texto, aviso = _msgs_cartucho(carpeta_export, r=r)
             status.value = texto
             status.color = app.G360_SUCCESS
@@ -383,7 +403,6 @@ def _sync_por_defecto(cli, desde: str, hasta: str) -> dict:
 
 from src.core.g360_theme import G360Theme, safe_handler
 from src.core.fechas import fecha_ui
-from src.core.utils import cliente_visible
 from src.core.ventas_db_client import VentasDbClient
 from src.core import ventas_db
 from src.ui.catalog import (
@@ -529,49 +548,61 @@ class _ViewPanels:
             "Hasta (dd-mm-aaaa)", width=control_factory.WIDTH_DATE
         )
 
-        self.chk_omitir_sin_dif = ft.Checkbox(
-            label="Omitir SKUs sin diferencia (S/ 0.00)",
-            value=False,
-            active_color=self.app.G360_ACCENT,
-            label_style=ft.TextStyle(size=12),
+        self.chk_ocultar_cero = control_factory.checkbox(
+            "Ocultar diferencias 0.00",
+            value=True,
             on_change=self._on_opciones_calculo_change,
         )
-        self.chk_gen_nd = ft.Checkbox(
-            label="Calcular Nota de Débito para diferencias negativas",
-            value=False,
-            active_color=G360Theme.accent_color(),
-            label_style=ft.TextStyle(size=12),
+        self.chk_gen_nd = control_factory.checkbox(
+            "Calcular Nota de Débito para diferencias negativas",
+            on_change=self._on_opciones_calculo_change,
+        )
+        self.chk_solo_ndb = control_factory.checkbox(
+            "Solo NDB (sin NC)",
             on_change=self._on_opciones_calculo_change,
         )
 
+        # Textarea con altura definida (min_lines=3 ≈ 80px): antes sin min_lines
+        # la altura la decidia el contenido y la caja final crecia sin regla.
+        # Sin width fijo: se estira al ancho de su columna (Bloque B).
+        # bgcolor/border de la factory: mismo tono hundido que los dropdowns.
         self.observaciones = ft.TextField(
             label="Observaciones (opcional)",
-            width=400,
-            border_radius=12,
-            text_size=13,
+            border_radius=control_factory.RADIUS,
+            text_size=control_factory.TEXT_SIZE,
             multiline=True,
-            min_lines=2,
-            max_lines=4,
+            min_lines=3,
+            max_lines=5,
             dense=True,
+            bgcolor=control_factory.COLOR_INPUT,
+            border=control_factory.BORDER_INPUT,
         )
 
         self.antecedentes = ft.TextField(
             label="Antecedentes / Análisis Comercial *",
-            width=400,
-            border_radius=12,
-            text_size=13,
+            border_radius=control_factory.RADIUS,
+            text_size=control_factory.TEXT_SIZE,
             multiline=True,
             min_lines=3,
             max_lines=6,
             hint_text="Ej: Acuerdo del 10/09/2025, precio aprobado S/ 2.90...",
             dense=True,
+            bgcolor=control_factory.COLOR_INPUT,
+            border=control_factory.BORDER_INPUT,
         )
 
         self.meta_monto = control_factory.text_field("Meta (S/)", width=control_factory.WIDTH_DATE)
         self.rebate_pct = ft.TextField(
-            label="% Rebate", width=150, border_radius=12, text_size=13, dense=True
+            label="% Rebate",
+            width=150,
+            border_radius=control_factory.RADIUS,
+            text_size=control_factory.TEXT_SIZE,
+            dense=True,
+            bgcolor=control_factory.COLOR_INPUT,
+            border=control_factory.BORDER_INPUT,
         )
 
+        # Gap unificado a SPACE_SM (8): antes un grupo iba en 4 y otro en 12.
         self.sort_mode_radio = ft.RadioGroup(
             content=ft.Column(
                 [
@@ -580,11 +611,11 @@ class _ViewPanels:
                     ft.Radio(value="cantidad_asc", label="Menor cantidad primero"),
                     ft.Radio(value="cantidad_desc", label="Mayor cantidad primero"),
                 ],
-                spacing=4,
+                spacing=G360Theme.SPACE_SM,
             ),
             value="fecha_asc",
         )
-        self.chk_forzar_cant = ft.Checkbox(label="Forzar cantidad solicitada", value=True)
+        self.chk_forzar_cant = control_factory.checkbox("Forzar cantidad solicitada", value=True)
 
         self.sort_mode_dc_radio = ft.RadioGroup(
             content=ft.Row(
@@ -595,7 +626,7 @@ class _ViewPanels:
                     ft.Radio(value="cantidad_asc", label="Menor volumen primero"),
                     ft.Radio(value="dif_desc", label="Mayor diferencia primero"),
                 ],
-                spacing=12,
+                spacing=G360Theme.SPACE_SM,
                 wrap=True,
             ),
             value="fecha_desc",
@@ -674,10 +705,9 @@ class _ViewPanels:
             ("descuento", "Descuentos (NC)"),
             ("cargo", "Cargos (NDB/ND)"),
         ]:
-            self.categoria_nc_checkboxes[cat_key] = ft.Checkbox(
-                label=cat_label,
+            self.categoria_nc_checkboxes[cat_key] = control_factory.checkbox(
+                cat_label,
                 value=(cat_key == "devolucion"),
-                label_style=ft.TextStyle(size=12),
             )
 
         self.sku_filter_path = None
@@ -776,10 +806,28 @@ class _ViewPanels:
             ft.Icons.ROCKET_LAUNCH_ROUNDED,
             on_click=self._ejecutar,
             disabled=True,
+            # 70% del ancho por defecto del helper (450): en la barra sticky
+            # dos botones de 450 sumaban 900 y empujaban el resto fuera de la
+            # ventana minima (950). A 300 el texto sigue cabiendo y la barra
+            # completa entra en los 886px utiles con margen para el hint.
+            width=300,
+        )
+        # Paso final (2 de 2): genera los expedientes desde el resultado ya
+        # calculado. Vive en la barra sticky junto al Ejecutar para que la
+        # secuencia se lea de un golpe. Antes habia uno por tab de cliente y
+        # TODOS generaban lo mismo (`_tarea_generar_expediente` usa el
+        # `self.resultado` completo y `generar_expediente` ya separa por
+        # cliente): con 3 clientes eran 3 botones identicos.
+        self.btn_gen_exp = G360Theme.accent_button(
+            "Generar expediente",
+            ft.Icons.FOLDER_SHARED_OUTLINED,
+            on_click=self._generar_expediente,
+            disabled=True,
+            width=300,  # 70% del ancho por defecto (ver btn_ejecutar)
         )
         self.lbl_ejecutar_hint = ft.Text(
             "Busca y aplica el historial del caso para comenzar.",
-            size=10,
+            size=G360Theme.TYPE_BODY,
             color=G360Theme.text_muted_color(),
         )
 
@@ -790,18 +838,45 @@ class _ViewPanels:
         self.lbl_alertas_count = ft.Text("0 alertas", size=14, color=ft.Colors.ON_SURFACE_VARIANT)
         self._result_sort_col = None
         self._result_sort_asc = False
+        # Card propia del resultado: antes era un contenedor pelado al final de
+        # una columna muy larga y se confundia con el resto. Con encabezado se
+        # revisa puntual y completo, y ademas los toggles de visible que hace el
+        # flujo siguen funcionando porque viven en la card.
+        self._result_panel = ft.Container(visible=False, padding=ft.padding.only(top=4))
         self.resultados_container = ft.Container(
+            key="g360_resultados",
             visible=False,
-            padding=20,
-            border_radius=14,
-            bgcolor=G360Theme.surface_color(),
-            border=ft.border.all(1, G360Theme.border_subtle_color()),
+            content=G360Theme.card(
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(
+                                    ft.Icons.SUMMARIZE_OUTLINED,
+                                    size=19,
+                                    color=G360Theme.accent_color(),
+                                ),
+                                ft.Column(
+                                    [
+                                        G360Theme.card_title("Resultado del reconocimiento"),
+                                        G360Theme.subtitle(
+                                            "Vista previa del cálculo por cliente y generación del expediente."
+                                        ),
+                                    ],
+                                    spacing=G360Theme.SPACE_XS,
+                                    expand=True,
+                                ),
+                            ],
+                            spacing=10,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        self._result_panel,
+                    ],
+                    spacing=G360Theme.SPACE_MD,
+                )
+            ),
         )
 
-        # Fallbacks: el boton que se ve es el del set de controles del tab
-        # activo (ver la property `btn_expediente`). Estos solo se usan si se
-        # consulta el boton antes de que exista algun set.
-        self._btn_expediente_fallback = self._crear_btn_expediente()
         self._result_audit_btn = self._crear_btn_auditoria()
 
         self.alertas_container = ft.Container(visible=False, padding=15, border_radius=18)
@@ -856,26 +931,15 @@ class _ViewPanels:
             "load_more_row": ft.Row([btn_mas], alignment=ft.MainAxisAlignment.CENTER, spacing=20),
             "btn_row": ft.Row(
                 [
-                    self._crear_btn_expediente(),
+                    # Solo la acción secundaria del panel. El paso final
+                    # ("Generar expediente") vive en la barra sticky: es
+                    # global, y repetido por tab era redundante.
                     self._crear_btn_auditoria(),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
                 spacing=20,
             ),
         }
-
-    def _crear_btn_expediente(self) -> ft.ElevatedButton:
-        """Boton 'Generar expediente' para un set de resultados.
-
-        Uno por tab: el boton vive dentro del panel de cada cliente, y un
-        control de Flet no puede estar en dos padres a la vez.
-        """
-        return G360Theme.accent_button(
-            "Generar expediente",
-            ft.Icons.FOLDER_SHARED_OUTLINED,
-            on_click=self._generar_expediente,
-            disabled=True,
-        )
 
     def _toggle_audit_panel(self, _=None):
         """Muestra/oculta el panel de auditoria del tab visible."""
@@ -899,20 +963,12 @@ class _ViewPanels:
 
     @property
     def btn_expediente(self):
-        """Boton 'Generar expediente' DEL TAB VISIBLE.
+        """Boton 'Generar expediente' (unico, en la barra sticky).
 
-        Hay uno por cliente (vive dentro del panel de cada tab y un control de
-        Flet no puede estar en dos padres). Todo el codigo que lo usa -lo
-        habilita al pintar, lo lee para el expediente- pasa por aca y asi
-        siempre pega sobre el boton que el usuario ve.
+        Antes era una propiedad que resolvia el boton del tab visible, porque
+        habia uno por cliente. Ahora es un solo control global.
         """
-        sets = getattr(self, "_result_controles_por_cliente", None) or {}
-        activo = sets.get(getattr(self, "_result_cliente_activo", None))
-        if activo:
-            fila = activo.get("btn_row")
-            if fila is not None and fila.controls:
-                return fila.controls[0]
-        return getattr(self, "_btn_expediente_fallback", None)
+        return getattr(self, "btn_gen_exp", None)
 
     def _crear_btn_auditoria(self) -> ft.ElevatedButton:
         """Boton 'Auditoria NC' de un set de resultados (mismo comportamiento global)."""
@@ -923,18 +979,16 @@ class _ViewPanels:
         )
 
     def _set_btn_expediente(self, enabled: bool):
-        """Habilita/deshabilita el boton en TODOS los tabs (y el panel unico).
+        """Habilita/deshabilita el paso final (boton unico de la barra sticky).
 
-        Guarda el estado: los sets se crean a medida que se pintan los tabs, y
-        uno nuevo nace despues de que este metodo ya corrio.
+        Antes recorría los tabs porque el botón vivía dentro del panel de cada
+        cliente. Ahora es uno solo, global: `_tarea_generar_expediente` usa el
+        `self.resultado` completo y `generar_expediente` separa por cliente.
         """
         self._btn_expediente_enabled = enabled
-        sets = getattr(self, "_result_controles_por_cliente", {}) or {}
-        for activo in sets.values():
-            fila = activo.get("btn_row")
-            if fila is None or not fila.controls:
-                continue
-            fila.controls[0].disabled = not enabled
+        btn = getattr(self, "btn_gen_exp", None)
+        if btn is not None:
+            btn.disabled = not enabled
 
     def _activar_controles_resultado(self, cliente_id):
         """Apunta los atributos de los handlers al set de controles de un cliente.
@@ -949,9 +1003,8 @@ class _ViewPanels:
         if cliente_id not in sets:
             sets[cliente_id] = self._crear_controles_resultado()
         activo = sets[cliente_id]
-        fila = activo.get("btn_row")
-        if fila is not None and fila.controls:
-            fila.controls[0].disabled = not getattr(self, "_btn_expediente_enabled", False)
+        # El paso final es global (barra sticky): el set por cliente ya no lo
+        # lleva, asi que no hay nada que sincronizar aqui.
         self.resultados_table = activo["tabla"]
         self._result_load_more_btn = activo["btn_mas"]
         self._result_table_wrap = activo["table_wrap"]
@@ -981,7 +1034,10 @@ class _ViewPanels:
         caso_cfg = self._caso_de_tipo()
         self._renderizar_config(caso_cfg)
         layout = self._construir_layout(caso_cfg)
-        self.container.content = layout
+        # Solo pisa el contenido si se esta en la vista sustento: estando en
+        # reporte, reconstruir parametros no debe sacar al usuario de ahi.
+        if getattr(self, "_vista_actual", "sustento") == "sustento":
+            self.container.content = layout
 
     def _renderizar_config(self, tipo_cfg):
         config_cols = []
@@ -1091,17 +1147,13 @@ class _ViewPanels:
             )
             config_cols.append(self.sort_mode_dc_radio)
 
-        config_cols.append(ft.Divider(height=10, color="transparent"))
-        config_cols.append(
-            G360Theme.section_header(ft.Icons.PERSON_OUTLINE, "JUSTIFICACIÓN DEL RECONOCIMIENTO")
-        )
+        # Justificación y observaciones: viven en la columna izquierda del
+        # Bloque B (ver _contenido_justificacion), ya no aquí al final.
         config_cols.append(ft.Divider(height=8, color="transparent"))
         config_cols.append(G360Theme.section_header(ft.Icons.TUNE_OUTLINED, "OPCIONES DE CÁLCULO"))
-        config_cols.append(self.chk_omitir_sin_dif)
+        config_cols.append(self.chk_ocultar_cero)
         config_cols.append(self.chk_gen_nd)
-        config_cols.append(ft.Divider(height=8, color="transparent"))
-        config_cols.append(self.antecedentes)
-        config_cols.append(self.observaciones)
+        config_cols.append(self.chk_solo_ndb)
         self.config_container.content = (
             ft.Column(config_cols, spacing=8) if config_cols else ft.Text("")
         )
@@ -1122,21 +1174,21 @@ class _ViewPanels:
                 [
                     ft.Text(
                         "Documento",
-                        size=10,
+                        size=G360Theme.TYPE_SUBTITLE,
                         weight=ft.FontWeight.W_600,
                         color=G360Theme.text_muted_color(),
                         expand=True,
                     ),
                     ft.Text(
                         "Mostrar",
-                        size=10,
+                        size=G360Theme.TYPE_SUBTITLE,
                         weight=ft.FontWeight.W_600,
                         color=G360Theme.text_muted_color(),
                         width=105,
                     ),
                     ft.Text(
                         "Calcular",
-                        size=10,
+                        size=G360Theme.TYPE_SUBTITLE,
                         weight=ft.FontWeight.W_600,
                         color=G360Theme.text_muted_color(),
                         width=105,
@@ -1147,17 +1199,18 @@ class _ViewPanels:
         ]
         for doc in DOC_HISTORICO:
             label = DOC_HISTORICO_LABEL[doc]
-            chk_incl = ft.Checkbox(
-                label="Incluir",
+            chk_incl = control_factory.checkbox(
+                "Incluir",
                 value=hcfg.incluir(doc),
-                active_color=self.app.G360_ACCENT,
                 tooltip=f"Incluir {label} en la vista y exportación",
                 on_change=self._guardar_historico_config_desde_checks,
             )
-            chk_calc = ft.Checkbox(
-                label="Usar",
+            chk_calc = control_factory.checkbox(
+                "Usar",
                 value=hcfg.considerar(doc),
-                active_color=self.app.G360_SUCCESS,
+                # Excepción documentada: la columna Calcular es un semántico
+                # propio (entra en el cálculo), verde en vez del acento.
+                active_color=G360Theme.SUCCESS,
                 tooltip=(
                     f"Considerar {label} en el cálculo del caso"
                     if doc == "facturas" or notas_calculo_soportadas
@@ -1190,7 +1243,7 @@ class _ViewPanels:
                 G360Theme.section_header(ft.Icons.HISTORY_OUTLINED, "DOCUMENTOS DEL HISTORIAL"),
                 ft.Text(
                     "Mostrar en el expediente no implica usar en el cálculo.",
-                    size=10,
+                    size=G360Theme.TYPE_BODY,
                     color=G360Theme.text_muted_color(),
                 ),
                 *(
@@ -1198,7 +1251,7 @@ class _ViewPanels:
                         ft.Text(
                             "En consolidado las NC/NDB se detallan para revisión, "
                             "pero no ajustan cantidades ni precios.",
-                            size=10,
+                            size=G360Theme.TYPE_BODY,
                             color=G360Theme.text_muted_color(),
                         )
                     ]
@@ -1207,7 +1260,7 @@ class _ViewPanels:
                         ft.Text(
                             "En este caso las NC/NDB se muestran y auditan, pero "
                             "no se aplican al cálculo automáticamente.",
-                            size=10,
+                            size=G360Theme.TYPE_BODY,
                             color=G360Theme.text_muted_color(),
                         )
                     ]
@@ -1244,81 +1297,157 @@ class _ViewPanels:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             ft.Divider(height=1, color=G360Theme.border_subtle_color()),
-            *secciones,
         ]
+        cuerpo.extend(secciones)
         if accion is not None:
+            cuerpo.append(ft.Divider(height=1, color=G360Theme.border_subtle_color()))
             cuerpo.append(accion)
         return G360Theme.card(ft.Column(cuerpo, spacing=G360Theme.SPACE_MD))
 
     def _construir_layout(self, tipo_cfg):
         from src.ui.widgets.workflow_section import workflow_section
 
-        caso = self._construir_card_workflow(
-            "Preparar expediente",
-            "Define el caso, selecciona los datos y completa sus insumos.",
-            ft.Icons.DESIGN_SERVICES_OUTLINED,
+        # ── Bloque B: 2 columnas ──
+        # Izquierda define el caso (parámetros + justificación); derecha carga
+        # los datos (filtros + insumos). Antes iban apiladas en dos cards
+        # ("Preparar expediente" / "Datos y sustento"): el scroll vertical
+        # crecía con aire y la relación parámetros↔datos no se veía de un golpe.
+        izq = ft.Column(
             [
                 workflow_section(
                     "Caso y modalidad",
                     ft.Icons.CATEGORY_OUTLINED,
                     self._contenido_seleccion_caso(tipo_cfg),
                     description="Elige qué reconocimiento generar y cómo se agrupará.",
+                    step=1,
+                ),
+                workflow_section(
+                    "Justificación y observaciones",
+                    ft.Icons.EDIT_NOTE_OUTLINED,
+                    self._contenido_justificacion(),
+                    description="Texto que viaja al Informe (DOCX) del expediente.",
+                    step=2,
                 ),
             ],
+            spacing=G360Theme.SPACE_MD,
+            expand=1,
         )
-
-        datos = self._construir_card_workflow(
-            "Datos y sustento",
-            "Busca el historial, completa los insumos y genera el sustento.",
-            ft.Icons.INVENTORY_2_OUTLINED,
+        der = ft.Column(
             [
                 workflow_section(
                     "Datos del caso",
                     ft.Icons.DATA_EXPLORATION_OUTLINED,
                     self._construir_seccion_datos(),
                     description="Busca y delimita el historial que sustentará el cálculo.",
+                    step=3,
                 ),
                 self._construir_seccion_insumos(tipo_cfg),
-                self._construir_seccion_configuracion(),
             ],
-            accion=ft.Container(
-                content=ft.Row(
-                    [
-                        ft.Column(
-                            [
-                                ft.Text(
-                                    "¿Todo listo?",
-                                    size=12,
-                                    weight=ft.FontWeight.W_600,
-                                    color=G360Theme.text_primary_color(),
-                                ),
-                                self.lbl_ejecutar_hint,
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        self.btn_ejecutar,
-                    ],
-                    spacing=12,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                padding=ft.padding.only(top=4),
-            ),
+            spacing=G360Theme.SPACE_MD,
+            expand=1,
         )
 
-        return ft.Column(
+        definicion = self._construir_card_workflow(
+            "Definición del caso",
+            "Define el caso, acota el historial y completa sus insumos.",
+            ft.Icons.DESIGN_SERVICES_OUTLINED,
+            [
+                ft.Row(
+                    [izq, der],
+                    spacing=G360Theme.SPACE_XL,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                ),
+                self._construir_seccion_configuracion(),
+            ],
+        )
+
+        # Orden de flujo (zona sustento): contexto (DB) -> entradas (caso,
+        # datos) -> salida (resultado). El Reporte de compras NO vive aca:
+        # es otra vista (ver `_raiz_reporte`); antes compartia el scroll y
+        # las zonas se mezclaban. Cuando no hay resultados el contenedor
+        # esta invisible y no ocupa lugar; tras ejecutar, el scroll
+        # automatico lleva a resultados (ver `_desplazar_a_resultados`).
+        self._workflow_scroll = ft.Column(
             [
                 self._construir_card_db(),
                 self._construir_strip_captura(),
-                self.reporte_panel.construir_card(),
-                caso,
-                datos,
+                definicion,
                 self.resultados_container,
             ],
             scroll=ft.ScrollMode.AUTO,
             spacing=14,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
+
+        # ── Barra inferior accionable (sticky) ──
+        # Secuencia de 2 pasos visible de un golpe: hint de validacion +
+        # Ejecutar (1) -> Generar expediente (2). Ambos viven fuera del
+        # scroll: antes el boton final estaba al final de un scroll largo y
+        # quedaba enterrado. El hint ya es el resumen ("Datos e insumos
+        # listos…" / "⚠ Falta…") que los handlers repintan con su color.
+        self._sticky_bar = ft.Container(
+            content=ft.Row(
+                [
+                    # expand en el hint: sin esto el texto de validacion (que
+                    # llega a 51 caracteres) empuja los dos botones fuera de la
+                    # ventana en vez de recortarse. Los botones son el paso 1
+                    # y 2 del flujo y no pueden perder visibilidad.
+                    ft.Container(content=self.lbl_ejecutar_hint, expand=True),
+                    self.btn_ejecutar,
+                    self.btn_gen_exp,
+                ],
+                spacing=G360Theme.SPACE_MD,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.padding.symmetric(horizontal=G360Theme.SPACE_LG, vertical=10),
+            bgcolor=G360Theme.surface_color(),
+            border=ft.border.only(top=ft.BorderSide(1, G360Theme.border_subtle_color())),
+        )
+
+        # La barra fija va FUERA del scroll: el contenido scrollea encima y
+        # la barra permanece a la vista (Column raiz de dos pisos).
+        #
+        # Raices por zona: el contenedor de la vista es un Column SCROLLEABLE
+        # (ver `build`), asi que un hijo con expand=1 dentro no tiene altura
+        # que expandir. Por eso la barra sticky y el raiz de reporte van en
+        # columnas SIN expand, y el scroll se lleva el alto disponible.
+        # Alternar zonas monta una raiz u otra sin reconstruir nada.
+        self._raiz_sustento = ft.Column(
+            [
+                ft.Container(content=self._workflow_scroll, expand=True),
+                self._sticky_bar,
+            ],
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+        return self._raiz_sustento
+
+    def _raiz_reporte(self) -> ft.Column:
+        """Raiz de la vista Reporte: volver + card del reporte.
+
+        Se construye UNA vez y se reutiliza (la card del panel se cachea
+        sola): alternar vistas solo cambia que raiz esta montada, ningun
+        control vive en dos padres a la vez.
+
+        Sin `expand` en la columna: el contenedor de la vista ya scrollea
+        (ver `build`), y un expand aqui no tendria altura que expandir.
+        """
+        raiz = getattr(self, "_reporte_root", None)
+        if raiz is None:
+            volver = G360Theme.ghost_button(
+                "Volver al sustento",
+                ft.Icons.ARROW_BACK_OUTLINED,
+                on_click=lambda _: self.mostrar_sustento(),
+            )
+            self._reporte_root = raiz = ft.Column(
+                [
+                    ft.Row([volver], alignment=ft.MainAxisAlignment.START),
+                    self.reporte_panel.construir_card(),
+                ],
+                spacing=14,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            )
+        return raiz
 
     def _contenido_seleccion_caso(self, tipo_cfg: dict) -> ft.Control:
         """Selector de caso y modalidad, separado del resto de parámetros."""
@@ -1331,7 +1460,7 @@ class _ViewPanels:
                     ),
                     ft.Text(
                         f"Genera {resultado}",
-                        size=10,
+                        size=G360Theme.TYPE_SUBTITLE,
                         weight=ft.FontWeight.W_600,
                         color=G360Theme.accent_text_color(),
                     ),
@@ -1344,6 +1473,9 @@ class _ViewPanels:
         )
         return ft.Column(
             [
+                # Par simetrico con "Modalidad": antes el tipo no tenia
+                # encabezado y la seccion se leia desbalanceada.
+                G360Theme.section_header(ft.Icons.DESCRIPTION_OUTLINED, "Tipo de caso"),
                 ft.Row(
                     [self.tipo_dropdown, badge],
                     spacing=12,
@@ -1369,6 +1501,20 @@ class _ViewPanels:
             ft.Icons.TUNE_OUTLINED,
             self.config_container,
             description="Ajusta documentos, período y reglas propias del cálculo.",
+            step=5,
+        )
+
+    def _contenido_justificacion(self) -> ft.Control:
+        """Antecedentes y observaciones: texto que viaja al Informe (DOCX).
+
+        Vive en la columna izquierda del Bloque B, junto a la definición del
+        caso — el usuario escribe el sustento mientras define, no al final
+        del scroll.
+        """
+        return ft.Column(
+            [self.antecedentes, self.observaciones],
+            spacing=G360Theme.SPACE_SM,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
 
     def _actualizar_rango_fechas_fp(self):
@@ -1401,10 +1547,9 @@ class _ViewPanels:
         checks = []
         self.linea_checkboxes.clear()
         for linea in lineas:
-            cb = ft.Checkbox(
-                label=linea,
+            cb = control_factory.checkbox(
+                linea,
                 value=prev_values.get(linea, False),
-                label_style=ft.TextStyle(size=12),
                 on_change=self._on_linea_toggle,
             )
             self.linea_checkboxes[linea] = cb
@@ -1463,7 +1608,7 @@ class _ViewPanels:
                         "1. Crear un share en tu PC (ejecutar como admin):\n"
                         f'   net share g360-erp-nc-sustentor="{ventas_db.db_path().parent}" /grant:Everyone,FULL\n'
                         "2. Tu compañero abrirá «Fuentes» y escaneará su segmento.",
-                        size=10,
+                        size=G360Theme.TYPE_BODY,
                         color=G360Theme.text_muted_color(),
                     ),
                 ],
@@ -1530,10 +1675,14 @@ class _ViewPanels:
                             ),
                             ft.Text(entry.ip, size=12, weight=ft.FontWeight.W_600, expand=True),
                             ft.Text(
-                                f"{size_mb:.1f} MB", size=10, color=G360Theme.text_muted_color()
+                                f"{size_mb:.1f} MB",
+                                size=G360Theme.TYPE_SUBTITLE,
+                                color=G360Theme.text_muted_color(),
                             ),
                             ft.Text(
-                                entry.last_write[:10], size=10, color=G360Theme.text_muted_color()
+                                entry.last_write[:10],
+                                size=G360Theme.TYPE_SUBTITLE,
+                                color=G360Theme.text_muted_color(),
                             ),
                         ],
                         spacing=6,
@@ -1953,7 +2102,7 @@ class _ViewPanels:
         )
 
         def _crear_checkbox(key: str, etiqueta: str, sufijo: str, activa: bool):
-            cb = ft.Checkbox(label=etiqueta, value=activa, data=key)
+            cb = control_factory.checkbox(etiqueta, value=activa, data=key)
             cb.on_change = lambda _, __=key: actualizar_suma()
             cajas[key] = (cb, sufijo)
             return cb
@@ -2090,14 +2239,14 @@ class _ViewPanels:
         from datetime import date as _date
 
         _hoy = _date.today().year
-        anio_dd = ft.Dropdown(
-            label="Ventas visibles desde",
+        anio_dd = control_factory.dropdown(
+            "Ventas visibles desde",
             width=control_factory.WIDTH_FILTER,
-            options=[ft.dropdown.Option(str(a)) for a in range(2000, _hoy + 1)],
             value=str(ventas_db_config.actividad_anio()),
         )
+        anio_dd.options = [ft.dropdown.Option(str(a)) for a in range(2000, _hoy + 1)]
 
-        preview = ft.Text("", size=10, color=G360Theme.text_muted_color())
+        preview = ft.Text("", size=G360Theme.TYPE_BODY, color=G360Theme.text_muted_color())
 
         def _refrescar_preview(anio_str):
             """Preview de filas/clientes visibles desde el año elegido (en hilo)."""
@@ -2162,7 +2311,7 @@ class _ViewPanels:
                     "Todas las líneas de tu DB local. Marca las aprobadas para "
                     "la captura de intranet (se guardan sus códigos de 2 letras). "
                     "También puedes escribir un código nuevo y dar Enter.",
-                    size=10,
+                    size=G360Theme.TYPE_BODY,
                     color=G360Theme.text_muted_color(),
                 ),
                 ft.Row([filtro, anio_dd], alignment=ft.MainAxisAlignment.CENTER),
@@ -2833,14 +2982,88 @@ class _ViewPanels:
         def _exportar_cartucho(_):
             from src.core.cartucho import exportar_cartucho
 
-            _correr_export_cartucho(
-                carpeta_export=ventas_db.data_dir() / "export",
-                status=status,
-                btn_export=btn_export,
-                app=self.app,
-                page=page,
-                exportar=exportar_cartucho,
-            )
+            def _correr(desde=None, hasta=None):
+                return _correr_export_cartucho(
+                    carpeta_export=ventas_db.data_dir() / "export",
+                    status=status,
+                    btn_export=btn_export,
+                    app=self.app,
+                    page=page,
+                    exportar=exportar_cartucho,
+                    desde=desde,
+                    hasta=hasta,
+                )
+
+            def _abrir_dialogo(_e):
+                # Completo vs incremental NO son equivalentes: el completo
+                # reemplaza, el incremental solo MERGEA sobre lo que el
+                # cliente ya tiene. Confundirlos deja al cliente thinking que
+                # tiene el historico entero cuando tiene una parte.
+                import flet as _ft
+                from src.ui.widgets import control_factory as _cf
+
+                opc = _ft.Dropdown(
+                    label="Que cartucho",
+                    width=320,
+                    value="inc",
+                    options=[
+                        _ft.dropdown.Option(
+                            key="inc", content="Incremental (se suma al del cliente)"
+                        ),
+                        _ft.dropdown.Option(key="full", content="Completo (reemplaza todo)"),
+                    ],
+                )
+                fecha = _cf.text_field(
+                    "Desde (AAAA-MM-DD)",
+                    width=200,
+                    hint="Solo para incremental",
+                )
+                info = _ft.Text(
+                    "El incremental solo trae las ventas desde esa fecha y se "
+                    "suma a lo que el cliente ya tiene. El completo trae todo "
+                    "y reemplaza su historial.",
+                    size=11,
+                    color=G360Theme.text_muted_color(),
+                )
+
+                def _toggle(_e):
+                    fecha.disabled = opc.value != "inc"
+
+                opc.on_change = _toggle
+                _toggle(None)
+
+                def _ok(_e):
+                    if opc.value == "full":
+                        page.close(dlg)
+                        _correr()
+                        return
+                    d = (fecha.value or "").strip()
+                    if not d:
+                        self.app.show_snackbar(
+                            "Pon la fecha 'desde' o elegi cartucho completo",
+                            self.app.G360_WARNING,
+                        )
+                        return
+                    page.close(dlg)
+                    _correr(desde=d)
+
+                dlg = _ft.AlertDialog(
+                    modal=True,
+                    title=_ft.Text("Exportar cartucho", size=14, weight=_ft.FontWeight.BOLD),
+                    content=_ft.Column([opc, fecha, info], spacing=10, tight=True, width=340),
+                    actions=[
+                        _ft.TextButton("Cancelar", on_click=lambda _: page.close(dlg)),
+                        _ft.ElevatedButton("Exportar", on_click=_ok),
+                    ],
+                    actions_alignment=_ft.MainAxisAlignment.END,
+                )
+                page.open(dlg)
+
+            # El boton pide el modo antes de exportar: una exportacion es
+            # lenta y重型, y equivocarse de modo deja al cliente con una DB
+            # que no es la que cree.
+            btn_export.on_click = _abrir_dialogo
+            _abrir_dialogo(None)
 
         def _abrir_export(_):
             try:
@@ -2912,7 +3135,7 @@ class _ViewPanels:
                 # Dialogo modal de progreso (imposible de ignorar)
                 prog_status = ft.Text("Iniciando reemplazo...", size=12)
                 prog_bar = ft.ProgressBar(value=0, width=440, color=self.app.G360_ACCENT)
-                prog_log = ft.Text("", size=10, color=G360Theme.text_muted_color())
+                prog_log = ft.Text("", size=G360Theme.TYPE_BODY, color=G360Theme.text_muted_color())
                 btn_close = ft.TextButton(
                     "Cerrar", disabled=True, on_click=lambda _: page.close(dlg_prog)
                 )
@@ -3062,15 +3285,15 @@ class _ViewPanels:
 
         btn_reemplazar.on_click = reemplazar
 
-        path_input = ft.TextField(
-            label="Ruta de red (UNC o mapeada)",
-            hint_text="\\\\servidor\\compartido\\historial.db",
-            height=40,
+        path_input = control_factory.text_field(
+            "Ruta de red (UNC o mapeada)",
+            hint="\\\\servidor\\compartido\\historial.db",
             expand=True,
-            text_size=12,
         )
 
-        db_info_text = ft.Text("Cargando...", size=10, color=G360Theme.text_muted_color())
+        db_info_text = ft.Text(
+            "Cargando...", size=G360Theme.TYPE_BODY, color=G360Theme.text_muted_color()
+        )
 
         def _load_db_info():
             try:
@@ -3115,7 +3338,7 @@ class _ViewPanels:
                             ft.Container(height=4),
                             ft.Text(
                                 "Busca un historial.db en tu disco o pendrive.",
-                                size=10,
+                                size=G360Theme.TYPE_BODY,
                                 color=G360Theme.text_muted_color(),
                             ),
                             ft.Container(height=6),
@@ -3146,7 +3369,7 @@ class _ViewPanels:
                             ft.Container(height=4),
                             ft.Text(
                                 "Pega la ruta UNC de un historial.db compartido.",
-                                size=10,
+                                size=G360Theme.TYPE_BODY,
                                 color=G360Theme.text_muted_color(),
                             ),
                             ft.Container(height=6),
@@ -3185,7 +3408,7 @@ class _ViewPanels:
                                 "el CARTUCHO.json o el historial.db suelto. "
                                 "Se valida solo, reemplaza si es más nuevo o trae "
                                 "lo que falta sin pisar nada.",
-                                size=10,
+                                size=G360Theme.TYPE_BODY,
                                 color=G360Theme.text_muted_color(),
                             ),
                             ft.Container(height=6),
@@ -3210,7 +3433,7 @@ class _ViewPanels:
                             ft.Text(
                                 "Para llevar a otra PC: genera el .zip único "
                                 "(DB + sidecar + manifiesto).",
-                                size=10,
+                                size=G360Theme.TYPE_BODY,
                                 color=G360Theme.text_muted_color(),
                             ),
                             ft.Container(height=6),
@@ -3301,7 +3524,7 @@ class _ViewPanels:
         import flet as ft
 
         self.strip_txt = ft.Text("", size=12, expand=True, weight=ft.FontWeight.W_500)
-        self.strip_pasos = ft.Text("", size=10, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.strip_pasos = ft.Text("", size=G360Theme.TYPE_BODY, color=ft.Colors.ON_SURFACE_VARIANT)
         self.strip_bar = ft.ProgressBar(value=0, visible=False, expand=True, height=4)
         self.btn_strip_stop = ft.TextButton(
             "Detener",
@@ -3436,18 +3659,24 @@ class _ViewPanels:
                 "Calculando…",
                 size=12,
                 color=ft.Colors.ON_SURFACE_VARIANT,
-                text_align=ft.TextAlign.CENTER,
             )
             self.card_db_alerta = ft.Text("", size=12, color=ft.Colors.ORANGE_300)
+            self._db_detalle_visible = False
+            self.btn_ver_detalle = ft.TextButton(
+                "Ver detalle",
+                on_click=self._toggle_db_detalle,
+                visible=False,
+            )
 
             self.btn_actualizar_hoy = G360Theme.ghost_button(
                 "Actualizar hoy",
                 icon=ft.Icons.CLOUD_SYNC,
                 on_click=self._actualizar_hoy,
             )
-            self.btn_config = G360Theme.ghost_button(
-                "Configuración de DB",
+            self.btn_config = ft.IconButton(
                 icon=ft.Icons.SETTINGS_OUTLINED,
+                icon_size=18,
+                tooltip="Configuración de DB",
                 on_click=self._abrir_config_db,
             )
 
@@ -3470,59 +3699,43 @@ class _ViewPanels:
 
             self._refrescar_card_db(async_=async_)
 
-            return G360Theme.card(
-                ft.Column(
+            # Banner sintético de estado (Bloque A): 2 líneas. Línea 1 =
+            # estado del snapshot + accesos; línea 2 = métricas y alerta.
+            # En una sola fila, 4 KPIs + aviso + 2 botones no cabían sin
+            # comprimir, y el detalle de meses quedaba sin línea propia.
+            self._db_banner_detalle = ft.Container(
+                content=self.card_db_alerta,
+                alignment=ft.alignment.center_left,
+                visible=self._db_detalle_visible,
+            )
+            return ft.Container(
+                content=ft.Column(
                     [
+                        # Línea 1: estado a la izquierda, acciones a la derecha.
                         ft.Row(
                             [
-                                ft.Icon(
-                                    ft.Icons.STORAGE_OUTLINED,
-                                    size=18,
-                                    color=G360Theme.accent_color(),
-                                ),
-                                G360Theme.card_title("Historial local"),
-                            ],
-                            spacing=G360Theme.SPACE_SM,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            # El cuerpo de la card ya va centrado (KPIs, alerta y
-                            # descripcion); el titulo se alineaba a la izquierda
-                            # y los botones a la derecha, y esa mezcla se leia
-                            # como descompensada.
-                            alignment=ft.MainAxisAlignment.CENTER,
-                        ),
-                        G360Theme.subtitle(
-                            "Estado y actualización de la base del ERP",
-                            align=ft.TextAlign.CENTER,
-                        ),
-                        ft.Container(
-                            content=self.card_db_status,
-                            visible=bool(self.card_db_status.value),
-                        ),
-                        ft.Container(
-                            content=self.card_db_kpis,
-                            padding=ft.padding.only(top=6, bottom=4),
-                        ),
-                        ft.Container(
-                            content=self.card_db_alerta,
-                            # Alignment, no MainAxisAlignment: este enum era el
-                            # unico motivo real del crash que tumbaba la UI
-                            # principal con "'mappingproxy' object has no
-                            # attribute '__dict__'".
-                            alignment=ft.alignment.center,
-                            visible=bool(self.card_db_alerta.value),
-                        ),
-                        ft.Row(
-                            [
+                                self.card_db_status,
+                                self.btn_ver_detalle,
+                                ft.Container(expand=1),
                                 self.btn_actualizar_hoy,
                                 self.btn_config,
                             ],
-                            spacing=8,
-                            alignment=ft.MainAxisAlignment.CENTER,
-                            wrap=True,
+                            spacing=G360Theme.SPACE_MD,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        # Línea 2: métricas (y alerta en vivo cuando aplica).
+                        ft.Row(
+                            [self.card_db_kpis, self._db_banner_detalle],
+                            spacing=G360Theme.SPACE_MD,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                     ],
                     spacing=G360Theme.SPACE_SM,
                 ),
+                padding=ft.padding.symmetric(horizontal=12, vertical=10),
+                border_radius=G360Theme.RADIUS_CONTROL,
+                bgcolor=G360Theme.surface_color(),
+                border=ft.border.all(1, G360Theme.border_subtle_color()),
             )
         except Exception as exc:
             import logging
@@ -3536,6 +3749,17 @@ class _ViewPanels:
                 border_radius=12,
                 bgcolor=G360Theme.surface_variant_color(),
             )
+
+    def _toggle_db_detalle(self, ev=None):
+        """Muestra/oculta la lista de meses incompletos/ausentes del banner.
+
+        `Ver detalle` alterna entre mostrar el detalle inline en la línea 2
+        del banner y ocultarlo.
+        """
+        self._db_detalle_visible = not self._db_detalle_visible
+        self.btn_ver_detalle.text = "Ocultar" if self._db_detalle_visible else "Ver detalle"
+        self._db_banner_detalle.visible = self._db_detalle_visible
+        _safe_update(getattr(self.app, "page", None))
 
     # LEGADO EN ELIMINACION: `_sincronizar_desde_api` y `_mostrar_resultado_api`
     # ﹣  borradas. El modal `ApiSyncModal` (ver _actualizar_hoy) es el único
@@ -3584,11 +3808,13 @@ class _ViewPanels:
                 self.card_db_status.color = G360Theme.text_muted_color()
                 self.card_db_alerta.value = ""
                 self.card_db_alerta.color = ft.Colors.TRANSPARENT
+                self.btn_ver_detalle.visible = False
                 self.btn_config.visible = True
                 self.btn_actualizar_hoy.visible = True
                 self.card_db_kpis.update()
                 self.card_db_status.update()
                 self.card_db_alerta.update()
+                self.btn_ver_detalle.update()
                 self.btn_config.update()
                 self.btn_actualizar_hoy.update()
                 return
@@ -3603,26 +3829,21 @@ class _ViewPanels:
             _fila_kpis = []
 
             def _kpi_chip(icon, valor, color, label):
-                # Chip = tile metrica. Comparte radio, fondo, borde y escala
-                # de texto con resultados_view._metric_tile para que las dos
-                # surfaces de KPI se lean como la misma pieza.
+                # Chip = tile metrica HORIZONTAL (banner compacto): icono +
+                # valor + label en línea. Comparte radio, fondo y borde con el
+                # badge API para que las surfaces de KPI se lean como una pieza.
                 return ft.Container(
-                    content=ft.Column(
+                    content=ft.Row(
                         [
                             ft.Icon(icon, size=14, color=color),
-                            ft.Text(
-                                valor,
-                                size=12,
-                                weight=ft.FontWeight.W_700,
-                                color=color,
-                            ),
+                            ft.Text(valor, size=12, weight=ft.FontWeight.W_700, color=color),
                             ft.Text(label, size=12, color=G360Theme.text_muted_color()),
                         ],
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=G360Theme.SPACE_XS,
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
-                    padding=ft.padding.symmetric(horizontal=18, vertical=10),
-                    border_radius=G360Theme.RADIUS_CONTROL,
+                    padding=ft.padding.symmetric(horizontal=10, vertical=6),
+                    border_radius=G360Theme.RADIUS_CHIP,
                     bgcolor=G360Theme.surface_variant_color(),
                     border=ft.border.all(1, G360Theme.border_subtle_color()),
                 )
@@ -3660,7 +3881,11 @@ class _ViewPanels:
                 ft.Row(
                     chips,
                     spacing=10,
-                    alignment=ft.MainAxisAlignment.CENTER,
+                    # Alineado a la izquierda: en el banner las métricas abren
+                    # bajo el texto de estado, y la alerta en vivo se lee a su
+                    # derecha en la misma línea.
+                    alignment=ft.MainAxisAlignment.START,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 )
             )
 
@@ -3698,6 +3923,8 @@ class _ViewPanels:
             self.card_db_alerta.color = (
                 G360Theme.warning_color() if (incompletos or huecos) else ft.Colors.TRANSPARENT
             )
+            # El botón solo aparece cuando hay detalle que mostrar.
+            self.btn_ver_detalle.visible = bool(incompletos or huecos)
             self.btn_config.visible = True
             self.btn_actualizar_hoy.visible = True
 
@@ -3705,6 +3932,7 @@ class _ViewPanels:
                 self.card_db_kpis.update()
                 self.card_db_status.update()
                 self.card_db_alerta.update()
+                self.btn_ver_detalle.update()
                 self.btn_config.update()
                 self.btn_actualizar_hoy.update()
             except Exception:
@@ -3807,7 +4035,7 @@ class _ViewPanels:
                 if insumos_xlsx
                 else "Este caso usa el historial seleccionado; no requiere archivos externos."
             ),
-            size=10,
+            size=G360Theme.TYPE_BODY,
             color=G360Theme.text_muted_color(),
             selectable=True,
         )
@@ -3833,6 +4061,7 @@ class _ViewPanels:
             ft.Icons.INVENTORY_2_OUTLINED,
             contenido,
             description="Historial seleccionado y archivos que alimentan este caso.",
+            step=4,
         )
 
     def _insumo_browse_files(self, e):
@@ -3922,7 +4151,11 @@ class _ViewPanels:
                                         color=G360Theme.text_primary_color(),
                                         overflow=ft.TextOverflow.ELLIPSIS,
                                     ),
-                                    ft.Text(f["tipo"], size=10, color=G360Theme.text_muted_color()),
+                                    ft.Text(
+                                        f["tipo"],
+                                        size=G360Theme.TYPE_SUBTITLE,
+                                        color=G360Theme.text_muted_color(),
+                                    ),
                                 ],
                                 spacing=1,
                                 expand=True,
@@ -4024,7 +4257,7 @@ class _ViewPanels:
                                 ),
                                 ft.Text(
                                     "Busca y aplica un fragmento en Datos del caso.",
-                                    size=10,
+                                    size=G360Theme.TYPE_BODY,
                                     color=G360Theme.text_muted_color(),
                                 ),
                             ],
@@ -4123,7 +4356,7 @@ class _ViewPanels:
         self.busq_vend_dd.disabled = True
         self.busq_vend_status = ft.Text(
             "Cargando vendedores…",
-            size=10,
+            size=G360Theme.TYPE_BODY,
             color=G360Theme.text_muted_color(),
         )
         # Clientes se eligen desde un botón que abre el picker modal; la búsqueda
@@ -4163,13 +4396,8 @@ class _ViewPanels:
         # ── chips ──
         def _pintar_chips():
             self.busq_cli_chips.controls = [
-                ft.Chip(
-                    # Display corto (68414); la clave interna es 8 dígitos.
-                    label=ft.Text(f"{nom[:28]} ({cliente_visible(cid)})", size=10),
-                    on_delete=lambda _, c=cid: _quitar_cliente(c),
-                    delete_icon_color=G360Theme.error_color(),
-                    bgcolor=G360Theme.with_opacity(0.1, G360Theme.ACCENT_2),
-                    padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                control_factory.chip_cliente(
+                    cid, nom, on_delete=lambda _, c=cid: _quitar_cliente(c)
                 )
                 for cid, nom in self._sel_clientes
             ]
@@ -4178,34 +4406,22 @@ class _ViewPanels:
             if btn_rep is not None:
                 btn_rep.disabled = not bool(self._sel_clientes)
             self.busq_ped_chips.controls = [
-                ft.Chip(
-                    label=ft.Text(f"Pedido · {pid}", size=10),
-                    on_delete=lambda _, p=pid: _quitar_pedido(pid),
-                    delete_icon_color=G360Theme.error_color(),
-                    bgcolor=G360Theme.with_opacity(0.1, G360Theme.ACCENT_3),
-                    padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                control_factory.chip_documento(
+                    "pedido", pid, on_delete=lambda _, p=pid: _quitar_pedido(pid)
                 )
                 for _, pid in self._sel_pedidos
             ]
             self.busq_ped_chips.visible = bool(self._sel_pedidos)
             self.busq_oc_chips.controls = [
-                ft.Chip(
-                    label=ft.Text(f"O/C · {oid}", size=10),
-                    on_delete=lambda _, o=oid: _quitar_orden(oid),
-                    delete_icon_color=G360Theme.error_color(),
-                    bgcolor=G360Theme.with_opacity(0.1, G360Theme.SUCCESS),
-                    padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                control_factory.chip_documento(
+                    "oc", oid, on_delete=lambda _, o=oid: _quitar_orden(oid)
                 )
                 for _, oid in self._sel_ordenes
             ]
             self.busq_oc_chips.visible = bool(self._sel_ordenes)
             self.busq_fac_chips.controls = [
-                ft.Chip(
-                    label=ft.Text(fid, size=10),
-                    on_delete=lambda _, f=fid: _quitar_factura(f),
-                    delete_icon_color=G360Theme.error_color(),
-                    bgcolor=G360Theme.with_opacity(0.1, G360Theme.WARNING),
-                    padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                control_factory.chip_documento(
+                    "factura", fid, on_delete=lambda _, f=fid: _quitar_factura(f)
                 )
                 for _, fid in self._sel_facturas
             ]
@@ -4275,6 +4491,7 @@ class _ViewPanels:
             self._sel_ordenes = [o for o in self._sel_ordenes if o[0] != cid]
             self._detalle_docs.pop(cid, None)
             _invalidar_preview_busqueda()
+            _invalida_resultado("Cambiaste los documentos; vuelve a ejecutar el cálculo.")
             _pintar_chips()
             if self._sel_clientes:
                 threading.Thread(
@@ -4283,21 +4500,30 @@ class _ViewPanels:
                 ).start()
             self.app.page.update()
 
+        def _invalida_resultado(mensaje):
+            """La seleccion de documentos alimenta el calculo: si cambia, el
+            resultado previo deja de valer (mismo criterio que los insumos)."""
+            if getattr(self, "resultado", None):
+                self._invalidar_resultado_por_config(mensaje)
+
         def _quitar_factura(fid):
             self._sel_facturas = [f for f in self._sel_facturas if f[1] != fid]
             _invalidar_preview_busqueda()
+            _invalida_resultado("Cambiaste los documentos; vuelve a ejecutar el cálculo.")
             _pintar_chips()
             self.app.page.update()
 
         def _quitar_pedido(pid):
             self._sel_pedidos = [p for p in self._sel_pedidos if p[1] != pid]
             _invalidar_preview_busqueda()
+            _invalida_resultado("Cambiaste los documentos; vuelve a ejecutar el cálculo.")
             _pintar_chips()
             self.app.page.update()
 
         def _quitar_orden(oid):
             self._sel_ordenes = [o for o in self._sel_ordenes if o[1] != oid]
             _invalidar_preview_busqueda()
+            _invalida_resultado("Cambiaste los documentos; vuelve a ejecutar el cálculo.")
             _pintar_chips()
             self.app.page.update()
 
@@ -4316,6 +4542,9 @@ class _ViewPanels:
             self._sel_ordenes = []
             self._detalle_docs.clear()
             _invalidar_preview_busqueda()
+            # Cambiar el vendedor acota el historial: el resultado previo
+            # corresponde a otro universo de clientes.
+            _invalida_resultado("Cambiaste el vendedor; vuelve a ejecutar el cálculo.")
             _pintar_chips()
             self.app.page.update()
             # El picker modal usa _search_vend_id al abrirse, no hace falta
@@ -4465,7 +4694,9 @@ class _ViewPanels:
             _all_items: list = []
             _state = {"q": "", "sel": set()}
             _deb = {"n": 0}
-            picker_status = ft.Text("Cargando…", size=10, color=ft.Colors.ON_SURFACE_VARIANT)
+            picker_status = ft.Text(
+                "Cargando…", size=G360Theme.TYPE_BODY, color=ft.Colors.ON_SURFACE_VARIANT
+            )
 
             def _refresh_modal():
                 # Update dirigido: no re-renderiza el TextField (evita tartamudeo/pérdida de foco).
@@ -4530,7 +4761,7 @@ class _ViewPanels:
                     sel.append((self._sel_clientes[-1][0] if self._sel_clientes else "", iid))
                     getattr(self, chip_row_attr).controls.append(
                         ft.Chip(
-                            label=ft.Text(item_label_fn({"id": iid}), size=10),
+                            label=ft.Text(item_label_fn({"id": iid}), size=G360Theme.TYPE_SUBTITLE),
                             on_delete=lambda _, i=iid: quitar_fn(i),
                             delete_icon_color=G360Theme.error_color(),
                             bgcolor=G360Theme.with_opacity(0.1, G360Theme.ACCENT_2),
@@ -4597,11 +4828,13 @@ class _ViewPanels:
             picker_search = ft.TextField(
                 label=f"Buscar {title}…",
                 dense=True,
-                text_size=13,
-                border_radius=12,
+                text_size=control_factory.TEXT_SIZE,
+                border_radius=control_factory.RADIUS,
                 prefix_icon=ft.Icons.SEARCH_OUTLINED,
                 expand=True,
-                content_padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                content_padding=control_factory.CONTENT_PADDING,
+                bgcolor=control_factory.COLOR_INPUT,
+                border=control_factory.BORDER_INPUT,
                 on_change=_on_modal_search,
                 on_submit=lambda e: _apply_filter(e.control.value or ""),
                 autofocus=True,
@@ -4954,10 +5187,17 @@ class _ViewPanels:
         if self._sel_clientes or self._sel_facturas or self._sel_pedidos or self._sel_ordenes:
             _pintar_chips()
 
-        # Build buttons (must be after method definitions)
-        self.busq_btn = G360Theme.ghost_button(
+        # Jerarquia de la zona (mismo criterio que el panel de Reporte): el
+        # peso visual dice cual termina el flujo. "Buscar" APLICA los
+        # filtros y es el unico que produce el historial -> principal.
+        self.busq_btn = ft.ElevatedButton(
             "Buscar",
             icon=ft.Icons.SEARCH_OUTLINED,
+            height=control_factory.HEIGHT,
+            style=ft.ButtonStyle(
+                bgcolor=G360Theme.accent_color(),
+                color=G360Theme.section_button_fg(),
+            ),
             on_click=self._busq_ejecutar,
         )
         self.busq_exec_btn = G360Theme.accent_button(
@@ -5001,10 +5241,24 @@ class _ViewPanels:
                 vendedor=self._search_vend_id or None,
                 rango=(fd_dt, fh_dt) if fd_dt or fh_dt else None,
             )
+            # Con zonas en vistas separadas, llevar al reporte: si no, se
+            # genera en una vista que el usuario no esta mirando.
+            self.mostrar_reporte()
 
-        self.busq_btn_reporte = G360Theme.ghost_button(
-            "Reporte de compras",
-            icon=ft.Icons.BAR_CHART_OUTLINED,
+        # NO es duplicado del boton del header: este lleva la seleccion
+        # (clientes + vendedor + rango) al reporte. Por eso no puede
+        # llamarse igual ni pesar igual: si se lee como otro "Buscar" el
+        # usuario no sabe si consulta o si se lleva lo que ya consulto.
+        self.busq_btn_reporte = ft.OutlinedButton(
+            "Llevar al reporte",
+            icon=ft.Icons.ARROW_FORWARD_OUTLINED,
+            height=control_factory.HEIGHT,
+            style=ft.ButtonStyle(
+                color=G360Theme.accent_color(),
+                side=ft.BorderSide(1, G360Theme.accent_color()),
+                shape=ft.RoundedRectangleBorder(radius=G360Theme.BTN_RADIUS),
+            ),
+            tooltip="Abre Reporte de compras con los clientes, el vendedor y el rango ya seleccionados",
             on_click=_abrir_reporte_desde_busqueda,
         )
         self.busq_btn_reporte.disabled = not bool(self._sel_clientes)
@@ -5046,7 +5300,16 @@ class _ViewPanels:
                 if vends:
                     self.busq_vend_status.value = ""
                     if not self._hist_fragmento:
-                        self.busq_status.value = f"{len(vends)} vendedores disponibles; puedes filtrar por uno o buscar cliente"
+                        self.busq_status.value = (
+                            f"{len(vends)} vendedores disponibles; "
+                            "puedes filtrar por uno o buscar cliente"
+                        )
+                        # busq_status es el estado de la BUSQUEDA y su color
+                        # es semantico (verde/rojo/ambar). Este conteo es
+                        # informativo: si no se resetea hereda el color del
+                        # ultimo resultado y un dato neutro se lee como
+                        # "todo bien" o como link pulsable.
+                        self.busq_status.color = G360Theme.text_muted_color()
                 else:
                     self.busq_vend_status.value = (
                         "Sin vendedores disponibles. Busca el cliente directamente."
@@ -5205,7 +5468,7 @@ class _ViewPanels:
         )
         self.busq_doc_prompt = ft.Text(
             "Selecciona un cliente para ver sus pedidos, O/C y facturas.",
-            size=10,
+            size=G360Theme.TYPE_BODY,
             color=G360Theme.text_muted_color(),
         )
         _refresh_doc_buttons()
@@ -5216,42 +5479,54 @@ class _ViewPanels:
             ).start()
         return ft.Column(
             [
-                # El rango estrecha el universo desde el comienzo.
-                ft.Row(
-                    [
-                        self.busq_fd_label,
-                        control_factory.date_button(
-                            _make_date_picker(self.busq_fd, self.busq_fd_label, "Desde"), "Desde"
+                # Mismo esqueleto de bloques que el panel de Reporte
+                # (filters_block): rango/vendedor/cliente arriba, y los
+                # documentos que acotan el historial aparte. Aqui NO hay
+                # bloque de "salida": en esta zona los documentos son
+                # ENTRADA (delimitan el universo), no opciones de empaque.
+                control_factory.filters_block(
+                    principales=[
+                        # El rango estrecha el universo desde el comienzo.
+                        ft.Row(
+                            [
+                                self.busq_fd_label,
+                                control_factory.date_button(
+                                    _make_date_picker(self.busq_fd, self.busq_fd_label, "Desde"),
+                                    "Desde",
+                                ),
+                                self.busq_fh_label,
+                                control_factory.date_button(
+                                    _make_date_picker(self.busq_fh, self.busq_fh_label, "Hasta"),
+                                    "Hasta",
+                                ),
+                            ],
+                            spacing=8,
+                            wrap=True,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
-                        self.busq_fh_label,
-                        control_factory.date_button(
-                            _make_date_picker(self.busq_fh, self.busq_fh_label, "Hasta"), "Hasta"
+                        ft.Row(
+                            [
+                                self.busq_vend_dd,
+                                btn_pin_vend,
+                                self.busq_buscar_cli_btn,
+                                btn_pin_cli,
+                            ],
+                            spacing=6,
+                            wrap=True,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
-                        ft.Text("Últimos 30 días", size=10, color=G360Theme.text_muted_color()),
+                        self.busq_vend_status,
+                        self.busq_cli_chips,
                     ],
-                    spacing=8,
-                    wrap=True,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                ft.Row(
-                    [
-                        self.busq_vend_dd,
-                        btn_pin_vend,
-                        self.busq_buscar_cli_btn,
-                        btn_pin_cli,
+                    complementarios=[
+                        self.busq_doc_prompt,
+                        self.busq_doc_row,
+                        self.busq_ped_chips,
+                        self.busq_oc_chips,
+                        self.busq_fac_chips,
                     ],
-                    spacing=6,
-                    wrap=True,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    complementarios_header="Acotar documentos",
                 ),
-                self.busq_vend_status,
-                self.busq_cli_chips,
-                ft.Divider(height=1, color=G360Theme.border_subtle_color()),
-                self.busq_doc_prompt,
-                self.busq_doc_row,
-                self.busq_ped_chips,
-                self.busq_oc_chips,
-                self.busq_fac_chips,
                 ft.Row(
                     [self.busq_btn, self.busq_btn_reporte, self.busq_exec_btn],
                     spacing=8,
@@ -5278,20 +5553,14 @@ class _ViewPanels:
 
         has_creds = CaptureService.has_credentials()
 
-        user_input = ft.TextField(
-            label="Usuario intranet",
+        user_input = control_factory.text_field(
+            "Usuario intranet",
             width=280,
-            dense=True,
-            text_size=13,
-            border_radius=12,
             prefix_icon=ft.Icons.PERSON_OUTLINED,
         )
-        pass_input = ft.TextField(
-            label="Contraseña",
+        pass_input = control_factory.text_field(
+            "Contraseña",
             width=280,
-            dense=True,
-            text_size=13,
-            border_radius=12,
             prefix_icon=ft.Icons.LOCK_OUTLINED,
             password=True,
             can_reveal_password=True,
@@ -5414,7 +5683,9 @@ class _ViewPanels:
 
         status = ft.Text("Iniciando...", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
         progress = ft.ProgressBar(value=0, visible=False, width=440)
-        log_ctl = ft.Text("", size=10, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=10)
+        log_ctl = ft.Text(
+            "", size=G360Theme.TYPE_SUBTITLE, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=10
+        )
         abort_flag = threading.Event()
         _last_ui2 = [0.0]
         _svc_activo2 = [None]
@@ -5568,22 +5839,16 @@ class _ViewPanels:
         )
 
         # ── Zona A: conexión (login) — visible al abrir ──
-        user_input = ft.TextField(
-            label="Usuario intranet",
+        user_input = control_factory.text_field(
+            "Usuario intranet",
             width=220,
-            dense=True,
-            text_size=13,
-            border_radius=12,
         )
         if has_creds:
             u_saved, _ = CaptureService.credentials()
             user_input.value = u_saved
-        pass_input = ft.TextField(
-            label="Contraseña",
+        pass_input = control_factory.text_field(
+            "Contraseña",
             width=220,
-            dense=True,
-            text_size=13,
-            border_radius=12,
             password=True,
             can_reveal_password=True,
         )
@@ -5601,17 +5866,16 @@ class _ViewPanels:
             on_click=None,
             tooltip="Copia el historial.db actualizado de la DB fuente (g360-db-ventas)",
         )
-        dd_anyos = ft.Dropdown(
-            label="Ventana",
-            dense=True,
+        dd_anyos = control_factory.dropdown(
+            "Ventana",
             width=128,
             value="10",
-            options=[
-                ft.dropdown.Option("5", "5 años"),
-                ft.dropdown.Option("10", "10 años"),
-                ft.dropdown.Option("all", "Todos"),
-            ],
         )
+        dd_anyos.options = [
+            ft.dropdown.Option("5", "5 años"),
+            ft.dropdown.Option("10", "10 años"),
+            ft.dropdown.Option("all", "Todos"),
+        ]
         btn_sync_parcial = ft.ElevatedButton(
             "⬇ Cargar años desde fuente",
             on_click=None,
@@ -5641,7 +5905,7 @@ class _ViewPanels:
                 ft.Text(
                     "Carga inicial: copia solo la ventana elegida de la DB fuente "
                     "(5, 10 o todos los años) sin descargar por intranet.",
-                    size=10,
+                    size=G360Theme.TYPE_BODY,
                     color=G360Theme.text_muted_color(),
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -5689,7 +5953,9 @@ class _ViewPanels:
         )
         btn_stop = ft.TextButton("Detener", on_click=None, visible=False)
         progress = ft.ProgressBar(value=0, visible=False, width=480)
-        log_ctl = ft.Text("", size=10, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=14)
+        log_ctl = ft.Text(
+            "", size=G360Theme.TYPE_SUBTITLE, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=14
+        )
         descarga_box = ft.Column(
             [
                 badge_conectado,  # estado de conexión + credenciales
@@ -6148,17 +6414,16 @@ class _ViewPanels:
         está vacía. Pregunta qué ventana copiar — 5, 10 o todos los años."""
         import flet as ft
 
-        dd = ft.Dropdown(
-            label="Ventana de años",
-            dense=True,
+        dd = control_factory.dropdown(
+            "Ventana de años",
             width=210,
             value="10",
-            options=[
-                ft.dropdown.Option("5", "5 años"),
-                ft.dropdown.Option("10", "10 años"),
-                ft.dropdown.Option("all", "Todos"),
-            ],
         )
+        dd.options = [
+            ft.dropdown.Option("5", "5 años"),
+            ft.dropdown.Option("10", "10 años"),
+            ft.dropdown.Option("all", "Todos"),
+        ]
         status = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
         btn = ft.ElevatedButton(
             "Cargar historial",

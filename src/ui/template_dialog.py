@@ -47,7 +47,7 @@ def mostrar_dialogo_plantillas(page, app):
         )
         detalle = ft.Text(
             f"{_etiqueta_casos(tpl.get('casos', []))} — {tpl.get('descripcion', '')}",
-            size=10,
+            size=G360Theme.TYPE_SUBTITLE,
             color=G360Theme.text_muted_color(),
         )
         checkboxes.append(cb)
