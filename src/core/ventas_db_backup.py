@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -35,18 +35,49 @@ def backup_dir() -> Path:
     return _vdb().data_dir() / "backup"
 
 
-def backup_db(max_keep: int = 8) -> Path | None:
+def backup_db(max_keep: int = 2, force: bool = False, motivo: str = "") -> Path | None:
     """Respaldo consistente del SQLite (checkpoint WAL primero).
-    Semanal: salta si ya existe un backup de hoy. Rota hasta max_keep copias."""
+
+    `max_keep=2`: la DB es de varios GB y cada copia es completa. Con 8 se
+    acumularon ~30 GB de copias casi identicas; 2 (estado actual + el previo)
+    alcanzan para volver atras y ocupan la mitad.
+
+    `force=True` lo usan las operaciones destructivas (reemplazar la DB). Sin
+    eso el daily se los saltaba en silencio: `backup_db()` devolvia None
+    porque ya habia backup del dia, la UI anunciaba "backup automatico" y en
+    realidad no habia copia del estado que se iba a pisar. Devuelve el Path
+    del backup hecho (o None si no se hizo nada) para que el llamador decida.
+
+    La rotacion ordena por FECHA DE MODIFICACION, no por nombre: los backups
+    forzados llevan prefijo ("historial_pre-import_...") y por nombre
+    "pre-" ordena despues de cualquier "2026...", asi que un forzado del dia
+    10 se tomaria por mas nuevo que el diario del 11 y la rotacion expulsaria
+    al equivocado.
+    """
     vdb = _vdb()
     if not vdb.db_exists():
         return None
     bdir = backup_dir()
     bdir.mkdir(parents=True, exist_ok=True)
-    hoy = date.today().strftime("%Y%m%d")
-    del_dia = bdir / f"historial_{hoy}.db"
-    if del_dia.exists():
-        return None  # ya hay backup de hoy
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if force:
+        etiqueta = f"pre-{motivo}" if motivo else "pre"
+        base = f"historial_{etiqueta}_{stamp}"
+    else:
+        base = f"historial_{date.today().strftime('%Y%m%d')}"
+        if (bdir / f"{base}.db").exists():
+            return None  # ya hay backup del dia
+
+    # Dos forzados dentro del mismo segundo comparten `stamp`: el segundo
+    # copy2 sobreescribiria el primero y la rotacion creeria que hay una sola
+    # copia. Sufijo incremental ante colision.
+    destino = bdir / f"{base}.db"
+    intento = 1
+    while destino.exists():
+        destino = bdir / f"{base}-{intento}.db"
+        intento += 1
+
     # Checkpoint WAL para que la copia incluya todo
     conn = vdb.connect(readonly=False)
     try:
@@ -55,23 +86,179 @@ def backup_db(max_keep: int = 8) -> Path | None:
         conn.close()
     import shutil
 
-    tmp = bdir / f".tmp_{hoy}.db"
+    tmp = bdir / f".tmp_{destino.stem}.db"
     shutil.copy2(vdb.db_path(), tmp)
-    # Validar integridad antes de promocionar
+    # quick_check, NO integrity_check. Es el mismo criterio que usa el import
+    # del origen y por el mismo motivo (el comentario de `import_db` lo
+    # explica): en una DB de 3.7 GB el chequeo completo tarda 12-25 min, y eso
+    # se pagaba en CADA backup, incluido el diario de la captura. quick_check
+    # verifica la estructura de paginas, que es lo que importa para saber que
+    # la copia sirve como origen de una restauracion.
     check = sqlite3.connect(f"file:{tmp.as_posix()}?mode=ro", uri=True)
     try:
-        ok = check.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        ok = check.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     finally:
         check.close()
     if not ok:
         tmp.unlink(missing_ok=True)
-        raise RuntimeError("backup descartado: integrity_check fallo")
-    tmp.rename(del_dia)
-    # Rotacion: conservar las mas recientes
-    backups = sorted(bdir.glob("historial_*.db"))
+        raise RuntimeError("backup descartado: quick_check fallo")
+    tmp.rename(destino)
+    # Rotacion: conservar las mas recientes por fecha de modificacion.
+    backups = sorted(bdir.glob("historial_*.db"), key=lambda p: (p.stat().st_mtime, p.name))
     for old in backups[:-max_keep]:
         old.unlink(missing_ok=True)
-    return del_dia
+    return destino
+
+
+def _gb(n: float) -> str:
+    return f"{n / 1024**3:.1f} GB"
+
+
+def _estructura_ok(db: Path) -> tuple[bool, str]:
+    """¿El archivo abre y tiene lo mínimo para ser la DB del sustentor?
+
+    Deliberadamente NO es `quick_check`: eso son ~56 s sobre 3.7 GB y ya se
+    corrio sobre el origen, de donde salio cada pagina copiada. Con el destino
+    alcanza con verificar que se puede abrir, que la tabla `ventas` existe y
+    que tiene el numero de filas esperado: si la copia se cortó a mitad, el
+    esquema o el conteo no cierran.
+    """
+    try:
+        c = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=30)
+    except sqlite3.Error as ex:
+        return False, f"no abre: {ex}"
+    try:
+        tablas = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "ventas" not in tablas:
+            return False, "falta la tabla ventas"
+        # COUNT(*) y MIN/MAX salen por indice: segundos, no minutos.
+        n, fmin, fmax = c.execute(
+            "SELECT COUNT(*), MIN(fecha_orig), MAX(fecha_orig) FROM ventas"
+        ).fetchone()
+    except sqlite3.Error as ex:
+        return False, f"no se pudo leer: {ex}"
+    finally:
+        c.close()
+    if not n:
+        return False, "la tabla ventas quedo vacia"
+    return True, f"{n:,} filas ({fmin} -> {fmax})"
+
+
+def _chequear_espacio(origen: Path, destino: Path) -> None:
+    """Aborta antes de copiar si el disco no puede absorber la operacion.
+
+    Reemplazar una DB de varios GB hace CRECER el archivo destino hasta el
+    tamano del origen (la backup API no lo trunca). Si el disco se llena a
+    mitad de camino, el archivo vivo queda con paginas viejas mezcladas con
+    nuevas: corrupto y sin forma de recalcular. Es el fallo mas probable y el
+    mas caro, y se detecta con una llamada antes de tocar nada.
+    """
+    import shutil as _sh
+
+    try:
+        libre = _sh.disk_usage(destino.parent).free
+    except OSError:
+        return  # sin medicion no se bloquea: el backup previo ya es la red
+
+    necesario = max(0, origen.stat().st_size - destino.stat().st_size)
+    # Margen: el WAL de destino y los .db-shm/-wal se reescriben durante la
+    # operacion. Sin holgura, un disco "justo" falla igual.
+    margen = 512 * 1024**2
+    if libre < necesario + margen:
+        raise RuntimeError(
+            f"Espacio insuficiente para reemplazar la DB: se necesitan "
+            f"{_gb(necesario + margen)} (crecimiento {_gb(necesario)} + margen "
+            f"512 MB) y hay {_gb(libre)} libres en {destino.parent}. "
+            "Liberá espacio y reintentá: no se tocó la DB actual."
+        )
+    log.info("import_db: espacio ok (libre %s, necesario %s)", _gb(libre), _gb(necesario + margen))
+
+
+def _restaura_desde_backup(bkp: Path, destino: Path) -> bool:
+    """Vuelve a copiar el backup sobre el archivo vivo. True si se restauró.
+
+    Primero in-place, que es lo unico que funciona si otro hilo tiene la DB
+    abierta en WAL (Windows no deja ni borrar ni renombrar). Pero si el archivo
+    quedo ilegible (copia a medias que rompio el encabezado), SQLite no lo
+    puede abrir y el in-place no tiene a quien escribir: ahi se cae al
+    reemplazo de archivo completo, que es correcto siempre que nadie mas lo
+    tenga tomado.
+    """
+    import shutil as _sh
+
+    def _valido() -> bool:
+        chk = sqlite3.connect(f"file:{destino.as_posix()}?mode=ro", uri=True)
+        try:
+            return chk.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        finally:
+            chk.close()
+
+    try:
+        src = sqlite3.connect(f"file:{bkp.as_posix()}?mode=ro", uri=True, timeout=60)
+        try:
+            dst = sqlite3.connect(str(destino), timeout=60)
+            try:
+                dst.execute("PRAGMA busy_timeout = 60000")
+                src.backup(dst, pages=4096, sleep=0.01)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        ok = _valido()
+        via = "in-place"
+    except Exception:
+        log.warning(
+            "import_db: restore in-place imposible (archivo ilegible), "
+            "probando reemplazo de archivo"
+        )
+        try:
+            for sidecar in (
+                destino.with_name(destino.name + "-wal"),
+                destino.with_name(destino.name + "-shm"),
+            ):
+                sidecar.unlink(missing_ok=True)
+            destino.unlink(missing_ok=True)
+            _sh.copy2(bkp, destino)
+            ok = _valido()
+            via = "reemplazo de archivo"
+        except Exception:
+            log.exception("import_db: fallo la restauracion desde %s", bkp.name)
+            return False
+
+    if ok:
+        # El backup YA esta en disco y sirve tal cual: no se copia otra vez.
+        # Con 3.7 GB un copy2 de mas son minutos y otro tanto de disco, y la
+        # copia original no se va a tocar: la rotacion la borra cuando toque.
+        log.warning("import_db: DB restaurada desde %s (via %s)", bkp.name, via)
+    return ok
+
+
+def _recuperar(bkp, destino: Path, causa: Exception, contexto: str):
+    """Deja la DB como estaba y falla. Siempre levanta.
+
+    Se llama cuando la copia in-place fallo: el archivo esta en estado
+    desconocido y el backup previo es lo unico que puede devolverlo a un
+    estado usable. Si no hay backup, el mensaje lo dice: la recuperacion
+    manual es la unica via.
+    """
+    if bkp is None:
+        raise RuntimeError(
+            f"{contexto}: {causa}\n\nLa DB local puede quedar incompleta y no "
+            "habia backup previo para restaurar. Revisa el historial antes de "
+            "volver a capturar."
+        ) from causa
+
+    if _restaura_desde_backup(bkp, destino):
+        raise RuntimeError(
+            f"{contexto}: {causa}\n\nSe restauro el historial anterior desde "
+            f"{bkp.name}. La DB local quedo como estaba antes del intento; "
+            "podes reintentar."
+        ) from causa
+
+    raise RuntimeError(
+        f"{contexto}: {causa}\n\nNo se pudo restaurar automaticamente desde "
+        f"{bkp}. Recuperala a mano de {bkp} antes de seguir usando la app."
+    ) from causa
 
 
 def import_db(origen: Path, progress_cb=None) -> dict:
@@ -132,7 +319,16 @@ def import_db(origen: Path, progress_cb=None) -> dict:
     if vdb.db_exists():
         _paso("Backup de la DB actual...", 0.10)
         t0 = time.perf_counter()
-        vdb.backup_db()
+        # force=True: el daily puede ya existir (la captura lo hace al iniciar)
+        # y entonces la copia del estado ACTUAL se saltaba en silencio. Sin
+        # ese respaldo, un reemplazo a medias deja la DB irrecuperable.
+        bkp = vdb.backup_db(force=True, motivo="import")
+        if bkp is None:
+            raise RuntimeError(
+                "No se pudo respaldar la DB actual: se aborta el reemplazo "
+                "para no perder el historial vigente."
+            )
+        log.info("import_db: backup previo en %s", bkp.name)
         _paso(f"Backup listo ({time.perf_counter() - t0:.0f}s)", 0.15)
     vdb.reset_connections()
     destino = vdb.db_path()
@@ -145,6 +341,7 @@ def import_db(origen: Path, progress_cb=None) -> dict:
         # el archivo (incl. -wal/-shm) falla con WinError 32 si otro hilo
         # (UI/poll/captura) mantiene la DB abierta en modo WAL, porque
         # reset_connections() solo cierra las conexiones del hilo actual.
+        _chequear_espacio(origen, destino)
         _paso("Copiando origen -> local...", 0.15)
         t0 = time.perf_counter()
         src = sqlite3.connect(f"file:{origen.as_posix()}?mode=ro", uri=True, timeout=60)
@@ -167,16 +364,34 @@ def import_db(origen: Path, progress_cb=None) -> dict:
                     # pages=32 seria ~29k iteraciones para 3.7 GB; 16 MB por
                     # paso copia en <1 min local y da progreso incremental.
                     src.backup(dst, pages=4096, sleep=0.01, progress=_progress)
-                except sqlite3.OperationalError as ex:
-                    raise RuntimeError(
-                        "La DB local está en uso (posible captura en curso). "
-                        f"Detén la captura e reintenta: {ex}"
-                    ) from ex
+                except Exception as ex:
+                    # La copia es IN-PLACE sobre el archivo vivo: cualquier
+                    # fallo (disco lleno, DB en uso, E/S) la deja con paginas
+                    # viejas mezcladas con nuevas. No se distingue cual de
+                    # ellos toco el archivo a medias: TODOS pasan por el mismo
+                    # camino, que es intentar dejar la DB como estaba.
+                    _recuperar(bkp, destino, ex, "La copia del historial fallo")
             finally:
                 dst.close()
         finally:
             src.close()
-        _paso(f"Copiado en {time.perf_counter() - t0:.0f}s", 0.80)
+
+        # Verificar ANTES de seguir reconstruyendo: una copia "terminada" que
+        # dejo el archivo truncado o corrupto no sirve de nada. El chequeo es
+        # ESTRUCTURAL y barato (abrir + leer sqlite_master + contar filas por
+        # indice): un quick_check completo son ~56 s en 3.7 GB y ya se hizo
+        # sobre el ORIGEN al principio, que es de donde salio cada pagina.
+        integro, detalle = _estructura_ok(destino)
+        if not integro:
+            # "Termino sin excepcion" no es "termino bien": la copia pudo
+            # truncar o dejar paginas a medias y seguir igual.
+            _recuperar(
+                bkp,
+                destino,
+                RuntimeError(f"la copia dejo la DB incompleta ({detalle})"),
+                "La copia del historial dejo la DB incompleta",
+            )
+        _paso(f"Copiado en {time.perf_counter() - t0:.0f}s — {detalle}", 0.80)
     else:
         shutil.copy2(origen, destino)
         if progress_cb:
