@@ -65,23 +65,131 @@ def _ahora_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _normaliza_rango(desde=None, hasta=None) -> tuple[str, str]:
+    """Rango inclusivo en ISO. Sin `desde` arranca en el origen de los datos."""
+    d = str(desde).strip() if desde else "0000-01-01"
+    h = str(hasta).strip() if hasta else "9999-12-31"
+    for v in (d, h):
+        if len(v) != 10 or v[4] != "-" or v[7] != "-":
+            raise ValueError(f"fecha invalida (se espera AAAA-MM-DD): {v!r}")
+    if d > h:
+        raise ValueError(f"rango invertido: desde {d} > hasta {h}")
+    return d, h
+
+
+def _db_parcial(db_src: Path, db_dst: Path, desde: str, hasta: str) -> None:
+    """Arma un historial.db con el esquema del app y SOLO las filas del rango.
+
+    No copia el archivo de 3.7 GB y lo borra: se construye con el esquema
+    (mismo que `_envolver_semilla` y `init_db`) y se copian las columnas de
+    `ventas` con el rango aplicado. `fecha_orig` es texto ISO, asi que el
+    BETWEEN es correcto y usa indice.
+    """
+    src = sqlite3.connect(f"file:{db_src.as_posix()}?mode=ro", uri=True, timeout=60)
+    dst = sqlite3.connect(str(db_dst), timeout=60)
+    try:
+        dst.executescript(ventas_db.CREATE_TABLE_VENTAS)
+        for script in (
+            ventas_db.CREATE_AUDIT_TABLES,
+            ventas_db.CREATE_DIM_TABLES,
+            ventas_db.CREATE_FACT_TABLES,
+        ):
+            dst.executescript(script)
+        dst.execute(f"PRAGMA user_version = {ventas_db.CONTRACTO_VERSION}")
+
+        columnas = [r[1] for r in src.execute("PRAGMA table_info(ventas)")]
+        dst.execute("ATTACH DATABASE ? AS origen", (str(db_src),))
+        cols_sql = ", ".join(columnas)
+        dst.execute(
+            f"INSERT INTO ventas ({cols_sql}) "
+            f"SELECT {cols_sql} FROM origen.ventas "
+            f"WHERE fecha_orig >= ? AND fecha_orig <= ?",
+            (desde, hasta),
+        )
+        # day_checksums del rango: es lo que el cliente usa para decidir
+        # superset vs merge. Si travelled todos, el import creeria que el
+        # cartucho cubre dias que no trae.
+        dst.execute(
+            "INSERT INTO day_checksums (dia, total_filas, total_soles, checksum, calculado_en) "
+            "SELECT substr(fecha_orig,1,10), COUNT(*), ROUND(COALESCE(SUM(soles),0),2), "
+            "COUNT(*) || ':' || ROUND(COALESCE(SUM(soles),0),2), datetime('now') "
+            "FROM ventas WHERE length(fecha_orig) >= 10 GROUP BY 1"
+        )
+        dst.commit()
+    finally:
+        dst.close()
+        src.close()
+
+
+def _sidecar_parcial(est_src: Path, est_dst: Path, desde: str, hasta: str) -> None:
+    """Sidecar con solo los dias del rango. `oc_alias` entra entero.
+
+    Los alias OC son chicos y hacen falta para que el cliente pueda resolver
+    las O/C de los dias que trae el cartucho.
+    """
+    src = sqlite3.connect(f"file:{est_src.as_posix()}?mode=ro", uri=True, timeout=60)
+    dst = sqlite3.connect(str(est_dst), timeout=60)
+    try:
+        dst.executescript(ventas_db.CREATE_ESTADO_TABLES)
+        dst.execute("ATTACH DATABASE ? AS origen", (str(est_src),))
+        for t in ("oc_alias", "day_state"):
+            try:
+                cols = [r[1] for r in src.execute(f"PRAGMA table_info({t})")]
+            except sqlite3.Error:
+                continue
+            if not cols:
+                continue
+            cols_sql = ", ".join(cols)
+            where = "WHERE dia >= ? AND dia <= ?" if t == "day_state" else ""
+            params = (desde, hasta) if t == "day_state" else ()
+            try:
+                dst.execute(
+                    f"INSERT OR REPLACE INTO {t} ({cols_sql}) "
+                    f"SELECT {cols_sql} FROM origen.{t} {where}",
+                    params,
+                )
+            except sqlite3.Error:
+                pass
+        dst.commit()
+    finally:
+        dst.close()
+        src.close()
+
+
 def exportar_cartucho(
-    destino: Path | str | None = None, comprimir: bool = True, conservar_carpeta: bool = False
+    destino: Path | str | None = None,
+    comprimir: bool = True,
+    conservar_carpeta: bool = False,
+    desde=None,
+    hasta=None,
 ) -> dict:
     """Genera data/export/cartucho-<ts>.zip con DB + sidecar + config + manifiesto.
 
-    Hace checkpoint (colapsa el -wal), verifica el contrato de forma y el
-    integrity_check antes de copiar. Si algo no cumple, no exporta.
-    Con comprimir=True (default) empaqueta los 4 archivos en un .zip (DEFLATE)
-    y borra la carpeta (el zip ES el cartucho); con conservar_carpeta=True
-    la deja además para inspección.
-    Returns {zip, carpeta, archivos, filas, ...}.
+    `desde`/`hasta` acotan el cartucho a un rango de fechas (INCREMENTAL): el
+    manifiesto lo declara y el importador lo mergea en vez de reemplazar. Sin
+    ellos el cartucho es completo, que es lo que necesita una PC que arranca
+    de cero o una DB local corrupta.
+
+    Hace checkpoint (colapsa el -wal), verifica el contrato de forma ANTES de
+    construir, y valida el ARTEFACTO que se lleva el cliente con quick_check:
+    el chequeo va sobre la copia, no sobre la fuente (validar 3.7 GB que despues
+    se copian son 12-25 min para no probar nada del archivo que se exporta).
+
+    Con comprimir=True (default) empaqueta en .zip (DEFLATE nivel 6, ~5.4x) y
+    borra la carpeta; con conservar_carpeta=True la deja para inspección.
+    Returns {zip, carpeta, archivos, filas, incremental, rango, ...}.
     """
     from src.core.ventas_db_config import data_dir
 
+    incremental = bool(desde or hasta)
+    d0, h0 = _normaliza_rango(desde, hasta) if incremental else (None, None)
+
     base = data_dir() / "export"
     base.mkdir(parents=True, exist_ok=True)
-    carpeta = Path(destino) if destino else base / f"cartucho-{datetime.now():%Y%m%d-%H%M%S}"
+    sufijo = f"-inc-{d0}" if incremental else ""
+    carpeta = (
+        Path(destino) if destino else base / f"cartucho-{datetime.now():%Y%m%d-%H%M%S}{sufijo}"
+    )
     if carpeta.exists():
         raise FileExistsError(f"ya existe: {carpeta}")
     carpeta.mkdir(parents=True)
@@ -91,14 +199,38 @@ def exportar_cartucho(
     if not db_src.exists():
         raise FileNotFoundError(f"no existe DB local: {db_src}")
 
-    # 1. Contrato + integridad ANTES de copiar (no exportar basura).
+    # 1. Contrato de la FUENTE antes de construir nada (no exportar basura).
     rep = ventas_db.verificar_contrato()
     if not rep["ok"]:
         raise ventas_db.ContratoDBError(f"no se exporta: la DB local no cumple ({rep['detalle']})")
-    chk = sqlite3.connect(f"file:{db_src.as_posix()}?mode=ro", uri=True)
+
+    # 2. Checkpoint: el cartucho no lleva -wal (archivo autocontenido).
+    w = ventas_db.connect(readonly=False)
     try:
-        if chk.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise ValueError("integrity_check != ok, no se exporta")
+        w.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        w.commit()
+    finally:
+        w.close()
+
+    # 3. DB + sidecar: completos, o construidos con el rango aplicado.
+    db_dst = carpeta / "historial.db"
+    sidecar = None
+    if incremental:
+        _db_parcial(db_src, db_dst, d0, h0)
+        if est_src.exists():
+            sidecar = carpeta / "estado_sustentor.db"
+            _sidecar_parcial(est_src, sidecar, d0, h0)
+    else:
+        shutil.copy2(db_src, db_dst)
+        if est_src.exists():
+            sidecar = carpeta / "estado_sustentor.db"
+            shutil.copy2(est_src, sidecar)
+
+    # 4. Stats DEL ARTEFACTO (no de la fuente): es lo que se lleva el cliente.
+    chk = sqlite3.connect(f"file:{db_dst.as_posix()}?mode=ro", uri=True)
+    try:
+        if chk.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise ValueError("quick_check != ok, no se exporta")
         ventas_filas = chk.execute("SELECT COUNT(*) FROM ventas").fetchone()[0]
         fmin, fmax = chk.execute("SELECT MIN(fecha_orig), MAX(fecha_orig) FROM ventas").fetchone()
         soles = chk.execute("SELECT ROUND(COALESCE(SUM(soles),0),2) FROM ventas").fetchone()[0]
@@ -121,22 +253,10 @@ def exportar_cartucho(
         }
     finally:
         chk.close()
-
-    # 2. Checkpoint: el cartucho no lleva -wal (archivo autocontenido).
-    w = ventas_db.connect(readonly=False)
-    try:
-        w.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        w.commit()
-    finally:
-        w.close()
-
-    # 3. Copiar DB + sidecar.
-    db_dst = carpeta / "historial.db"
-    shutil.copy2(db_src, db_dst)
-    sidecar = None
-    if est_src.exists():
-        sidecar = carpeta / "estado_sustentor.db"
-        shutil.copy2(est_src, sidecar)
+    if incremental and not ventas_filas:
+        raise ValueError(
+            f"el rango {d0}..{h0} no tiene filas en la DB local: no se exporta un cartucho vacio"
+        )
 
     # 4. Config sanitizada (allowlist como documentación, sin llaves).
     cfg_segura = _config_sanitizada()
@@ -182,6 +302,11 @@ def exportar_cartucho(
             "fecha_min": fmin,
             "fecha_max": fmax,
             "tablas": tablas,
+            # Un cartucho incremental NO es un historico completo: reemplazar
+            # con el dejaria al cliente solo este rango. El importador lo mira
+            # antes de decidir el modo.
+            "incremental": incremental,
+            "rango_solicitado": {"desde": d0, "hasta": h0} if incremental else None,
         },
         "sidecar": {
             "archivo": "estado_sustentor.db" if sidecar else None,
@@ -196,9 +321,13 @@ def exportar_cartucho(
     out: dict = {
         "carpeta": str(carpeta),
         "ventas_filas": ventas_filas,
+        "fecha_min": fmin,
         "fecha_max": fmax,
         "archivos": 4 if sidecar else 3,
+        "incremental": incremental,
     }
+    if incremental:
+        out["rango"] = {"desde": d0, "hasta": h0}
     if comprimir:
         zpath = carpeta.with_suffix(".zip")
         if zpath.exists():
@@ -625,16 +754,34 @@ def importar_cartucho(origen: Path | str, forzar: str = "") -> dict:
         finally:
             conn_loc.close()
         man_dias = man.get("dias", {})
+        es_incremental = bool(man.get("db", {}).get("incremental"))
         if forzar == "reemplazar":
-            modo = "reemplazar"
+            if es_incremental:
+                # Un cartucho incremental cubre SOLO un rango: reemplazar
+                # dejaría al cliente con ese rango y perdería el resto. Se
+                # ignora el "forzar" en vez de destruir el historial local.
+                log.warning(
+                    "import_cartucho: se pidio reemplazar con un cartucho "
+                    "incremental; se mergea para no perder el historico local"
+                )
+                modo = "mergear"
+            else:
+                modo = "reemplazar"
         elif forzar == "mergear":
             modo = "mergear"
         else:
             faltan = [d for d, v in loc_dias.items() if man_dias.get(d, [0, 0])[0] < v["filas"]]
             modo = "reemplazar" if not faltan else "mergear"
 
-        # 4. Backup SIEMPRE antes de tocar.
-        bkp = backup_db()
+        # 4. Backup SIEMPRE antes de tocar. Con force: el daily puede ya
+        # existir y entonces la copia del estado actual se saltaba en
+        # silencio (bkp=None) y se pisaba la DB sin red de seguridad.
+        bkp = backup_db(force=True, motivo="cartucho")
+        if bkp is None:
+            raise RuntimeError(
+                "No se pudo respaldar la DB antes de aplicar el cartucho; "
+                "se aborta para no perder el historial vigente."
+            )
         conn = ventas_db.connect(readonly=False)
         conn.execute("PRAGMA busy_timeout=120000")
         reporte: dict = {
@@ -731,6 +878,21 @@ def importar_cartucho(origen: Path | str, forzar: str = "") -> dict:
                     )
                 finally:
                     est.close()
+                # RECALCULAR los derivados.
+                #
+                # El merge TAMBIEN los deja viejos: `traer_folios_faltantes`
+                # agrega filas, y `agg_cliente_mes`, `nc_asociadas`,
+                # `stats_cache` y `mes_checksums` describen lo que hay en
+                # `ventas`. Sin esto, el cliente que actualiza por merge queda
+                # con un dashboard que no cuadra con las filas que tiene al
+                # lado. `diagnostico_cobertura` no lo detecta: compara dias,
+                # no numeros.
+                ventas_db.refresh_agg_cliente_mes(conn)
+                ventas_db.populate_nc_asociadas(conn)
+                ventas_db.refresh_stats_cache(conn)
+                n_meses = _recalcular_checksums_meses(conn)
+                conn.commit()
+                reporte.update({"agregados_recalculados": True, "meses_recalculados": n_meses})
                 reporte.update({"merge": m, "sidecar": union})
             conn.commit()
             reporte["cobertura"] = diagnostico_cobertura(conn)

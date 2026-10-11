@@ -46,7 +46,7 @@ class _Harness:
     def _contar_update(self):
         self.updates += 1
 
-    def correr(self, carpeta, exportar):
+    def correr(self, carpeta, exportar, **kw):
         t = _correr_export_cartucho(
             carpeta_export=carpeta,
             status=self.status,
@@ -54,6 +54,7 @@ class _Harness:
             app=self.app,
             page=self.page,
             exportar=exportar,
+            **kw,
         )
         t.join(timeout=10)
         assert not t.is_alive(), "el thread del export no termino"
@@ -134,6 +135,87 @@ class TestMensajesCartucho:
         (exp / "notas.txt").write_text("hola")
         (exp / "cartucho-20260930-101112").mkdir()  # carpeta, no archivo
         assert [p.name for p in _cartucho_previas(exp)] == ["cartucho-20260930-101112.zip"]
+
+
+class TestFlujoExportIncremental:
+    """El rango llega al `exportar` inyectado, y solo cuando hay rango.
+
+    El cartucho completo es "sin argumentos": los callables de prueba (y el
+    contrato del export completo) no llevan kwargs.
+    """
+
+    def test_el_rango_se_pasa_al_export(self, tmp_path):
+        exp = tmp_path / "export"
+        exp.mkdir()
+        recibido = {}
+
+        def _export(desde=None, hasta=None):
+            recibido.update(desde=desde, hasta=hasta)
+            return {"zip": str(exp / "cartucho-x-inc-20260201.zip"), "ventas_filas": 10}
+
+        _Harness().correr(exp, _export, desde="2026-02-01")
+        assert recibido == {"desde": "2026-02-01", "hasta": None}
+
+    def test_el_completo_no_pasa_kwargs(self, tmp_path):
+        """Sin rango no se pasa nada: el completo no cambia de firma."""
+        exp = tmp_path / "export"
+        exp.mkdir()
+        llamado = []
+
+        def _export():
+            llamado.append(True)
+            return {"zip": str(exp / "cartucho-x.zip"), "ventas_filas": 1}
+
+        h = _Harness().correr(exp, _export)
+        assert llamado, "el export deberia haberse llamado"
+        assert "Cartucho creado" in h.status.value
+
+    def test_error_del_incremental_se_muestra(self, tmp_path):
+        exp = tmp_path / "export"
+        exp.mkdir()
+
+        def _export(desde=None, hasta=None):
+            raise ValueError("el rango 2026-02-01..9999-12-31 no tiene filas")
+
+        h = _Harness().correr(exp, _export, desde="2026-02-01")
+        assert "No se pudo crear el cartucho" in h.status.value
+        assert "no tiene filas" in h.status.value
+        assert h.btn.disabled is False, "el boton tiene que volver a habilitarse"
+
+
+class TestMensajeIncremental:
+    """Un incremental tiene que ANUNCIARSE: si el mensaje es el mismo que el
+    del completo, el usuario cree que mando el historico entero y el cliente
+    recibe una ventana y se queda sin el resto sin enterarse."""
+
+    def test_el_incremental_dice_su_rango(self, tmp_path):
+        exp = tmp_path / "export"
+        exp.mkdir()
+        r = {
+            "zip": str(exp / "cartucho-x-inc-20260201.zip"),
+            "ventas_filas": 12345,
+            "zip_mb": 12,
+            "incremental": True,
+            "rango": {"desde": "2026-02-01", "hasta": "9999-12-31"},
+        }
+        texto, aviso = _msgs_cartucho(exp, r=r)
+        assert "incremental" in texto.lower()
+        assert "2026-02-01" in texto
+        assert "no lo reemplaza" in texto, "el mensaje debe aclarar que suma, no pisa"
+        assert "2026-02-01" in aviso
+
+    def test_el_completo_no_se_presentationa_como_incremental(self, tmp_path):
+        exp = tmp_path / "export"
+        exp.mkdir()
+        r = {
+            "zip": str(exp / "cartucho-x.zip"),
+            "ventas_filas": 10,
+            "zip_mb": 800,
+            "incremental": False,
+        }
+        texto, _ = _msgs_cartucho(exp, r=r)
+        assert "incremental" not in texto.lower()
+        assert "Copialo a la otra PC" in texto
 
 
 class TestFlujoExport:
