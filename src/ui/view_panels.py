@@ -82,6 +82,29 @@ def _msgs_cartucho(carpeta_export, r=None, ex=None) -> tuple[str, str]:
     )
 
 
+def validar_fecha_desde(d: str) -> str | None:
+    """Valida el 'desde' libre del cartucho incremental.
+
+    El campo acepta cualquier fecha (ej. 2026-08-01) y carga hasta hoy.
+    Devuelve el mensaje de error si es invalida, None si esta bien. Se valida
+    con el dialogo abierto para no arrancar un export que va a fallar igual
+    minutos despues.
+    """
+    import re as _re
+    from datetime import date as _date
+
+    d = (d or "").strip()
+    if not d:
+        return "Pon la fecha 'desde' o elegi cartucho completo"
+    if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+        return f"Fecha invalida {d!r}: usa AAAA-MM-DD (ej. 2026-08-01)"
+    try:
+        _date(int(d[:4]), int(d[5:7]), int(d[8:10]))
+    except ValueError:
+        return f"Fecha inexistente {d!r}: revisa dia y mes"
+    return None
+
+
 def _correr_export_cartucho(
     carpeta_export, status, btn_export, app, page, exportar, desde=None, hasta=None
 ) -> threading.Thread:
@@ -114,6 +137,21 @@ def _correr_export_cartucho(
             status.value = texto
             status.color = app.G360_SUCCESS
             app.show_snackbar(aviso, app.G360_SUCCESS)
+            # Aviso explícito para compartir: el usuario pidió el ZIP para
+            # llevarlo a otra PC, así que hay que decirle dónde quedó y que
+            # ya lo puede copiar. Sin esto, el "éxito" no dice qué hacer.
+            try:
+                zip_path = (r or {}).get("zip")
+                if zip_path:
+                    import time as _t
+
+                    _t.sleep(0.8)  # deja leer el primero antes de pisarlo
+                    app.show_snackbar(
+                        f"Para compartir: copia {zip_path} a la otra PC",
+                        app.G360_ACCENT,
+                    )
+            except Exception:
+                pass
         except Exception as ex:  # noqa: BLE001 - se muestra al usuario
             texto, aviso = _msgs_cartucho(carpeta_export, ex=ex)
             status.value = texto
@@ -1800,6 +1838,8 @@ class _ViewPanels:
             self.app.show_snackbar("No hay página disponible", self.app.G360_ERROR)
             return
         content, on_open = self._panel_red(page)
+        # AlertDialog NO acepta width (Flet 0.28): el ancho va en el contenido.
+        # Antes estaba en el dialogo y reventaba al abrir ("no termina").
         dlg = ft.AlertDialog(
             title=ft.Row(
                 [
@@ -1808,10 +1848,9 @@ class _ViewPanels:
                 ],
                 spacing=8,
             ),
-            content=content,
+            content=ft.Container(content=content, width=560),
             actions=[ft.TextButton("Cerrar", on_click=lambda _: page.close(dlg))],
             actions_alignment=ft.MainAxisAlignment.END,
-            width=560,
         )
         page.open(dlg)
         on_open()
@@ -3029,6 +3068,42 @@ class _ViewPanels:
                     width=200,
                     hint="Solo para incremental",
                 )
+
+                # Atajos para el caso comun (del 01 a hoy): evitan tipear la
+                # fecha y el formato equivocado, que es el error mas comun.
+                def _poner_desde(_e, valor: str):
+                    fecha.value = valor
+                    try:
+                        fecha.update()
+                    except Exception:
+                        pass
+
+                def _primer_dia_mes() -> str:
+                    from datetime import date as _date
+
+                    return _date.today().replace(day=1).isoformat()
+
+                def _hace_30() -> str:
+                    from datetime import date as _date
+                    from datetime import timedelta as _td
+
+                    return (_date.today() - _td(days=30)).isoformat()
+
+                atajos = _ft.Row(
+                    [
+                        _ft.TextButton(
+                            "Desde el 01",
+                            tooltip="Primer dia del mes actual",
+                            on_click=lambda _: _poner_desde(None, _primer_dia_mes()),
+                        ),
+                        _ft.TextButton(
+                            "Ultimos 30 dias",
+                            tooltip="Hoy menos 30 dias",
+                            on_click=lambda _: _poner_desde(None, _hace_30()),
+                        ),
+                    ],
+                    spacing=4,
+                )
                 info = _ft.Text(
                     "El incremental solo trae las ventas desde esa fecha y se "
                     "suma a lo que el cliente ya tiene. El completo trae todo "
@@ -3048,20 +3123,21 @@ class _ViewPanels:
                         page.close(dlg)
                         _correr()
                         return
-                    d = (fecha.value or "").strip()
-                    if not d:
-                        self.app.show_snackbar(
-                            "Pon la fecha 'desde' o elegi cartucho completo",
-                            self.app.G360_WARNING,
-                        )
+                    # El campo es libre (ej. 2026-08-01) y carga hasta hoy.
+                    err = validar_fecha_desde(fecha.value)
+                    if err:
+                        self.app.show_snackbar(err, self.app.G360_WARNING)
                         return
+                    d = (fecha.value or "").strip()
                     page.close(dlg)
                     _correr(desde=d)
 
                 dlg = _ft.AlertDialog(
                     modal=True,
                     title=_ft.Text("Exportar cartucho", size=14, weight=_ft.FontWeight.BOLD),
-                    content=_ft.Column([opc, fecha, info], spacing=10, tight=True, width=340),
+                    content=_ft.Column(
+                        [opc, fecha, atajos, info], spacing=8, tight=True, width=340
+                    ),
                     actions=[
                         _ft.TextButton("Cancelar", on_click=lambda _: page.close(dlg)),
                         _ft.ElevatedButton("Exportar", on_click=_ok),
@@ -3119,6 +3195,9 @@ class _ViewPanels:
                     status.value = f"✓ Cartucho aplicado ({modo}): {det}"
                     status.color = self.app.G360_SUCCESS
                     self._refrescar_card_db()
+                    # El import cambio la DB: los buscadores tienen que ver
+                    # lo nuevo sin reiniciar. Vale para reemplazar y mergear.
+                    self._recargar_buscadores_tras_datos()
                 except Exception as ex:
                     status.value = f"✗ No se pudo importar: {ex}"
                     status.color = self.app.G360_ERROR
@@ -3780,6 +3859,25 @@ class _ViewPanels:
     # El flujo XLS/intranet completo (_panel_intranet, _gestionar_datos,
     # _modal_login_intranet, _iniciar_descarga) se mantiene funcionando pero
     # es accesible solo desde Configuración → Fuentes.
+
+    def _recargar_buscadores_tras_datos(self):
+        """Recarga vendedores y clientes tras un cambio de datos.
+
+        Se llama al terminar una captura intranet o un import de cartucho
+        exitosos. Sin esto, lo nuevo solo aparece al reiniciar: la card DB
+        se refresca sola, pero los dropdowns se cargan una vez al arrancar.
+        Corre en background como el resto de las recargas; si algo falla,
+        queda para la proxima interaccion (no rompe el flujo).
+        """
+        import threading
+
+        for nombre in ("_recargar_vendedores_dd", "_recargar_clientes_dd"):
+            fn = getattr(self, nombre, None)
+            if callable(fn):
+                try:
+                    threading.Thread(target=fn, daemon=True).start()
+                except Exception:
+                    pass
 
     def _refrescar_card_db(self, async_: bool = False):
         """Actualiza los KPIs de la card DB."""
@@ -4635,6 +4733,12 @@ class _ViewPanels:
                 except Exception:
                     pass
 
+        # Se guarda la referencia para recargar tras cambios de datos
+        # (captura intranet, import de cartucho): sin esto, los clientes
+        # nuevos solo aparecen al reiniciar, porque nadie vuelve a llamar
+        # a este closure. No cambia nada del comportamiento actual.
+        self._recargar_clientes_dd = _refrescar_clientes_dd
+
         # Cargar clientes al iniciar (para interacción inmediata)
         threading.Thread(target=_refrescar_clientes_dd, daemon=True).start()
 
@@ -5344,6 +5448,11 @@ class _ViewPanels:
                         self.busq_vend_status.update()
                 except Exception:
                     pass
+
+        # Se guarda la referencia para recargar tras cambios de datos
+        # (captura intranet, import de cartucho): sin esto, los vendedores
+        # nuevos solo aparecen al reiniciar. No cambia el comportamiento.
+        self._recargar_vendedores_dd = _cargar_vendedores_dd
 
         # Build card — fechas arriba, luego filtros cascada
         def _toggle_pin(kind: str, value: str | None):
@@ -6257,6 +6366,10 @@ class _ViewPanels:
                     db_status.value = _estado_db_txt()
                     _upd(db_status)
                     self._refrescar_card_db()
+                    if not resumen.get("abortado"):
+                        # Hay datos nuevos (OK o parcial): los buscadores
+                        # tienen que verlos sin reiniciar.
+                        self._recargar_buscadores_tras_datos()
                 except Exception as ex:
                     cap_status.value = f"Error: {ex}"
                     cap_status.color = self.app.G360_ERROR
@@ -6401,6 +6514,8 @@ class _ViewPanels:
             )
             return
         content, actions = self._panel_intranet(page, mensaje_previo)
+        # AlertDialog NO acepta width (Flet 0.28): el ancho va en el contenido.
+        # Estaba en el dialogo y reventaba al abrir el "Modo avanzado".
         dlg = ft.AlertDialog(
             title=ft.Row(
                 [
@@ -6413,10 +6528,9 @@ class _ViewPanels:
                 ],
                 spacing=8,
             ),
-            content=content,
+            content=ft.Container(content=content, width=520),
             actions=actions + [ft.TextButton("Cerrar", on_click=lambda _: page.close(dlg))],
             actions_alignment=ft.MainAxisAlignment.END,
-            width=520,
         )
         page.open(dlg)
 

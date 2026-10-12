@@ -218,6 +218,68 @@ class TestMensajeIncremental:
         assert "Copialo a la otra PC" in texto
 
 
+class TestFechaDesdeLibre:
+    """El campo acepta cualquier fecha (ej. 2026-08-01) y carga hasta hoy.
+
+    Se valida con el dialogo abierto: si el formato esta mal, se dice cual
+    se espera sin arrancar un export que va a fallar igual minutos despues.
+    """
+
+    def test_acepta_fecha_valida(self):
+        from src.ui.view_panels import validar_fecha_desde
+
+        assert validar_fecha_desde("2026-08-01") is None
+        assert validar_fecha_desde(" 2026-08-01 ") is None
+
+    def test_rechaza_vacia(self):
+        from src.ui.view_panels import validar_fecha_desde
+
+        assert "Pon la fecha" in (validar_fecha_desde("") or "")
+        assert "Pon la fecha" in (validar_fecha_desde("   ") or "")
+
+    def test_rechaza_formato_invalido(self):
+        from src.ui.view_panels import validar_fecha_desde
+
+        for mala in ("15/01/2026", "2026-8-1", "2026/08/01", "ayer", "20260801"):
+            msg = validar_fecha_desde(mala)
+            assert msg is not None and "AAAA-MM-DD" in msg, mala
+
+    def test_rechaza_fecha_inexistente(self):
+        from src.ui.view_panels import validar_fecha_desde
+
+        for mala in ("2026-13-01", "2026-02-30", "2026-00-10"):
+            msg = validar_fecha_desde(mala)
+            assert msg is not None and "inexistente" in msg.lower(), mala
+
+
+class TestAvisoParaCompartir:
+    """Al terminar, hay que decir donde quedo el ZIP para llevarlo.
+
+    El usuario pidio el cartucho para compartirlo a otra PC: un "exito"
+    generico no dice que hacer. El aviso nombra el archivo.
+    """
+
+    def test_avisa_donde_compartir(self, tmp_path):
+        exp = tmp_path / "export"
+        exp.mkdir()
+        zip_path = exp / "cartucho-x-inc.zip"
+        zip_path.write_bytes(b"x" * 100)
+
+        def _export(desde=None, hasta=None):
+            return {
+                "zip": str(zip_path),
+                "ventas_filas": 10,
+                "zip_mb": 1,
+                "incremental": True,
+                "rango": {"desde": "2026-08-01", "hasta": "9999-12-31"},
+            }
+
+        h = _Harness().correr(exp, _export, desde="2026-08-01")
+        textos = " ".join(m for m, _ in h.snacks)
+        assert "compartir" in textos.lower() or "copia" in textos.lower()
+        assert "cartucho-x-inc.zip" in textos
+
+
 class TestFlujoExport:
     """El flujo real (codigo de produccion), con exportar inyectado."""
 
@@ -232,9 +294,11 @@ class TestFlujoExport:
                 "zip_mb": 655,
             },
         )
-        assert len(h.snacks) == 2
+        # creando + creado + aviso para compartir el ZIP.
+        assert len(h.snacks) == 3
         assert "Creando cartucho" in h.snacks[0][0]
         assert "Cartucho creado" in h.snacks[1][0]
+        assert "cartucho-20260930-101112.zip" in h.snacks[2][0]
         assert h.status.color == "success"
         assert h.btn.disabled is False
 
