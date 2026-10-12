@@ -60,5 +60,10 @@ Thumbs.db
 # Cache de ruff (0 KB pero aparece como untracked en cada `git status`).
 .ruff_cache/
 
-# Dependencias del toolchain de presentaciones (se instalan con npm).
+# Dependencias y generados del toolchain de presentaciones (se regeneran
+# con `npm install --prefix .slides` y `emit_tokens.py`; solo brand.json,
+# el spec y el build script se versionan).
 .slides/node_modules/
+.slides/package.json
+.slides/package-lock.json
+.slides/tokens.cjs
