@@ -1453,6 +1453,9 @@ class _ViewHandlers:
         if not self._ocultar_cero_activo():
             return self.resultado
         try:
+            # La preview MUESTRA las negativas aunque NDB este apagado: es
+            # donde el usuario las ve y decide si activar el check. Lo que
+            # sale solo-positivo es el EXPEDIENTE (ver generar_expediente).
             return _valido(_clonar_sin_cero(self.resultado))
         except Exception:
             return self.resultado
@@ -1815,6 +1818,8 @@ class _ViewHandlers:
             try:
                 from src.ui.expediente_service import _clonar_sin_cero
 
+                # Igual que la vista global: la preview muestra las
+                # negativas para decidir sobre NDB; el expediente decide.
                 vista = _clonar_sin_cero(exp_cli)
             except Exception:
                 vista = exp_cli

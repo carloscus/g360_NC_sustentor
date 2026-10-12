@@ -95,14 +95,40 @@ def generar_expediente(
 
     # Opcional: excluir filas en 0.00 (estado "coincide": |DIFERENCIA|≈0).
     # Se clona el resultado con dataframes filtrados para que los subresultados
-    # (por cliente / factura) hereden el filtrado. Las negativas se conservan.
+    # (por cliente / factura) hereden el filtrado. Las negativas se conservan
+    # SOLO si se va a calcular NDB; si no, no son candidatas a nada y un
+    # expediente NC tiene que salir todo positivo.
     if ocultar_cero:
-        resultado = _clonar_sin_cero(resultado)
+        resultado = _clonar_sin_cero(resultado, conservar_negativas=generar_nota_debito)
         if resultado is None:
             logger.info("expediente: sin filas con diferencia; no se genera nada")
             return []
         res = resultado.resultado
         df_res = res.dataframe if res is not None else pd.DataFrame()
+
+    # NC y NDB son independientes: los archivos normales llevan SOLO
+    # positivas (+ceros si ocultar esta apagado). Las negativas ya estan en
+    # `df_nd` si se pidieron, y no vuelven a entrar por aca. Pero si no queda
+    # nada positivo, no se puede seguir por el camino normal (clientes,
+    # generadores): en ese caso solo tiene sentido el CalculoND, y unicamente
+    # si se pidio.
+    resultado = _clonar_solo_positivas(resultado)
+    if resultado is None:
+        if df_nd is not None and not df_nd.empty:
+            logger.info("expediente: solo hay negativas; sale unicamente CalculoND")
+            return _solo_nd_sin_positivas(
+                df_nd=df_nd,
+                tipo_actual=tipo_actual,
+                df_historial=df_historial,
+                cliente_value=cliente_value,
+                vendedor_value=vendedor_value,
+                vendedor_display=vendedor_display,
+                desktop_path=desktop_path,
+            )
+        logger.info("expediente: sin filas positivas; no se genera nada")
+        return []
+    res = resultado.resultado
+    df_res = res.dataframe if res is not None else pd.DataFrame()
 
     # Identificar clientes del resultado
     clientes = []
@@ -211,16 +237,17 @@ def _recalcular_resumen(res_resumen, df, df_x=None, **extra):
     return resumen
 
 
-def _clonar_sin_cero(resultado):
+def _clonar_sin_cero(resultado, conservar_negativas: bool = True):
     """Clona el expediente excluyendo filas en 0.00.
 
     Excluye:
     - |DIFERENCIA| ≈ 0 (coincidencia exacta, AL02)
     - ALERTA contiene "AL11" (redondeo acumulable dentro de tolerancia)
 
-    Las diferencias negativas SE CONSERVAN aunque su MONTO_NC sea 0: son
-    candidatas a Nota de Débito y ocultarlas vaciaba la vista y rompía el
-    flujo NDB (antes se filtraban por MONTO_NC == 0).
+    Las diferencias negativas SE CONSERVAN solo si son candidatas a Nota de
+    Débito (`conservar_negativas`). Si NDB está apagado, una negativa no es
+    candidata a nada: dejarla mete ruido en un expediente NC que debería ser
+    todo positivo, y confunde (AL02 dice "sin NC" pero la fila está ahí).
     """
     res = resultado.resultado
     if res is None:
@@ -235,6 +262,8 @@ def _clonar_sin_cero(resultado):
         # Excluir diferencia unitaria cercana a cero
         if "DIFERENCIA" in d.columns:
             keep &= d["DIFERENCIA"].fillna(0).abs() > 0.001
+            if not conservar_negativas:
+                keep &= d["DIFERENCIA"].fillna(0) >= -0.001
         elif "MONTO_NC" in d.columns:
             # Sin columna de diferencia (rebate): el 0.00 es el monto mismo.
             keep &= pd.to_numeric(d["MONTO_NC"], errors="coerce").fillna(0) > 0.001
@@ -852,6 +881,85 @@ def _generar_calculo(
         observaciones=observaciones,
         modalidad=modalidad,
     )
+
+
+def _clonar_solo_positivas(resultado):
+    """Clona el expediente con SOLO filas de diferencia no-negativa.
+
+    NC y NDB son independientes: los archivos normales (Informe, Calculo,
+    Historico) nunca llevan negativas, haya o no NDB. Las negativas van
+    unicamente al CalculoND via `df_nd`, que ya se extrajo antes. Sin esto,
+    con NDB prendido las negativas entraban tambien a los archivos de NC.
+    Devuelve None si no queda nada positivo.
+    """
+    res = resultado.resultado
+    if res is None:
+        return None
+    df = res.dataframe
+    df_x = res.get_excel() if hasattr(res, "get_excel") else pd.DataFrame()
+
+    def _flt(d):
+        if d is None or d.empty or "DIFERENCIA" not in d.columns:
+            return d
+        return d[d["DIFERENCIA"].fillna(0) >= -0.001].copy()
+
+    df_f, df_x_f = _flt(df), _flt(df_x)
+    if (df_f is None or df_f.empty) and (df_x_f is None or df_x_f.empty):
+        return None
+    sub_res = RecognitionResult(
+        dataframe=df_f if df_f is not None else pd.DataFrame(),
+        dataframe_excel=df_x_f if df_x_f is not None else df_f,
+        resumen=_recalcular_resumen(res.resumen, df_f, df_x_f),
+        alertas=res.alertas,
+        trazabilidad=res.trazabilidad,
+    )
+    sub_res.metricas = getattr(res, "metricas", {}) or {}
+    return SimpleNamespace(resultado=sub_res, datos=resultado.datos, contexto=resultado.contexto)
+
+
+def _solo_nd_sin_positivas(
+    *,
+    df_nd,
+    tipo_actual,
+    df_historial,
+    cliente_value,
+    vendedor_value,
+    vendedor_display,
+    desktop_path,
+) -> list:
+    """Genera unicamente CalculoND cuando no hay nada positivo.
+
+    Caso borde de la independencia NC/NDB: todo el resultado son negativas,
+    asi que no hay archivos normales que hacer. Pero el CalculoND pedido
+    tiene que salir igual. Agrupa por cliente como el camino normal.
+    """
+    dirs = []
+    if df_nd is None or df_nd.empty:
+        return dirs
+    grupos = (
+        list(df_nd.groupby("CLIENTE", dropna=False))
+        if "CLIENTE" in df_nd.columns
+        else [(cliente_value or "", df_nd)]
+    )
+    for cli, sub in grupos:
+        cli = (
+            str(cli).strip()
+            if str(cli).strip() and str(cli).lower() != "nan"
+            else (cliente_value or "")
+        )
+        doc_ref = ""
+        if "FACTURA" in sub.columns:
+            docs = [str(v).strip() for v in sub["FACTURA"].dropna().unique() if str(v).strip()]
+            doc_ref = docs[0] if len(docs) == 1 else ""
+        serie, nro = _extract_serie_nro(doc_ref)
+        exp_id = build_expediente_id(tipo_actual, cli, serie, nro)
+        exp_dir = desktop_path / exp_id
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        nd_path = resolve_output_path(exp_dir / build_documento_nombre(exp_id, "CalculoND", "xlsx"))
+        _generar_calculo_nd(sub, tipo_actual, cli, vendedor_display, doc_ref, "", nd_path)
+        dirs.append(exp_dir)
+        logger.info("expediente %s: solo CalculoND (sin positivas)", exp_id)
+    return dirs
 
 
 def _decidir_solo_nd(solo_ndb: bool, hay_nd: bool) -> bool:
