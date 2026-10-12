@@ -59,3 +59,6 @@ Thumbs.db
 
 # Cache de ruff (0 KB pero aparece como untracked en cada `git status`).
 .ruff_cache/
+
+# Dependencias del toolchain de presentaciones (se instalan con npm).
+.slides/node_modules/
