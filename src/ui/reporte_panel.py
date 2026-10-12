@@ -192,7 +192,11 @@ class ReportePanel:
             on_click=self._exportar,
         )
         self.status = ft.Text("", size=G360Theme.TYPE_BODY, color=muted)
-        self.resultados = ft.Column([], spacing=6, scroll=ft.ScrollMode.AUTO, expand=True)
+        # Sin scroll ni expand propios: el scroll vertical lo da el contenedor
+        # de la vista (ReconocimientoView.build). Un Column scrolleable con
+        # expand dentro de un padre sin altura acotada reclama alto infinito:
+        # overflow estático y previews que nunca se pintan.
+        self.resultados = ft.Column([], spacing=6, tight=True)
 
         # Píldora icono+texto (un chevron solo no se identifica como botón).
         self._chevron = ft.ElevatedButton(
@@ -436,6 +440,16 @@ class ReportePanel:
         self._update()
 
     def _scroll(self):
+        # El scroll vertical vive en la columna interna de la raiz de reporte
+        # (patron sustento): se scrollea ella, no la pagina. Fallback a la
+        # pagina por si la vista aun no monto su scroll.
+        try:
+            interno = getattr(self.view, "_reporte_scroll", None)
+            if interno is not None:
+                interno.scroll_to(key="reportes_card", duration=250)
+                return
+        except Exception:
+            pass
         try:
             page = self._page()
             if page is not None:
@@ -751,7 +765,9 @@ class ReportePanel:
                 )
             )
             self.resultados.controls.append(
-                ft.Row([tabla], scroll=ft.ScrollMode.AUTO, expand=False)
+                # Solo scroll horizontal (eje del Row): el vertical lo maneja
+                # el scroll de la vista. Sin expand: la tabla define su alto.
+                ft.Row([tabla], scroll=ft.ScrollMode.AUTO)
             )
 
         # Los que no se pudieron consultar van al final, marcados como error y

@@ -1429,8 +1429,13 @@ class _ViewPanels:
         sola): alternar vistas solo cambia que raiz esta montada, ningun
         control vive en dos padres a la vez.
 
-        Sin `expand` en la columna: el contenedor de la vista ya scrollea
-        (ver `build`), y un expand aqui no tendria altura que expandir.
+        El scroll vertical vive AQUI (columna interna con scroll, patron
+        sustento): `build` crea un Column scrolleable pero `_renderizar_ui`
+        y `mostrar_reporte` lo reemplazan por esta raiz, asi que sin scroll
+        propio la vista queda estatica con overflow y la parte baja
+        (previews) nunca se alcanza. La raiz sigue sin `expand`
+        (test_cambio_de_zona); el que se expande es el Container interno,
+        que acota el alto del scroll al alto disponible del contenedor.
         """
         raiz = getattr(self, "_reporte_root", None)
         if raiz is None:
@@ -1439,12 +1444,18 @@ class _ViewPanels:
                 ft.Icons.ARROW_BACK_OUTLINED,
                 on_click=lambda _: self.mostrar_sustento(),
             )
-            self._reporte_root = raiz = ft.Column(
+            self._reporte_scroll = ft.Column(
                 [
                     ft.Row([volver], alignment=ft.MainAxisAlignment.START),
                     self.reporte_panel.construir_card(),
                 ],
                 spacing=14,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                scroll=ft.ScrollMode.AUTO,
+            )
+            self._reporte_root = raiz = ft.Column(
+                [ft.Container(content=self._reporte_scroll, expand=True)],
+                spacing=0,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             )
         return raiz
