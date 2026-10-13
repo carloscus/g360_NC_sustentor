@@ -216,3 +216,222 @@ def test_pipeline_uses_live_history_checks_for_exact_note():
     assert row["PRECIO_HIST"] == 9.0
     assert row["MONTO_NC"] == 100.0
     assert "APLICADA" in row["ALERTA"]
+class TestReferenciaSinLetraDeTipo:
+    """El folio con SKU y numero tiene que matchear aunque falte la letra.
+
+    El ERP exporta la referencia a veces como "F204-67630" y a veces como
+    "204-67630". Antes, sin letra no matcheaba con el DOC_ID (que la lleva)
+    y la NC caia a revision manual aunque fuera exacta. Ahora hay fallback
+    insensible a la letra, solo si es inequivoco (un unico candidato).
+    """
+
+    def _hist(self, ref_col, ref_val):
+        base = {
+            "CODIGO": "09008",
+            "CANTIDAD": 720.0,
+            "SOLES": -1800.0,
+            "TIPO_DOC": "NCR",
+            "SERIE": "215",
+            "NUMERO": "31630",
+            "DOC_ID": "NCR215-31630",
+            "TIPO_CLASE": "nota_credito",
+            "COD_CLIENTE": "C1",
+            "FACTURA_REF": "",
+            "FACTURA_REF_SERIE": "",
+            "FACTURA_REF_NRO": "",
+            "REFERENCIA": "",
+        }
+        base[ref_col] = ref_val
+        fac = {
+            "CODIGO": "09008",
+            "CANTIDAD": 720.0,
+            "SOLES": 1800.0,
+            "TIPO_DOC": "F01",
+            "SERIE": "204",
+            "NUMERO": "67630",
+            "DOC_ID": "F204-67630",
+            "TIPO_CLASE": "factura",
+            "FACTURA_REF": "",
+            "FACTURA_REF_SERIE": "",
+            "FACTURA_REF_NRO": "",
+            "REFERENCIA": "",
+            "COD_CLIENTE": "C1",
+        }
+        import pandas as pd
+
+        return pd.DataFrame([fac, base])
+
+    def _options(self):
+        return {
+            "facturas": {"mostrar": True, "usar": True},
+            "nc": {"mostrar": True, "usar": True},
+            "ndb": {"mostrar": True, "usar": False},
+        }
+
+    def _rec(self, ref_col, ref_val):
+        from src.core.nc_reconciliation import reconciliar_notas
+
+        rec = reconciliar_notas(
+            self._hist(ref_col, ref_val),
+            documentos=self._options(),
+            modalidad="individual",
+        )
+        assert len(rec) == 1
+        return list(rec.values())[0]
+
+    def test_con_letra_aplica(self):
+        v = self._rec("FACTURA_REF", "F204-67630")
+        assert v["qty_return"] == 720.0
+        assert v["applied"] is True
+
+    def test_sin_letra_aplica_igual(self):
+        v = self._rec("FACTURA_REF", "204-67630")
+        assert v["qty_return"] == 720.0, "el fallback tiene que rescatarla"
+        assert v["applied"] is True
+
+    def test_referencia_libre_aplica(self):
+        v = self._rec("REFERENCIA", "Devolucion factura 204-67630 por reclamo")
+        assert v["qty_return"] == 720.0
+        assert v["applied"] is True
+
+    def test_avisa_que_fue_aproximada(self):
+        v = self._rec("FACTURA_REF", "204-67630")
+        textos = " ".join(v.get("alerts", []))
+        assert "ref. aproximada" in textos
+        v2 = self._rec("FACTURA_REF", "F204-67630")
+        textos2 = " ".join(v2.get("alerts", []))
+        assert "ref. aproximada" not in textos2, "con letra no hay nada que avisar"
+
+    def test_ambiguo_no_adivina(self):
+        """Si existen F204-67630 y B204-67630, '204-67630' no elige solo."""
+        import pandas as pd
+
+        df = self._hist("FACTURA_REF", "204-67630")
+        extra = pd.DataFrame(
+            [
+                {
+                    "CODIGO": "09008",
+                    "CANTIDAD": 720.0,
+                    "SOLES": 1800.0,
+                    "TIPO_DOC": "F02",
+                    "SERIE": "B04",
+                    "NUMERO": "67630",
+                    "DOC_ID": "B204-67630",
+                    "TIPO_CLASE": "factura",
+                    "FACTURA_REF": "",
+                    "FACTURA_REF_SERIE": "",
+                    "FACTURA_REF_NRO": "",
+                    "REFERENCIA": "",
+                    "COD_CLIENTE": "C1",
+                }
+            ]
+        )
+        df = pd.concat([df, extra], ignore_index=True)
+        from src.core.nc_reconciliation import reconciliar_notas
+
+        rec = reconciliar_notas(df, documentos=self._options(), modalidad="individual")
+        # Ninguna de las dos facturas debe quedar aplicada por adivinanza.
+        aplicadas = [v for v in rec.values() if v.get("applied")]
+        assert aplicadas == [], "ambiguo: mejor manual que mal aplicado"
+
+class TestNotaHuerfana:
+    """NC que referencia factura conocida pero SKU ajeno: avisa, no calcula.
+
+    Antes se perdia en silencio: ni entraba al calculo ni avisaba. Ahora
+    deja una alerta AJENA con cantidad y monto en la entrada de la factura,
+    sin entrar a preview ni a calculos. El monto importa para no exceder el
+    total de la factura con NCs futuras.
+    """
+
+    def _hist_huerfana(self, sku="99999", cant=10.0, soles=-25.0):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [
+                {
+                    "CODIGO": "09008",
+                    "CANTIDAD": 720.0,
+                    "SOLES": 1800.0,
+                    "TIPO_DOC": "F01",
+                    "SERIE": "204",
+                    "NUMERO": "67630",
+                    "DOC_ID": "F204-67630",
+                    "TIPO_CLASE": "factura",
+                    "FACTURA_REF": "",
+                    "COD_CLIENTE": "C1",
+                    "CANTIDAD_FAE": 0.0,
+                },
+                {
+                    "CODIGO": sku,
+                    "CANTIDAD": cant,
+                    "SOLES": soles,
+                    "TIPO_DOC": "NCR",
+                    "SERIE": "215",
+                    "NUMERO": "31630",
+                    "DOC_ID": "NCR215-31630",
+                    "TIPO_CLASE": "nota_credito",
+                    "FACTURA_REF": "F204-67630",
+                    "COD_CLIENTE": "C1",
+                    "CANTIDAD_FAE": 0.0,
+                },
+            ]
+        )
+
+    def _options(self):
+        return {
+            "facturas": {"mostrar": True, "usar": True},
+            "nc": {"mostrar": True, "usar": True},
+            "ndb": {"mostrar": True, "usar": False},
+        }
+
+    def test_avisa_con_monto_y_no_aplica(self):
+        from src.core.nc_reconciliation import reconciliar_notas
+
+        rec = reconciliar_notas(
+            self._hist_huerfana(), documentos=self._options(), modalidad="individual"
+        )
+        assert len(rec) == 1
+        v = list(rec.values())[0]
+        assert v.get("applied") is False
+        textos = " ".join(v.get("alerts", []))
+        assert "AJENA" in textos
+        assert "99999" in textos
+        assert "25.00" in textos, "el monto tiene que estar para no exceder el total"
+
+    def test_no_mete_el_sku_ajeno_al_calculo(self):
+        """El 99999 no puede aparecer como linea calculable."""
+        from src.core.nc_reconciliation import reconciliar_notas
+
+        rec = reconciliar_notas(
+            self._hist_huerfana(), documentos=self._options(), modalidad="individual"
+        )
+        assert all("99999" not in str(k) for k in rec.keys())
+
+    def test_dos_parciales_no_aplican(self):
+        """Dos devoluciones parciales no se combinan para aplicar."""
+        import pandas as pd
+
+        from src.core.nc_reconciliation import reconciliar_notas
+
+        base = self._hist_huerfana(sku="09008", cant=100.0, soles=-250.0)
+        extra = pd.DataFrame(
+            [
+                {
+                    "CODIGO": "09008",
+                    "CANTIDAD": 100.0,
+                    "SOLES": -250.0,
+                    "TIPO_DOC": "NCR",
+                    "SERIE": "215",
+                    "NUMERO": "2",
+                    "DOC_ID": "NCR215-2",
+                    "TIPO_CLASE": "nota_credito",
+                    "FACTURA_REF": "F204-67630",
+                    "COD_CLIENTE": "C1",
+                    "CANTIDAD_FAE": 0.0,
+                }
+            ]
+        )
+        hist = pd.concat([base, extra], ignore_index=True)
+        rec = reconciliar_notas(hist, documentos=self._options(), modalidad="individual")
+        assert all(v.get("applied") is not True for v in rec.values())
+

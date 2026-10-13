@@ -214,8 +214,47 @@ class DevolucionFisicaStrategy:
                 "_f", ascending=asc, na_position="last", kind="mergesort"
             )
 
+            # Si el pedido dice de qué factura(s) salieron las unidades, esas
+            # van primero: una devolución de "la 204-67630" no tiene por qué
+            # repartirse en 4 facturas viejas. Se preserva el orden dentro de
+            # cada grupo (partición estable), así que el FIFO/LIFO sigue
+            # valiendo para el resto.
+            pedidas = [str(d).strip() for d in (info.get("facturas") or []) if str(d).strip()]
+
+            def _aplana(doc: str) -> str:
+                return "".join(c for c in str(doc or "").strip().upper() if c.isalnum())
+
+            pedidas_norm = {_aplana(d) for d in pedidas}
+            if pedidas_norm:
+                es_pedida = hist_sku["_doc"].map(
+                    lambda d: (
+                        _aplana(d) in pedidas_norm
+                        or any(
+                            _aplana(d).endswith(p) or p.endswith(_aplana(d)) for p in pedidas_norm
+                        )
+                    )
+                )
+                pedidas_doc = hist_sku[es_pedida]
+                resto_doc = hist_sku[~es_pedida]
+                if pedidas_doc.empty:
+                    alertas.append(
+                        BusinessAlert(
+                            tipo="warning",
+                            severidad="media",
+                            sku=sku,
+                            mensaje=generar_texto_alerta(
+                                "AL06",
+                                sku=sku,
+                                detalle=f"las facturas pedidas ({', '.join(pedidas)}) no estan en el historial",
+                            ),
+                            motor=MOTOR,
+                        )
+                    )
+                hist_sku = pd.concat([pedidas_doc, resto_doc], ignore_index=True)
+
             restante = solicitud
             cortes: list = []
+            usadas_fuera: list = []
             for _, linea in hist_sku.iterrows():
                 if restante <= 0:
                     break
@@ -224,6 +263,10 @@ class DevolucionFisicaStrategy:
                 if tomar <= 0:
                     continue
                 doc = str(linea["_doc"] or linea.get("DOC_ID", "") or "").strip()
+                if pedidas_norm and not any(
+                    _aplana(doc).endswith(p) or p.endswith(_aplana(doc)) for p in pedidas_norm
+                ):
+                    usadas_fuera.append(doc)
                 precio, detalle_nc = _precio_neto_linea(
                     doc, sku, cant_linea, float(linea["SOLES"]), notas
                 )
@@ -254,6 +297,24 @@ class DevolucionFisicaStrategy:
                         sku=sku,
                         mensaje=generar_texto_alerta(
                             "AL09", sku=sku, asignado=asignado, solicitado=solicitud
+                        ),
+                        motor=MOTOR,
+                    )
+                )
+            # Trazabilidad de folios: si se pidieron documentos puntuales y la
+            # asignacion toco otros, queda registrado con nombre y apellido.
+            # Sin esto, una devolucion "de la 204-67630" que en realidad salio
+            # de 4 facturas viejas no se puede auditar.
+            if pedidas_norm and usadas_fuera:
+                usados = sorted(set(usadas_fuera))
+                alertas.append(
+                    BusinessAlert(
+                        tipo="info",
+                        severidad="media",
+                        sku=sku,
+                        mensaje=(
+                            f"Devolucion pedida de {', '.join(pedidas)}: no alcanzo "
+                            f"y se completo con {', '.join(usados)}. Revisa si corresponde."
                         ),
                         motor=MOTOR,
                     )

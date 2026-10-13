@@ -349,3 +349,97 @@ class TestArchivoDeDevoluciones:
     def test_sin_archivo_devuelve_vacio(self):
         assert _leer_devoluciones(None) == {}
         assert _leer_devoluciones("no-existe.xlsx") == {}
+
+
+class TestFacturaApuntada:
+    """Si el pedido dice de que factura salieron las unidades, van de ahi.
+
+    Sin factura pedida, la asignacion reparte por antiguedad (FIFO/LIFO) y
+    una devolucion puede salir en N filas de facturas viejas. Con factura
+    pedida, esas van primero y el resto solo completa lo que falte, avisando
+    con nombre y apellido que folios se tocaron.
+    """
+
+    def _hist_4_docs(self):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "CODIGO": ["09008"] * 4,
+                "ARTICULO": ["VINIFILE X"] * 4,
+                "CANTIDAD": [200, 200, 200, 720],
+                "SOLES": [500.0, 500.0, 500.0, 1800.0],
+                "FECHA": pd.to_datetime(["2026-01-05", "2026-01-12", "2026-02-03", "2026-03-10"]),
+                "TIPO_DOC": ["F01"] * 4,
+                "SERIE": ["204"] * 4,
+                "NUMERO": ["10", "11", "12", "67630"],
+                "COD_CLIENTE": ["C1"] * 4,
+                "DOC_CLIENTE": ["R1"] * 4,
+                "CLIENTE": ["CLI"] * 4,
+                "TIPO_CLASE": ["factura"] * 4,
+            }
+        )
+
+    def _dev(self, cantidad, facturas=None):
+        d = {"cantidad": cantidad, "sku_original": "09008"}
+        if facturas is not None:
+            d["facturas"] = facturas
+        return {"09008": d}
+
+    def test_sin_factura_reparte_en_viejas(self):
+        r = _correr(
+            "individual", devoluciones=self._dev(720), hist=self._hist_4_docs(), sort="fecha_asc"
+        )
+        df = r.resultado.dataframe
+        assert len(df) == 4, "sin pedir, FIFO toca las 4 lineas"
+        assert df["CANTIDAD"].sum() == 720
+
+    def test_con_factura_sale_directo_de_ahi(self):
+        r = _correr(
+            "individual",
+            devoluciones=self._dev(720, ["204-67630"]),
+            hist=self._hist_4_docs(),
+        )
+        df = r.resultado.dataframe
+        assert len(df) == 1, "toda de la pedida: una sola fila"
+        assert "67630" in str(df["FACTURA"].iloc[0])
+        assert df["CANTIDAD"].sum() == 720
+        assert df["MONTO_NC"].sum() == 1800.0
+
+    def test_acepta_con_o_sin_letra_de_tipo(self):
+        """El usuario escribe 204-67630; el historial trae F204-67630."""
+        for pedido in ("204-67630", "F204-67630"):
+            r = _correr(
+                "individual",
+                devoluciones=self._dev(720, [pedido]),
+                hist=self._hist_4_docs(),
+            )
+            df = r.resultado.dataframe
+            assert len(df) == 1, pedido
+            assert "67630" in str(df["FACTURA"].iloc[0])
+
+    def test_si_no_alcanza_completa_y_avisa_los_folios(self):
+        r = _correr(
+            "individual",
+            devoluciones=self._dev(720, ["204-11"]),
+            hist=self._hist_4_docs(),
+        )
+        df = r.resultado.dataframe
+        assert df["CANTIDAD"].sum() == 720, "no se pierde ni una unidad"
+        msgs = " ".join(getattr(a, "mensaje", "") for a in r.resultado.alertas)
+        assert "se completo con" in msgs
+        assert "204-11" in msgs, "tiene que nombrar la pedida"
+
+
+    def test_factura_inexistente_avisa_y_sigue_fifo(self):
+        r = _correr(
+        "individual",
+        devoluciones=self._dev(720, ["999-00000"]),
+        hist=self._hist_4_docs(),
+        sort="fecha_asc",
+        )
+        df = r.resultado.dataframe
+        assert len(df) == 4, "sin la pedida en el historial, cae al orden normal"
+        assert df["CANTIDAD"].sum() == 720
+        msgs = " ".join(getattr(a, "mensaje", "") for a in r.resultado.alertas)
+        assert "999-00000" in msgs

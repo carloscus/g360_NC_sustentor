@@ -37,6 +37,85 @@ from src.render.g360_styles import (
 class _CalculoWriter:
     """Métodos de las hojas de cálculo numérico (mixin de ExcelRenderer)."""
 
+    # ── formato condicional de seguimiento (lectura rápida) ──────────
+    # DIF. UNITARIA > 0 en verde (filas que generan NC); = 0 en gris
+    # (sin crédito, se apagan para que el ojo vaya a lo que suma).
+    # Precio histórico = 0 en ámbar (sin base no hay con qué comparar).
+    # Solo reglas CellIs sobre el valor calculado (era-2007: las evalúan
+    # Excel y LibreOffice). Sin barras ni escalas (ruido visual).
+    _CF_DIF_POS_FILL = "C6EFCE"
+    _CF_DIF_POS_FONT = "006100"
+    _CF_CERO_FONT = "9C9C9C"
+    _CF_HIST_MISS_FILL = "FFEB9C"
+    _CF_HIST_MISS_FONT = "9C6500"
+    _CF_DIF_HEADERS = frozenset({"DIF. UNITARIA"})
+    # Precios base/atendidos según el tipo (nunca lista ni neto): en
+    # diferencia_precio el histórico vive en PRECIO UNID. (tabla 1) y
+    # PRECIO HIST. EFECTIVO (tabla 2); en otros tipos, PRECIO ATENDIDO,
+    # PRECIO HIST. o PRECIO UNIT.
+    _CF_HIST_HEADERS = frozenset(
+        {
+            "PRECIO HIST.",
+            "PRECIO HIST. EFECTIVO",
+            "PRECIO ATENDIDO",
+            "PRECIO UNID.",
+            "PRECIO UNIT.",
+        }
+    )
+
+    def _cf_calculo_columnas(self, ws, col_defs, r0, r1):
+        """Aplica el CF de seguimiento a DIF e histórico en un rango de datos.
+
+        `col_defs` es la lista de columnas de la tabla y [r0, r1] sus filas
+        de datos (sin encabezado ni subtotales). Sin filas no hace nada.
+        """
+        if r1 < r0:
+            return
+        from openpyxl.formatting.rule import CellIsRule
+
+        for ci, cd in enumerate(col_defs):
+            h = cd.get("header")
+            if h not in self._CF_DIF_HEADERS and h not in self._CF_HIST_HEADERS:
+                continue
+            col = get_column_letter(ci + 1)
+            rango = f"{col}{r0}:{col}{r1}"
+            if h in self._CF_DIF_HEADERS:
+                ws.conditional_formatting.add(
+                    rango,
+                    CellIsRule(
+                        operator="greaterThan",
+                        formula=["0"],
+                        fill=PatternFill(
+                            start_color=self._CF_DIF_POS_FILL,
+                            end_color=self._CF_DIF_POS_FILL,
+                            fill_type="solid",
+                        ),
+                        font=Font(color=self._CF_DIF_POS_FONT, bold=True),
+                    ),
+                )
+                ws.conditional_formatting.add(
+                    rango,
+                    CellIsRule(
+                        operator="equal",
+                        formula=["0"],
+                        font=Font(color=self._CF_CERO_FONT),
+                    ),
+                )
+            else:
+                ws.conditional_formatting.add(
+                    rango,
+                    CellIsRule(
+                        operator="equal",
+                        formula=["0"],
+                        fill=PatternFill(
+                            start_color=self._CF_HIST_MISS_FILL,
+                            end_color=self._CF_HIST_MISS_FILL,
+                            fill_type="solid",
+                        ),
+                        font=Font(color=self._CF_HIST_MISS_FONT, bold=True),
+                    ),
+                )
+
     def _fuente_base(self, cell):
         """Normaliza la celda de datos a Calibri 10 (conserva énfasis y color)."""
         f = cell.font
@@ -431,6 +510,7 @@ class _CalculoWriter:
 
         last_data_row = r - 1
         if last_data_row >= data_start:
+            self._cf_calculo_columnas(ws, col_defs, data_start, last_data_row)
             monto_nc_col_idx = None
             for ci, cd in enumerate(col_defs):
                 if cd.get("highlight"):
@@ -643,6 +723,9 @@ class _CalculoWriter:
                     )
 
             r += 1
+
+        t1_last_data = r - 1
+        self._cf_calculo_columnas(ws, t1_cols, t1_data_start, t1_last_data)
 
         # --- Gap between tables: calculo explicativo ---
         r += 1
@@ -886,6 +969,7 @@ class _CalculoWriter:
             r += 1
 
         t2_last_data = r - 1
+        self._cf_calculo_columnas(ws, t2_cols, t2_data_start, t2_last_data)
 
         # --- Subtotal / IGV / Total rows ---
         highlight_idx = None

@@ -441,13 +441,19 @@ def _resumen_notas_por_sku(df_notas: pd.DataFrame) -> dict:
 
 
 def _leer_devoluciones(path) -> dict:
-    """Lee el archivo de devoluciones → {sku: {cantidad, fecha, articulo}}.
+    """Lee el archivo de devoluciones → {sku: {cantidad, fecha, articulo, facturas}}.
 
     Acepta los nombres de columna de la plantilla (`CODIGO_SKU`,
     `CANTIDAD_DEVUELTA`, `FECHA_DEVOLUCION`) y los equivalentes internos
     (`CODIGO`, `CANTIDAD`, `FECHA`) que llegan si el archivo ya pasó por el
     normalizador. Si el mismo SKU aparece en varias filas, las cantidades se
     suman (una devolución puede venir en varios lotes).
+
+    Columna opcional FACTURA (o FACTURAS/DOCUMENTO/DOC): de qué documento(s)
+    salieron las unidades. Acepta varios separados por coma o punto y coma.
+    Si viene, la asignación prioriza esos documentos en vez de repartir por
+    antigüedad: una devolución de "la factura 204-67630" no tiene por qué
+    salir en 4 filas de facturas viejas.
     """
     if not path:
         return {}
@@ -467,6 +473,7 @@ def _leer_devoluciones(path) -> dict:
         return {}
     col_fecha = next((c for c in ("FECHA_DEVOLUCION", "FECHA") if c in df.columns), "")
     col_art = "ARTICULO" if "ARTICULO" in df.columns else ""
+    col_fac = next((c for c in ("FACTURA", "FACTURAS", "DOCUMENTO", "DOC") if c in df.columns), "")
     salida: dict = {}
     for _, r in df.iterrows():
         sku = str(r[col_sku]).strip()
@@ -479,13 +486,19 @@ def _leer_devoluciones(path) -> dict:
         # `sku_original` conserva el código tal como vino del ERP (con ceros a
         # la izquierda): el informe debe mostrar ese, no la versión normalizada.
         item = salida.setdefault(
-            sku, {"cantidad": 0.0, "fecha": "", "articulo": "", "sku_original": sku}
+            sku, {"cantidad": 0.0, "fecha": "", "articulo": "", "sku_original": sku, "facturas": []}
         )
         item["cantidad"] += cant
         if col_art and not item["articulo"]:
             item["articulo"] = str(r[col_art] or "").strip()
         if col_fecha and not item["fecha"]:
             item["fecha"] = str(r[col_fecha] or "").strip()
+        if col_fac:
+            crudo = str(r[col_fac] or "")
+            for parte in crudo.replace(";", ",").split(","):
+                parte = parte.strip()
+                if parte and parte.lower() != "nan" and parte not in item["facturas"]:
+                    item["facturas"].append(parte)
     return {k: v for k, v in salida.items() if v["cantidad"] != 0}
 
 

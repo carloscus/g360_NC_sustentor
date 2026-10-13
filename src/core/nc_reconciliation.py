@@ -129,13 +129,52 @@ def reconciliar_notas(
         return {}
 
     grouped: dict[tuple[str, ...], dict] = {}
+
+    # Indice sin letra de tipo para el fallback: "F204-67630" y "204-67630"
+    # son el mismo documento cuando el ERP exporta la referencia sin letra.
+    # Solo se usa si el matcheo exacto falla Y hay un unico candidato, para
+    # no mezclar F204-67630 con B204-67630 si existieran los dos.
+    def _sin_letra(doc: str) -> str:
+        d = str(doc or "").strip().upper().replace(" ", "")
+        return d[1:] if d[:1].isalpha() and len(d) > 1 and d[1:2].isdigit() else d
+
+    _por_sin_letra: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
+    for k in invoice_base:
+        # k es (client, doc, sku) o (doc, sku): la posicion del doc es -2.
+        ck = (*k[:-2], _sin_letra(k[-2]), k[-1]) if len(k) >= 2 else k
+        _por_sin_letra.setdefault(ck, []).append(k)
+
+    _huerfanas: list[dict] = []
     for _, note in notes.iterrows():
         invoice = str(note.get("FACTURA_REF", "") or "").strip()
         sku = normalizar_sku(note.get("CODIGO"))
         doc_note = str(note.get("DOC_NOTA", "") or "").strip()
         client = normalizar_cliente(note.get(client_col)) if client_col else ""
         key_base = (client, invoice, sku) if client_col else (invoice, sku)
+        nota_fuzzy = False
+        if (not invoice or not sku or key_base not in invoice_base) and invoice and sku:
+            ck = (client, _sin_letra(invoice), sku) if client_col else (_sin_letra(invoice), sku)
+            candidatos = _por_sin_letra.get(ck, [])
+            if len(candidatos) == 1:
+                key_base = candidatos[0]
+                nota_fuzzy = True
         if not invoice or not sku or key_base not in invoice_base:
+            # No se descarta en silencio: si tiene factura y SKU validos pero
+            # no matchea ninguna linea del historial, es una nota huerfana
+            # (SKU ajeno u otro concepto). Se guarda para avisar con monto,
+            # sin entrar al calculo. Sin factura o sin SKU es dato roto.
+            if invoice and sku:
+                _huerfanas.append(
+                    {
+                        "invoice": invoice,
+                        "sku": sku,
+                        "client": client if client_col else "",
+                        "doc": doc_note,
+                        "source": _doc_kind(note.get("TPO_NOTA")),
+                        "qty": abs(_num(note.get("CANTIDAD"))),
+                        "soles": _num(note.get("SOLES")),
+                    }
+                )
             continue
         source = _doc_kind(note.get("TPO_NOTA"))
         category = str(note.get("CATEGORIA", "") or "").strip().lower()
@@ -157,6 +196,7 @@ def reconciliar_notas(
                 "source": source,
                 "doc": doc_note,
                 "category": category,
+                "fuzzy": nota_fuzzy,
             },
         )
         g["qty"] += qty
@@ -222,6 +262,7 @@ def reconciliar_notas(
                         "estado": decision,
                         "aplicada": can_apply,
                         "efecto": n["effect"],
+                        "ref_aproximada": bool(n.get("fuzzy")),
                     }
                 )
 
@@ -268,11 +309,48 @@ def reconciliar_notas(
                         if source_notes[0]["effect"] == "devolucion"
                         else "valor aplicado al precio"
                     )
+                    aprox = (
+                        " (ref. aproximada: sin letra de tipo)"
+                        if any(n.get("fuzzy") for n in source_notes)
+                        else ""
+                    )
                     item["alerts"].append(
                         f"AL12 - {label} APLICADA — {refs}: {qty_txt}; "
-                        f"importe S/ {amount:,.2f}; {action}"
+                        f"importe S/ {amount:,.2f}; {action}{aprox}"
                     )
         result[key] = item
+
+    # Notas huerfanas: tienen factura y SKU validos pero no matchean ninguna
+    # linea del historial (SKU ajeno u otro concepto). Antes se perdian en
+    # silencio en el continue de arriba: ni entraban al calculo ni avisaban.
+    # Ahora avisan con monto, sin entrar a preview ni a calculos. El monto
+    # importa para no exceder el total de la factura con NCs futuras. Solo se
+    # cuelgan si la factura existe (con otros SKU); si ni la factura esta, no
+    # hay donde mostrarlo y no es de este caso.
+    for h in _huerfanas:
+        doc_b, sku_b, cli_b = h["invoice"], h["sku"], h["client"]
+        ancla = next(
+            (
+                k
+                for k in result
+                if len(k) >= 2
+                and (
+                    (len(k) >= 3 and k[0] == cli_b and k[-2] == doc_b)
+                    or (len(k) == 2 and k[-2] == doc_b)
+                )
+            ),
+            None,
+        )
+        if ancla is None or not h.get("doc"):
+            continue
+        monto = abs(float(h.get("soles", 0) or 0))
+        cant = abs(float(h.get("qty", 0) or 0))
+        result[ancla].setdefault("alerts", []).append(
+            f"AL12 - {h.get('source', 'nc').upper()} AJENA - {h['doc']}: "
+            f"{cant:,.2f} unid del SKU {sku_b} (no esta en {doc_b}); "
+            f"importe S/ {monto:,.2f}. No entra al calculo ni a la vista; "
+            f"se avisa para no exceder el total de la factura."
+        )
     return result
 
 
