@@ -1,7 +1,7 @@
 import re
 import pandas as pd
 from pathlib import Path
-from src.core.utils import read_erp_file, build_doc_full
+from src.core.utils import read_erp_file, build_doc_full, contar_sku_vacios
 from src.core.doc_matcher import seleccionar_mejor_documento
 from src.core.nc_reconciliation import (
     alertas_reconciliacion,
@@ -290,6 +290,23 @@ class FeriaPreventaStrategy:
         todos_items = []
         todos_docs = set()
         total_alertas = []
+        # Higiene como en DC: las filas sin SKU se ignoran; se avisa cuantas.
+        try:
+            _n_vac = contar_sku_vacios(df_hist)
+            if _n_vac:
+                total_alertas.append(
+                    BusinessAlert(
+                        tipo="info",
+                        severidad="baja",
+                        mensaje=(
+                            f"el historial: se ignoraron {_n_vac} fila(s) sin SKU "
+                            "(filas vacias en el archivo cargado)."
+                        ),
+                        motor="FeriaPreventa",
+                    )
+                )
+        except Exception:
+            pass
         lote_idx = 0
         total_filas_req = 0
 

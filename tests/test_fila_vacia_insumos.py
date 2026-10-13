@@ -118,6 +118,8 @@ class TestFilaVaciaEnAmbos:
         df_res, alertas = _comparar(_hist(), vacia)
         # Todo es hueco: no hay con que mergear. No debe reventar ni fantasmear.
         assert len(_sin_sku(df_res)) == 0
+
+
 class TestSubtituloEnPlantilla:
     """Pegar datos con subtitulos dentro de la plantilla no detiene el proceso.
 
@@ -173,3 +175,199 @@ class TestSubtituloEnPlantilla:
         textos = " ".join(getattr(a, "mensaje", "") for a in alertas).lower()
         assert "sin precio" in textos
 
+
+class TestSkuDuplicadoEnLista:
+    """Un SKU dos veces en la lista multiplicaba las filas del historial.
+
+    2 lineas x 2 precios = 4 filas con los montos duplicados. La lista es una
+    lookup (un SKU, un precio): se queda el primero y se avisa para corregir
+    el archivo. Caso real: NC 215-31630 de un solo SKU en 4 filas.
+    """
+
+    def _lista_dup(self):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [
+                {"SKU": "X", "PRECIO_BASE": 9.0},
+                {"SKU": "X", "PRECIO_BASE": 9.0},
+            ]
+        )
+
+    def _hist_2(self):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "CODIGO": ["X", "X"],
+                "ARTICULO": ["P", "P"],
+                "CANTIDAD": [10, 20],
+                "SOLES": [100.0, 200.0],
+                "FECHA": pd.to_datetime(["2026-01-15"] * 2),
+                "TIPO_DOC": ["F01"] * 2,
+                "SERIE": ["201"] * 2,
+                "NUMERO": ["1", "2"],
+                "COD_CLIENTE": ["C1"] * 2,
+                "DOC_CLIENTE": ["R1"] * 2,
+                "CLIENTE": ["CLI"] * 2,
+            }
+        )
+
+    def test_no_duplica_filas(self):
+        from src.strategies.price_difference import PriceDifferenceStrategy
+
+        st = PriceDifferenceStrategy()
+        df, _, _ = st._procesar_comparar(
+            self._hist_2(),
+            self._lista_dup(),
+            [],
+            config={"modalidad": "individual", "sort_mode": "fecha_desc"},
+        )
+        assert len(df) == 2, "2 lineas x 1 precio = 2 filas, no 4"
+        assert sorted(df["CANTIDAD"].tolist()) == [10, 20]
+
+    def test_avisa_el_duplicado(self):
+        from src.strategies.price_difference import PriceDifferenceStrategy
+
+        st = PriceDifferenceStrategy()
+        alertas: list = []
+        st._procesar_comparar(
+            self._hist_2(),
+            self._lista_dup(),
+            alertas,
+            config={"modalidad": "individual", "sort_mode": "fecha_desc"},
+        )
+        textos = " ".join(getattr(a, "mensaje", "") for a in alertas).lower()
+        assert "repetido" in textos and "x" in textos
+
+    def test_sin_duplicados_no_hay_falsa_alarma(self):
+        import pandas as pd
+
+        from src.strategies.price_difference import PriceDifferenceStrategy
+
+        st = PriceDifferenceStrategy()
+        alertas: list = []
+        lista = pd.DataFrame([{"SKU": "X", "PRECIO_BASE": 9.0}])
+        st._procesar_comparar(
+            self._hist_2(),
+            lista,
+            alertas,
+            config={"modalidad": "individual", "sort_mode": "fecha_desc"},
+        )
+        textos = " ".join(getattr(a, "mensaje", "") for a in alertas).lower()
+        assert "repetido" not in textos
+
+
+class TestFilaVaciaEnFeriaYDescuento:
+    """La misma higiene de DC aplica a FPE y al motor legacy de descuento."""
+
+    def _hist_con_vacia(self):
+        hist = pd.DataFrame(
+            {
+                "CODIGO": ["S1", "S2"],
+                "ARTICULO": ["P1", "P2"],
+                "LINEA": ["L01", "L02"],
+                "CANTIDAD": [50.0, 40.0],
+                "SOLES": [170.0, 160.0],
+                "FECHA": pd.to_datetime(["2026-01-05", "2026-01-08"]),
+                "TIPO_DOC": ["F", "F"],
+                "SERIE": ["F201", "F201"],
+                "NUMERO": ["100", "100"],
+                "DOC_ID": ["FF201-100", "FF201-100"],
+                "COD_CLIENTE": ["1", "1"],
+                "DOC_CLIENTE": ["206039928"] * 2,
+                "TIPO_CLASE": ["factura", "factura"],
+                "FACTURA_REF": ["", ""],
+                "CANTIDAD_FAE": [0.0, 0.0],
+                "TIPO_NOTA": ["", ""],
+                "CATEGORIA": ["", ""],
+            }
+        )
+        vacia = pd.DataFrame([{c: np.nan for c in hist.columns} | {"FECHA": pd.NaT}])
+        return pd.concat([hist, vacia], ignore_index=True)
+
+    def test_feria_avisa_filas_sin_sku(self, tmp_path):
+        from src.domain import ExpedienteComercial, PipelineContext
+        from src.strategies.feria_preventa import FeriaPreventaStrategy
+
+        req = tmp_path / "req.xlsx"
+        pd.DataFrame(
+            {"CODIGO": ["S1", "S2"], "CANTIDAD_NC": [10, 10], "PORCENTAJE_DESC": [0.05, 0.05]}
+        ).to_excel(req, index=False)
+        cfg = {
+            "ruta_requerimientos": [str(req)],
+            "modalidad": "individual",
+            "sort_mode": "fecha_desc",
+            "forzar_cantidad": True,
+            "documentos_historial": {
+                "facturas": {"mostrar": True, "usar": True},
+                "nc": {"mostrar": True, "usar": False},
+                "ndb": {"mostrar": True, "usar": False},
+            },
+        }
+        exp = ExpedienteComercial(
+            nombre="FPE",
+            familia="precio",
+            estrategia="FeriaPreventa",
+            datos=self._hist_con_vacia(),
+            contexto=PipelineContext(config=cfg),
+        )
+        res = FeriaPreventaStrategy().process(exp)
+        textos = " ".join(a.mensaje.lower() for a in res.alertas)
+        assert "sin sku" in textos
+
+    def test_descuento_avisa_filas_sin_sku(self):
+        from src.domain import ExpedienteComercial, PipelineContext
+        from src.strategies.descuento_factura import DescuentoFacturaStrategy
+
+        df = pd.DataFrame(
+            {
+                "CODIGO": ["S1", np.nan, "S2"],
+                "CANTIDAD": [10.0, 5.0, 20.0],
+                "PRECIO_UNITARIO": [34.0, 10.0, 8.0],
+                "FECHA": pd.to_datetime(["2026-01-05"] * 3),
+                "TIPO_DOC": ["F01"] * 3,
+                "SERIE": ["201"] * 3,
+                "NUMERO": ["100"] * 3,
+                "CLIENTE": ["CLI"] * 3,
+            }
+        )
+        exp = ExpedienteComercial(
+            nombre="DF",
+            familia="precio",
+            estrategia="DescuentoFactura",
+            datos=df,
+            contexto=PipelineContext(config={"descuento_pct": 0.05}),
+        )
+        res = DescuentoFacturaStrategy().process(exp)
+        textos = " ".join(a.mensaje.lower() for a in res.alertas)
+        assert "sin sku" in textos
+        # La fila vacia no entra al calculo: 2 SKUs x su descuento.
+        assert len(res.get_excel()) == 2
+
+    def test_descuento_sin_vacias_no_avisa(self):
+        from src.domain import ExpedienteComercial, PipelineContext
+        from src.strategies.descuento_factura import DescuentoFacturaStrategy
+
+        df = pd.DataFrame(
+            {
+                "CODIGO": ["S1", "S2"],
+                "CANTIDAD": [10.0, 20.0],
+                "PRECIO_UNITARIO": [34.0, 8.0],
+                "FECHA": pd.to_datetime(["2026-01-05"] * 2),
+                "TIPO_DOC": ["F01"] * 2,
+                "SERIE": ["201"] * 2,
+                "NUMERO": ["100"] * 2,
+                "CLIENTE": ["CLI"] * 2,
+            }
+        )
+        exp = ExpedienteComercial(
+            nombre="DF",
+            familia="precio",
+            estrategia="DescuentoFactura",
+            datos=df,
+            contexto=PipelineContext(config={"descuento_pct": 0.05}),
+        )
+        res = DescuentoFacturaStrategy().process(exp)
+        textos = " ".join(a.mensaje.lower() for a in res.alertas)
+        assert "sin sku" not in textos

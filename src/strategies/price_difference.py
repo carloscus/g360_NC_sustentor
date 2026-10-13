@@ -84,6 +84,37 @@ def _alertar_pct(codigo: str, origen: str, alertas: list, *, skus=()) -> None:
         )
 
 
+def _dedup_lookup(df, col, origen, alertas):
+    """Deja un SKU una sola vez antes de mergear y avisa los repetidos.
+
+    La tabla de la derecha de un merge es una LOOKUP (un SKU, un precio).
+    Si trae el mismo SKU dos veces, el inner merge multiplica las filas del
+    historial (2 lineas x 2 precios = 4 filas con montos duplicados). Se queda
+    el primero y se avisa para que se corrija el archivo.
+    """
+    if df is None or col not in df.columns or df.empty:
+        return df
+    llave = df[col].astype(str).str.strip()
+    llave = llave.replace({"nan": "", "None": "", "none": ""})
+    vistos = llave[llave != ""]
+    repes = sorted(vistos[vistos.duplicated(keep=False)].unique().tolist())
+    if repes:
+        alertas.append(
+            BusinessAlert(
+                tipo="warning",
+                severidad="media",
+                mensaje=(
+                    f"{origen} trae {len(repes)} SKU repetido(s) "
+                    f"({', '.join(repes[:8])}{'…' if len(repes) > 8 else ''}): "
+                    "se uso el primero de cada uno para no duplicar montos."
+                ),
+                motor="PriceDifference",
+            )
+        )
+        return df.drop_duplicates(subset=[col], keep="first")
+    return df
+
+
 def _descartar_sku_vacios(df, col, origen, alertas):
     """Saca las filas sin SKU antes del merge y lo avisa.
 
@@ -596,6 +627,7 @@ class PriceDifferenceStrategy:
             lista_norm = lista_norm.drop(columns=["CANTIDAD"])
 
         cols_merge = list(dict.fromkeys(["SKU", "PRECIO_BASE", precio_col] + cols_desc))
+        lista_norm = _dedup_lookup(lista_norm, "SKU", "la lista de precios", alertas)
         merged = df_hist.merge(
             lista_norm[cols_merge].rename(columns={"SKU": "CODIGO"}),
             on="CODIGO",
@@ -1015,6 +1047,8 @@ class PriceDifferenceStrategy:
                 )
 
         cols_merge = list(dict.fromkeys(["SKU", "PRECIO_BASE", precio_col]))
+        lista_norm = _dedup_lookup(lista_norm, "SKU", "la lista de precios", alertas)
+        req_clean = _dedup_lookup(req_clean, "SKU", "el requerimiento", alertas)
         merged = df_hist.merge(
             lista_norm[cols_merge].rename(columns={"SKU": "CODIGO"}), on="CODIGO", how="inner"
         )
@@ -1101,6 +1135,7 @@ class PriceDifferenceStrategy:
 
         desc = condiciones_desc[["CODIGO", "DESCUENTO"]].copy()
         desc["DESCUENTO"], cod_desc = normalizar_porcentaje_serie(desc["DESCUENTO"])
+        desc = _dedup_lookup(desc, "CODIGO", "el archivo de descuentos", alertas)
         for _cod in ("AL04", "AL10"):
             _mask = cod_desc == _cod
             if _mask.any():
@@ -1381,6 +1416,7 @@ class PriceDifferenceStrategy:
         if "CANTIDAD_REQ" not in req_clean.columns:
             req_clean["CANTIDAD_REQ"] = 0
 
+        req_clean = _dedup_lookup(req_clean, "SKU", "el requerimiento de ferias", alertas)
         merged = df_hist.merge(
             req_clean.rename(columns={"SKU": "CODIGO"}), on="CODIGO", how="inner"
         )

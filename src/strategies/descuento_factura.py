@@ -1,6 +1,6 @@
 import pandas as pd
 from src.domain import RecognitionResult, BusinessAlert, generar_texto_alerta
-from src.core.utils import normalizar_porcentaje
+from src.core.utils import normalizar_porcentaje, contar_sku_vacios
 
 
 class DescuentoFacturaStrategy:
@@ -64,6 +64,26 @@ class DescuentoFacturaStrategy:
             )
 
         alertas = []
+        # Higiene como en DC: las filas sin SKU se ignoran y se avisa.
+        try:
+            _n_vac = contar_sku_vacios(df)
+            if _n_vac:
+                alertas.append(
+                    BusinessAlert(
+                        tipo="info",
+                        severidad="baja",
+                        mensaje=(
+                            f"el historial: se ignoraron {_n_vac} fila(s) sin SKU "
+                            "(filas vacias en el archivo cargado)."
+                        ),
+                        motor="DescuentoFactura",
+                    )
+                )
+                df = df.loc[
+                    ~df["CODIGO"].astype(str).str.strip().str.lower().isin(["", "nan", "none"])
+                ].copy()
+        except Exception:
+            pass
         if cod_pct == "AL04":
             alertas.append(
                 BusinessAlert(

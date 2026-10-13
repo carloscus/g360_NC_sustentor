@@ -325,6 +325,21 @@ def read_erp_file(
     return df
 
 
+def contar_sku_vacios(df, col: str = "CODIGO") -> int:
+    """Cuantas filas tienen SKU vacio (blancos del XLSX llegados como NaN).
+
+    Helper compartido para que todos los motores avisen lo mismo cuando
+    ignoran filas sin SKU. No modifica el DataFrame; cada motor decide si
+    las salta (ferias/descuento iteran por fila) o las filtra (los que
+    mergean). Ver `_descartar_sku_vacios` en price_difference para la
+    version que filtra.
+    """
+    if df is None or getattr(df, "empty", True) or col not in df.columns:
+        return 0
+    llave = df[col].astype(str).str.strip().str.lower()
+    return int(llave.isin(["", "nan", "none"]).sum())
+
+
 def calcular_precio_unitario_df(
     df: pd.DataFrame,
     col_soles: str = "SOLES",
