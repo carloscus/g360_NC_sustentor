@@ -93,7 +93,6 @@ def _vista_fake(tipo_actual="DC"):
         modalidad_radio=SimpleNamespace(value="individual"),
         resultado=None,
         resultados_container=SimpleNamespace(visible=True),
-        alertas_container=SimpleNamespace(visible=True),
         container=SimpleNamespace(update=lambda: None),
         app=SimpleNamespace(
             page=SimpleNamespace(update=lambda: None),

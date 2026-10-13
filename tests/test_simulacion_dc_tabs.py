@@ -176,7 +176,6 @@ def _mock_view():
     view._result_tabs_container = None
     view._result_clientes = None
     view.btn_expediente = SimpleNamespace(disabled=True)
-    view.alertas_container = SimpleNamespace(visible=False, content=None)
     view._result_warn_row = SimpleNamespace(controls=[])
     view._result_load_more_btn = SimpleNamespace(text="", visible=False)
     view._result_summary = None
