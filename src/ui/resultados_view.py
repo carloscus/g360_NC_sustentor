@@ -83,8 +83,6 @@ def render_resultado(
             - 'table_columns': list[ft.DataColumn]
             - 'table_rows': list[ft.DataRow]
             - 'aplicar_toggles': dict (solo para rebate_volumen)
-            - 'alertas_content': ft.Column | None
-            - 'alertas_visible': bool
             - 'content': ft.Column (panel completo)
     """
     res = resultado.resultado
@@ -105,8 +103,6 @@ def render_resultado(
             "table_columns": [],
             "table_rows": [],
             "aplicar_toggles": {},
-            "alertas_content": None,
-            "alertas_visible": False,
             "content": None,
         }
 
@@ -125,7 +121,6 @@ def render_resultado(
         )
         toggles = {}
 
-    alertas_content, alertas_visible = _build_alertas_panel(alertas)
     nc_alertas = (resultado.resultado.metricas or {}).get("nc_alertas", [])
     nc_audit_panel = _build_nc_audit_panel(nc_alertas, accent_color)
     verification_panel = _build_verification_panel(
@@ -235,7 +230,12 @@ def render_resultado(
     if legend_items:
         legend_banner = ft.Container(
             content=ft.Row(
-                legend_items, spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER
+                legend_items,
+                spacing=16,
+                # wrap en vez de overflow: en ventana angosta los chips
+                # (max 4) bajan de linea; con Row simple se salen del banner.
+                wrap=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             padding=ft.padding.symmetric(horizontal=16, vertical=8),
             bgcolor=G360Theme.surface_variant_color(),
@@ -328,8 +328,6 @@ def render_resultado(
         "table_columns": columns,
         "table_rows": rows,
         "aplicar_toggles": toggles,
-        "alertas_content": alertas_content,
-        "alertas_visible": alertas_visible,
         "content": content,
         "status_counts": status_counts,
         "expediente_warning": expediente_warning,
@@ -654,48 +652,6 @@ def _extraer_facturas(row) -> set:
         if v and v not in ("", "nan", "None"):
             ids.update(re.findall(r"([A-Za-z]?\d+\-\d+)", v))
     return ids
-
-
-def _build_alertas_panel(alertas):
-    """Construye el panel de alertas."""
-    if not alertas:
-        return None, False
-
-    items = []
-    for a in alertas[:10]:
-        icono = (
-            ft.Icons.ERROR_OUTLINED
-            if a.tipo == "error"
-            else ft.Icons.WARNING_AMBER_OUTLINED
-            if a.tipo == "warning"
-            else ft.Icons.INFO_OUTLINED
-        )
-        color = (
-            ft.Colors.RED_400
-            if a.tipo == "error"
-            else ft.Colors.AMBER_400
-            if a.tipo == "warning"
-            else ft.Colors.BLUE_300
-        )
-        items.append(
-            ft.Row(
-                [
-                    ft.Icon(icono, size=14, color=color),
-                    ft.Text(f"{a.mensaje}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                ],
-                spacing=6,
-            )
-        )
-
-    content = ft.Container(
-        content=ft.Column(items, spacing=4),
-        bgcolor=G360Theme.surface_variant_color(),
-        border=ft.border.all(1, G360Theme.border_subtle_color()),
-        border_radius=12,
-        padding=12,
-        visible=True,
-    )
-    return content, True
 
 
 def _build_verification_panel(resultado, tipo_actual, alertas, accent_color, success_color):

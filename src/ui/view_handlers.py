@@ -194,7 +194,6 @@ class _ViewHandlers:
         self.resultados_container.visible = False
         if hasattr(self, "_result_panel"):
             self._result_panel.visible = False
-        self.alertas_container.visible = False
         try:
             self._renderizar_ui()
         except Exception as ex:
@@ -315,8 +314,6 @@ class _ViewHandlers:
             self.resultados_container.visible = False
         if hasattr(self, "_result_panel"):
             self._result_panel.visible = False
-        if hasattr(self, "alertas_container"):
-            self.alertas_container.visible = False
         if hasattr(self, "lbl_ejecutar_hint"):
             self.lbl_ejecutar_hint.value = mensaje
             self.lbl_ejecutar_hint.color = G360Theme.warning_color()
@@ -1579,9 +1576,6 @@ class _ViewHandlers:
         # Warning banner
         self._renderizar_banner_warning(result)
 
-        # Alertas
-        self._renderizar_alertas_cliente(result)
-
         # Panel completo
         self._rearmar_result_summary(result)
 
@@ -1763,7 +1757,6 @@ class _ViewHandlers:
         self._renderizar_tabla_cliente(result)
         self._renderizar_lazy_load(result)
         self._renderizar_banner_warning(result)
-        self._renderizar_alertas_cliente(result)
         self._rearmar_result_summary(result)
         self._insertar_en_tab(cliente_id)
         return True
@@ -1862,14 +1855,6 @@ class _ViewHandlers:
             self._result_warn_row.visible = True
         else:
             self._result_warn_row.visible = False
-
-    def _renderizar_alertas_cliente(self, result):
-        """Muestra u oculta el contenedor de alertas con su contenido."""
-        if result["alertas_visible"] and result["alertas_content"]:
-            self.alertas_container.content = result["alertas_content"]
-            self.alertas_container.visible = True
-        else:
-            self.alertas_container.visible = False
 
     def _insertar_en_tab(self, cliente_id):
         """Inserta el contenido renderizado en el tab correspondiente y refresca la página."""
@@ -2231,7 +2216,6 @@ class _ViewHandlers:
                 self.resultados_container.visible = False
                 if hasattr(self, "_result_panel"):
                     self._result_panel.visible = False
-                self.alertas_container.visible = False
                 self._verificar_puede_ejecutar()
                 if self.container:
                     self.container.update()

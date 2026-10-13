@@ -48,6 +48,22 @@ def _msgs_cartucho(carpeta_export, r=None, ex=None) -> tuple[str, str]:
     if r is not None:
         filas = r.get("ventas_filas", 0)
         mb = r.get("zip_mb", 0)
+        # Frescura de la copia recién creada (dd/mm/yyyy HH:MM + edad).
+        # Los `exportar` inyectados en tests no la traen: se omite en ese
+        # caso en vez de mostrar un "?" al usuario.
+        _frescura = ""
+        try:
+            from src.core.cartucho import frescura_cartucho
+            from src.core.fechas import fecha_hora_ui
+
+            _gen = r.get("generado_en")
+            if _gen:
+                _frescura = f"\nGenerado {fecha_hora_ui(_gen, _gen)} ({frescura_cartucho(_gen)})"
+                if r.get("generado_por"):
+                    _frescura += f" por {r['generado_por']}"
+                _frescura += "."
+        except Exception:
+            _frescura = ""
         # Un incremental DICE que lo es. Si el mensaje es igual que el del
         # completo, el usuario cree que mando el historico entero y el
         # cliente recibe una ventana y se queda sin el resto sin enterarse.
@@ -58,14 +74,14 @@ def _msgs_cartucho(carpeta_export, r=None, ex=None) -> tuple[str, str]:
             return (
                 f"V Cartucho incremental creado\n{r.get('zip')}\n"
                 f"{filas:,} filas · {mb} MB · desde {desde} hasta {hasta}. "
-                f"Se SUMA a lo que ya tenga el cliente; no lo reemplaza.",
+                f"Se SUMA a lo que ya tenga el cliente; no lo reemplaza.{_frescura}",
                 f"V Cartucho incremental ({filas:,} filas, {mb} MB, desde {desde}). "
                 f"Est� en {carpeta}",
             )
         return (
             f"V Cartucho creado\n{r.get('zip')}\n"
             f"{filas:,} filas · {mb} MB. "
-            f"Copialo a la otra PC (Importar cartucho).",
+            f"Copialo a la otra PC (Importar cartucho).{_frescura}",
             f"V Cartucho creado ({filas:,} filas, {mb} MB). Est� en {carpeta}",
         )
     previas = _cartucho_previas(carpeta_export)
@@ -123,29 +139,59 @@ def _correr_export_cartucho(
     """
     btn_export.disabled = True
     status.value, aviso = _msgs_cartucho(carpeta_export)
+    # ETA estimada al arrancar, por tamano de la DB. Es aproximada (el disco
+    # y la CPU la mueven), pero "unos 5 min" prepara mejor que "puede tardar".
+    try:
+        from src.core import ventas_db as _vdb
+        from src.core.cartucho import _estimar_export_segundos, _fmt_dur
+
+        _mb = _vdb.db_path().stat().st_size if _vdb.db_exists() else 0
+        _eta = _estimar_export_segundos(_mb)
+        if _eta > 0:
+            status.value = f"{status.value}\nTiempo estimado: ~{_fmt_dur(_eta)}"
+    except Exception:
+        pass
     status.color = app.G360_ACCENT
     app.show_snackbar(aviso, app.G360_ACCENT)
     _safe_update(page)
 
     def run():
+        def _prog(etapa: str, msg: str):
+            try:
+                status.value = msg
+                _safe_update(page)
+            except Exception:
+                pass
+
         try:
             # Solo se pasan kwargs cuando hay rango: el cartucho completo es
             # "sin argumentos" y los `exportar` inyectados en los tests no
-            # aceptan kwargs.
-            r = exportar(**({"desde": desde, "hasta": hasta} if desde or hasta else {}))
+            # aceptan kwargs. El progress_cb es opcional y los inyectados lo
+            # ignoran si no lo aceptan.
+            _kw = dict({"desde": desde, "hasta": hasta} if desde or hasta else {})
+            try:
+                r = exportar(**_kw, progress_cb=_prog)
+            except TypeError:
+                r = exportar(**_kw)
             texto, aviso = _msgs_cartucho(carpeta_export, r=r)
+            try:
+                _segs = (r or {}).get("segundos")
+                if _segs:
+                    from src.core.cartucho import _fmt_dur as _fd
+
+                    texto = f"{texto}\nListo en {_fd(_segs)}."
+            except Exception:
+                pass
             status.value = texto
             status.color = app.G360_SUCCESS
             app.show_snackbar(aviso, app.G360_SUCCESS)
             # Aviso explícito para compartir: el usuario pidió el ZIP para
             # llevarlo a otra PC, así que hay que decirle dónde quedó y que
-            # ya lo puede copiar. Sin esto, el "éxito" no dice qué hacer.
+            # ya lo puede copiar. La cola del snackbar lo muestra despues del
+            # aviso de exito, sin pisarlo (antes habia un sleep a mano).
             try:
                 zip_path = (r or {}).get("zip")
                 if zip_path:
-                    import time as _t
-
-                    _t.sleep(0.8)  # deja leer el primero antes de pisarlo
                     app.show_snackbar(
                         f"Para compartir: copia {zip_path} a la otra PC",
                         app.G360_ACCENT,
@@ -917,7 +963,6 @@ class _ViewPanels:
 
         self._result_audit_btn = self._crear_btn_auditoria()
 
-        self.alertas_container = ft.Container(visible=False, padding=15, border_radius=18)
         self.aplicar_toggles: dict[str, ft.Checkbox] = {}
 
         # Un set de controles de resultados POR CLIENTE (la clave None es el
@@ -963,8 +1008,15 @@ class _ViewPanels:
                 bgcolor=G360Theme.surface_variant_color(),
                 border=ft.border.all(1, G360Theme.border_subtle_color()),
             ),
-            "warn_row": ft.Row(
-                [], alignment=ft.MainAxisAlignment.CENTER, spacing=20, visible=False
+            # Column (no Row): los hijos de un Row se miden con ancho
+            # infinito y el banner interior (Row wrap=True) no envuelve
+            # nunca; en Column el ancho viene acotado y el texto largo
+            # (aviso ND) baja de linea en vez de desbordar.
+            "warn_row": ft.Column(
+                [],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=20,
+                visible=False,
             ),
             "load_more_row": ft.Row([btn_mas], alignment=ft.MainAxisAlignment.CENTER, spacing=20),
             "btn_row": ft.Row(
@@ -2340,6 +2392,96 @@ class _ViewPanels:
                 cb.visible = (not t) or (t in etiqueta)
             page.update()
 
+        def adoptar_del_cartucho(_e):
+            """Trae el allowlist del cartucho y lo deja marcado aca mismo.
+
+            Vive en ESTA pestana y en ningun otro lado: es donde el usuario
+            ve y edita sus lineas, asi que es donde tiene que estar la opcion
+            de adoptar las ajenas. Lee solo el manifiesto (no importa la DB)
+            y, al confirmar, refresca los checks para que se vea aplicado.
+            """
+            import threading as _th3
+            from pathlib import Path as _Path
+
+            from src.core.cartucho import adoptar_lineas, leer_allowlist_cartucho
+
+            def pick():
+                ruta = None
+                try:
+                    ruta = self.app._pick_file(
+                        "Elegir CARTUCHO.json para ver sus líneas", allowed_extensions=["json"]
+                    )
+                except Exception:
+                    pass
+                if not ruta:
+                    return
+                try:
+                    nuevas = leer_allowlist_cartucho(_Path(ruta))
+                except Exception as ex:
+                    status.value = f"✗ No se pudo leer: {ex}"
+                    status.color = self.app.G360_ERROR
+                    _safe_update(page)
+                    return
+                if not nuevas:
+                    status.value = "Ese cartucho no trae líneas."
+                    status.color = self.app.G360_WARNING
+                    _safe_update(page)
+                    return
+                actuales = set(ventas_db.allowed_lines())
+                otras = sorted(set(nuevas) - actuales)
+                if not otras:
+                    status.value = "Ya trabajás con esas líneas."
+                    status.color = self.app.G360_SUCCESS
+                    _safe_update(page)
+                    return
+                status.value = (
+                    f"El cartucho trae {len(nuevas)} líneas "
+                    f"({len(otras)} nuevas para vos: {', '.join(otras[:12])}"
+                    f"{'…' if len(otras) > 12 else ''}). "
+                    "Confirma abajo para adoptarlas."
+                )
+                status.color = self.app.G360_WARNING
+                _safe_update(page)
+
+                def confirmar(_ev):
+                    page.close(dlg_lineas)
+                    try:
+                        r = adoptar_lineas(nuevas)
+                        status.value = (
+                            f"✓ Líneas adoptadas: {len(r['despues'])} "
+                            f"(antes {len(r['antes'])}). Rige al instante."
+                        )
+                        status.color = self.app.G360_SUCCESS
+                        # Refrescar los checks: el allowlist cambio y la
+                        # lista visible tiene que mostrarlo sin reabrir.
+                        try:
+                            activas.clear()
+                            activas.update(str(x).upper() for x in ventas_db.allowed_lines())
+                            construir()
+                        except Exception:
+                            pass
+                    except Exception as ex:
+                        status.value = f"✗ No se pudo adoptar: {ex}"
+                        status.color = self.app.G360_ERROR
+                    _safe_update(page)
+
+                dlg_lineas = ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text("Adoptar líneas del cartucho"),
+                    content=ft.Text(
+                        f"Tu configuración actual ({len(actuales)}) se reemplaza "
+                        f"por la del cartucho ({len(nuevas)}). Solo cambia qué "
+                        f"líneas ves; la DB no se toca."
+                    ),
+                    actions=[
+                        ft.TextButton("Cancelar", on_click=lambda _: page.close(dlg_lineas)),
+                        ft.TextButton("Adoptar", on_click=confirmar),
+                    ],
+                )
+                page.open(dlg_lineas)
+
+            _th3.Thread(target=pick, daemon=True).start()
+
         row_btns = ft.Row(
             [
                 ft.ElevatedButton(
@@ -2349,6 +2491,13 @@ class _ViewPanels:
                     style=ft.ButtonStyle(bgcolor=self.app.G360_ACCENT),
                 ),
                 ft.TextButton("Restaurar por defecto", on_click=restaurar),
+                ft.OutlinedButton(
+                    "Adoptar del cartucho",
+                    height=34,
+                    icon=ft.Icons.CHECKLIST_OUTLINED,
+                    on_click=adoptar_del_cartucho,
+                    tooltip="Trae las líneas de un cartucho y las deja marcadas acá",
+                ),
             ],
             spacing=8,
         )
@@ -2949,83 +3098,102 @@ class _ViewPanels:
                 p = Path(ruta)
                 # .zip va directo; CARTUCHO.json -> su carpeta;
                 # historial.db suelto (p.ej. carpeta de ventas-db) -> semilla.
-                _importar_cartucho(
+                objetivo = (
                     p
                     if p.suffix.lower() == ".zip"
                     else (p.parent if p.suffix.lower() == ".json" else p)
                 )
-
-            threading.Thread(target=pick, daemon=True).start()
-
-        def adoptar_lineas_cartucho(_):
-            from src.core.cartucho import adoptar_lineas, leer_allowlist_cartucho
-
-            def pick():
-                ruta = None
+                # Confirmar ANTES de lo pesado: leer el manifiesto es
+                # instantaneo (no extrae los GB), y el modo se decide de ahi.
+                # Sin esto, el usuario espera minutos en silencio y recien al
+                # final se entera si fue reemplazo o merge.
                 try:
-                    ruta = self.app._pick_file(
-                        "Elegir CARTUCHO.json para ver sus líneas", allowed_extensions=["json"]
-                    )
+                    from src.core.cartucho import previsualizar_cartucho
+
+                    prev = previsualizar_cartucho(objetivo)
                 except Exception:
-                    pass
-                if not ruta:
+                    # Sin manifiesto legible (semilla suelta, etc.): sigue el
+                    # camino viejo sin confirmar.
+                    _importar_cartucho(objetivo)
                     return
-                try:
-                    nuevas = leer_allowlist_cartucho(Path(ruta))
-                except Exception as ex:
-                    status.value = f"✗ No se pudo leer: {ex}"
-                    status.color = self.app.G360_ERROR
-                    _safe_update(page)
-                    return
-                if not nuevas:
-                    status.value = "Ese cartucho no trae líneas."
-                    status.color = self.app.G360_WARNING
-                    _safe_update(page)
-                    return
-                actuales = set(ventas_db.allowed_lines())
-                otras = sorted(set(nuevas) - actuales)
-                if not otras:
-                    status.value = "Ya trabajás con esas líneas."
-                    status.color = self.app.G360_SUCCESS
-                    _safe_update(page)
-                    return
-                status.value = (
-                    f"El cartucho trae {len(nuevas)} líneas "
-                    f"({len(otras)} nuevas para vos: {', '.join(otras[:12])}"
-                    f"{'…' if len(otras) > 12 else ''}). "
-                    "Confirma abajo para adoptarlas."
-                )
-                status.color = self.app.G360_WARNING
-                _safe_update(page)
 
-                def confirmar(_e):
-                    page.close(dlg_lineas)
+                def _confirmar(_e):
                     try:
-                        r = adoptar_lineas(nuevas)
-                        status.value = (
-                            f"✓ Líneas adoptadas: {len(r['despues'])} "
-                            f"(antes {len(r['antes'])}). Rige al instante."
-                        )
-                        status.color = self.app.G360_SUCCESS
-                    except Exception as ex:
-                        status.value = f"✗ No se pudo adoptar: {ex}"
-                        status.color = self.app.G360_ERROR
-                    _safe_update(page)
+                        page.close(dlg_conf)
+                    except Exception:
+                        pass
+                    _importar_cartucho(objetivo)
 
-                dlg_lineas = ft.AlertDialog(
+                modo = prev.get("modo", "?")
+                filas = prev.get("ventas_filas", 0)
+                fmin, fmax = prev.get("fecha_min"), prev.get("fecha_max")
+                rango_txt = f"{fmin} → {fmax}" if fmin or fmax else "?"
+                if modo == "reemplazar":
+                    que = (
+                        "REEMPLAZA tu historial actual. "
+                        "Se hace backup antes, pero revisa que sea lo que queres."
+                    )
+                    color_modo = self.app.G360_WARNING
+                else:
+                    que = "Se SUMA a tu historial (no borra nada)."
+                    color_modo = self.app.G360_SUCCESS
+                tam = f" · {prev['zip_mb']} MB" if prev.get("zip_mb") else ""
+                # Frescura de la copia: antes de reemplazar o mergear hay que
+                # saber de cuándo son los datos (un completo viejo pisa lo
+                # nuevo; un incremental viejo suma poco). Sin generado_en
+                # (cartuchos viejos) no se muestra la línea.
+                fresca = ""
+                try:
+                    from src.core.fechas import fecha_hora_ui as _fhu
+
+                    _gen = prev.get("generado_en")
+                    if _gen:
+                        _txt = f"Generado {_fhu(_gen, _gen)}"
+                        if prev.get("frescura"):
+                            _txt += f" ({prev['frescura']})"
+                        if prev.get("generado_por"):
+                            _txt += f" por {prev['generado_por']}"
+                        fresca = _txt
+                except Exception:
+                    fresca = ""
+                dlg_conf = ft.AlertDialog(
                     modal=True,
-                    title=ft.Text("Adoptar líneas del cartucho"),
-                    content=ft.Text(
-                        f"Tu configuración actual ({len(actuales)}) se reemplaza "
-                        f"por la del cartucho ({len(nuevas)}). Solo cambia qué "
-                        f"líneas ves; la DB no se toca."
+                    title=ft.Text("Importar cartucho", size=14, weight=ft.FontWeight.BOLD),
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                f"{filas:,} filas ({rango_txt}){tam}",
+                                size=13,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            *(
+                                [
+                                    ft.Text(
+                                        fresca,
+                                        size=12,
+                                        color=G360Theme.text_muted_color(),
+                                    )
+                                ]
+                                if fresca
+                                else []
+                            ),
+                            ft.Text(que, size=12, color=color_modo),
+                        ],
+                        spacing=8,
+                        tight=True,
                     ),
                     actions=[
-                        ft.TextButton("Cancelar", on_click=lambda _: page.close(dlg_lineas)),
-                        ft.TextButton("Adoptar", on_click=confirmar),
+                        ft.TextButton("Cancelar", on_click=lambda _: page.close(dlg_conf)),
+                        ft.ElevatedButton("Importar", on_click=_confirmar),
                     ],
+                    actions_alignment=ft.MainAxisAlignment.END,
                 )
-                page.open(dlg_lineas)
+                try:
+                    page.open(dlg_conf)
+                    page.update()
+                except Exception:
+                    # Si el dialogo no abre, no se bloquea: sigue directo.
+                    _importar_cartucho(objetivo)
 
             threading.Thread(target=pick, daemon=True).start()
 
@@ -3056,11 +3224,19 @@ class _ViewPanels:
                     label="Que cartucho",
                     width=320,
                     value="inc",
+                    # text Y content: sin text, el dropdown cerrado muestra
+                    # la key ("inc") en vez del rotulo.
                     options=[
                         _ft.dropdown.Option(
-                            key="inc", content="Incremental (se suma al del cliente)"
+                            key="inc",
+                            text="Incremental (se suma al del cliente)",
+                            content="Incremental (se suma al del cliente)",
                         ),
-                        _ft.dropdown.Option(key="full", content="Completo (reemplaza todo)"),
+                        _ft.dropdown.Option(
+                            key="full",
+                            text="Completo (reemplaza todo)",
+                            content="Completo (reemplaza todo)",
+                        ),
                     ],
                 )
                 fecha = _cf.text_field(
@@ -3073,10 +3249,16 @@ class _ViewPanels:
                 # fecha y el formato equivocado, que es el error mas comun.
                 def _poner_desde(_e, valor: str):
                     fecha.value = valor
-                    try:
-                        fecha.update()
-                    except Exception:
-                        pass
+                    # El update del control a veces no repinta dentro del
+                    # dialogo recien abierto; el page.update() lo fuerza. Sin
+                    # esto, el clic "parece no hacer nada" aunque el valor
+                    # quede seteado (el modal "no se actualiza").
+                    for _upd_fn in (fecha.update, page.update):
+                        try:
+                            _upd_fn()
+                            break
+                        except Exception:
+                            continue
 
                 def _primer_dia_mes() -> str:
                     from datetime import date as _date
@@ -3114,6 +3296,10 @@ class _ViewPanels:
 
                 def _toggle(_e):
                     fecha.disabled = opc.value != "inc"
+                    try:
+                        fecha.update()
+                    except Exception:
+                        pass
 
                 opc.on_change = _toggle
                 _toggle(None)
@@ -3192,6 +3378,23 @@ class _ViewPanels:
                     n_conf = len(r.get("sidecar", {}).get("alias_conflictos", []))
                     if n_conf:
                         det += f"; ⚠ {n_conf} conflictos O/C (gana entrante, ver log)"
+                    # Frescura de la copia aplicada: el manifiesto del import
+                    # trae quién y cuándo la generó (puede faltar en
+                    # cartuchos viejos: se omite sin romper).
+                    try:
+                        from src.core.cartucho import frescura_cartucho as _fr
+                        from src.core.fechas import fecha_hora_ui as _fhu
+
+                        _man = r.get("manifiesto", {}) or {}
+                        if _man.get("en"):
+                            _deta = f"; copia generada {_fhu(_man['en'], _man['en'])}"
+                            if _fr(_man["en"]):
+                                _deta += f" ({_fr(_man['en'])})"
+                            if _man.get("por"):
+                                _deta += f" por {_man['por']}"
+                            det += _deta
+                    except Exception:
+                        pass
                     status.value = f"✓ Cartucho aplicado ({modo}): {det}"
                     status.color = self.app.G360_SUCCESS
                     self._refrescar_card_db()
@@ -3512,14 +3715,6 @@ class _ViewPanels:
                                     color=self.app.G360_ACCENT,
                                 ),
                             ),
-                            ft.Container(height=6),
-                            ft.OutlinedButton(
-                                "Adoptar líneas del cartucho...",
-                                height=32,
-                                icon=ft.Icons.CHECKLIST_OUTLINED,
-                                on_click=adoptar_lineas_cartucho,
-                            ),
-                            ft.Container(height=6),
                             ft.Text(
                                 "Para llevar a otra PC: genera el .zip único "
                                 "(DB + sidecar + manifiesto).",

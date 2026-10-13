@@ -218,6 +218,37 @@ class TestMensajeIncremental:
         assert "Copialo a la otra PC" in texto
 
 
+class TestFrescuraMensaje:
+    """El mensaje de éxito dice cuándo se generó la copia (frescura).
+
+    Sin `generado_en` (exportadores inyectados viejos) no se muestra nada:
+    un "?" al usuario es peor que omitir la línea.
+    """
+
+    def test_con_timestamp_muestra_generado(self, tmp_path):
+        from datetime import datetime
+
+        exp = tmp_path / "export"
+        exp.mkdir()
+        r = {
+            "zip": str(exp / "cartucho-x.zip"),
+            "ventas_filas": 10,
+            "zip_mb": 1,
+            "generado_en": datetime.now().isoformat(timespec="seconds"),
+            "generado_por": "PC-TEST",
+        }
+        texto, _ = _msgs_cartucho(exp, r=r)
+        assert "Generado" in texto
+        assert "PC-TEST" in texto
+
+    def test_sin_timestamp_no_muestra_generado(self, tmp_path):
+        exp = tmp_path / "export"
+        exp.mkdir()
+        r = {"zip": str(exp / "cartucho-x.zip"), "ventas_filas": 10, "zip_mb": 1}
+        texto, _ = _msgs_cartucho(exp, r=r)
+        assert "Generado" not in texto
+
+
 class TestFechaDesdeLibre:
     """El campo acepta cualquier fecha (ej. 2026-08-01) y carga hasta hoy.
 
@@ -278,6 +309,65 @@ class TestAvisoParaCompartir:
         textos = " ".join(m for m, _ in h.snacks)
         assert "compartir" in textos.lower() or "copia" in textos.lower()
         assert "cartucho-x-inc.zip" in textos
+
+
+class TestEstimacionDeDuracion:
+    """El ETA del export sale de tasas medidas, no de adivinar.
+
+    quick_check ~30 MB/s, copia ~60 MB/s, compresion ~40 MB/s sobre la DB
+    real. Para 3.7 GB da ~4-5 min, que es lo observado.
+    """
+
+    def test_estima_crece_con_el_tamano(self):
+        from src.core.cartucho import _estimar_export_segundos
+
+        chica = _estimar_export_segundos(100 * 1024**2)
+        grande = _estimar_export_segundos(int(3.7 * 1024**3))
+        assert 0 < chica < grande
+        assert 240 <= grande <= 360, f"3.7 GB deberia dar ~5 min, dio {grande}s"
+
+    def test_vacia_da_cero(self):
+        from src.core.cartucho import _estimar_export_segundos
+
+        assert _estimar_export_segundos(0) == 0
+
+    def test_formato_legible(self):
+        from src.core.cartucho import _fmt_dur
+
+        assert _fmt_dur(5) == "5s"
+        assert _fmt_dur(65).startswith("1 min")
+
+    def test_el_export_reporta_progreso_y_total(self, tmp_path):
+        """progress_cb recibe etapas y el resultado trae los segundos."""
+        import sqlite3
+
+        from src.core import ventas_db
+        from src.core.cartucho import exportar_cartucho
+
+        p = ventas_db.db_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        c = sqlite3.connect(p)
+        c.execute(ventas_db.CREATE_TABLE_VENTAS)
+        c.executescript(ventas_db.CREATE_AUDIT_TABLES)
+        c.executescript(ventas_db.CREATE_DIM_TABLES)
+        c.executescript(ventas_db.CREATE_FACT_TABLES)
+        c.execute("PRAGMA user_version = 3")
+        c.execute(
+            "INSERT INTO ventas (id_articulo, id_linea, id_cliente, tpo_doc, serie_doc, "
+            "nro_doc, fecha_orig, mes_ref, cantidad, soles, anho, mes) VALUES "
+            "('A1','01','C1','F01','001','1','2026-09-28','2026-09',1.0,10.0,2026,9)"
+        )
+        c.commit()
+        c.close()
+
+        etapas: list = []
+        r = exportar_cartucho(
+            destino=tmp_path / "c",
+            progress_cb=lambda etapa, msg: etapas.append(etapa),
+        )
+        assert "comprimir" in etapas
+        assert "listo" in etapas
+        assert r.get("segundos", 0) >= 0
 
 
 class TestFlujoExport:

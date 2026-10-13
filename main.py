@@ -426,38 +426,151 @@ class G360App:
         color: str | None = None,
         action_text: str | None = None,
         action_callback=None,
+        icon=None,
+        duration_ms: int | None = None,
+        sticky: bool = False,
     ):
+        """Barra de mensajes inferior: icono por tipo, texto blanco y cola.
+
+        Compatibilidad total hacia atras: los ~100 llamados existentes pasan
+        `color` y siguen funcionando igual. Lo nuevo es opcional:
+
+        - `icon`: icono explicito; si no se pasa, sale del tipo inferido del
+          `color` (error/warning/success/info). Sin icono, los avisos se
+          distinguen solo por el fondo y hay que leerlos para saber que son.
+        - Cola: si hay un mensaje visible, el nuevo espera su turno en vez
+          de pisarlo. Antes el segundo `show_snackbar` borraba al primero al
+          instante (por eso el export metia un `sleep(0.8)` a mano).
+        - `sticky=True`: no se auto-oculta (para progresos largos); el
+          siguiente mensaje o `hide_snackbar()` lo reemplaza.
+        - `duration_ms`: override del tiempo en pantalla (default 4000).
+        """
+        import threading
+        from collections import deque
+
         if color in (self.G360_ERROR, G360Theme.ERROR, G360Theme.ERROR_LIGHT):
-            bg_color = "#b91c1c"
+            bg_color, kind = "#b91c1c", "error"
         elif color in (self.G360_WARNING, G360Theme.WARNING, G360Theme.WARNING_LIGHT):
-            bg_color = "#b45309"
-        elif color in (
-            self.G360_SUCCESS,
-            G360Theme.SUCCESS,
-            G360Theme.ACCENT,
-            G360Theme.ACCENT_LIGHT,
-        ):
-            bg_color = G360Theme.primary_color()
+            bg_color, kind = "#b45309", "warning"
+        elif color in (self.G360_SUCCESS, G360Theme.SUCCESS):
+            bg_color, kind = G360Theme.primary_color(), "success"
+        elif color in (self.G360_ACCENT, G360Theme.ACCENT, G360Theme.ACCENT_LIGHT):
+            # El acento es informativo (progreso, avisos neutros), no un
+            # exito: antes caia en "success" y le ponia tilde a mensajes
+            # como "Creando cartucho...".
+            bg_color, kind = G360Theme.primary_color(), "info"
         else:
-            bg_color = color or G360Theme.primary_color()
-        if not hasattr(self, "_snackbar") or self._snackbar is None:
-            self._snackbar = ft.SnackBar(
-                content=ft.Text(message, size=14, weight=ft.FontWeight.W_500),
-                bgcolor=bg_color,
-                padding=20,
-                duration=4000,
-                action=action_text,
-                action_color="white",
-                on_action=action_callback,
+            bg_color, kind = (color or G360Theme.primary_color()), "info"
+        # Texto siempre blanco sobre estos fondos: son saturados/oscuros en
+        # los dos temas. Sin color fijo, en tema claro el texto sale oscuro
+        # sobre rojo/ambar/azul y no se lee.
+        fg_color = "#FFFFFF"
+        iconos = {
+            "error": ft.Icons.ERROR_OUTLINE,
+            "warning": ft.Icons.WARNING_AMBER_OUTLINED,
+            "success": ft.Icons.CHECK_CIRCLE_OUTLINED,
+            "info": ft.Icons.INFO_OUTLINED,
+        }
+        icono = icon or iconos.get(kind, iconos["info"])
+        duracion = 10**9 if sticky else int(duration_ms or 4000)
+
+        if not hasattr(self, "_snack_queue"):
+            self._snack_queue = deque()
+            self._snack_busy = False
+
+        def _pintar(msg, bg, ic, act_txt, act_cb, dur, _pegajoso=False):
+            contenido = ft.Row(
+                [
+                    ft.Icon(ic, color=fg_color, size=20),
+                    ft.Text(msg, size=14, weight=ft.FontWeight.W_500, color=fg_color, expand=True),
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
-            self.page.overlay.append(self._snackbar)
-        else:
-            self._snackbar.content = ft.Text(message, size=14, weight=ft.FontWeight.W_500)
-            self._snackbar.bgcolor = bg_color
-            self._snackbar.action = action_text
-            self._snackbar.on_action = action_callback
-        self._snackbar.open = True
-        self.page.update()
+            if not hasattr(self, "_snackbar") or self._snackbar is None:
+                self._snackbar = ft.SnackBar(
+                    content=contenido,
+                    bgcolor=bg,
+                    padding=20,
+                    duration=dur,
+                    action=act_txt,
+                    action_color=fg_color,
+                    on_action=act_cb,
+                )
+                self.page.overlay.append(self._snackbar)
+            else:
+                self._snackbar.content = contenido
+                self._snackbar.bgcolor = bg
+                self._snackbar.duration = dur
+                self._snackbar.action = act_txt
+                self._snackbar.on_action = act_cb
+            self._snackbar.open = True
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+        def _siguiente():
+            try:
+                if self._snack_queue:
+                    nxt = self._snack_queue.popleft()
+                    _pintar(*nxt)
+                    if not nxt[5]:
+                        threading.Timer((nxt[6] or 4000) / 1000 + 0.4, _siguiente).start()
+                    else:
+                        self._snack_busy = False
+                else:
+                    self._snack_busy = False
+            except Exception:
+                self._snack_busy = False
+
+        item = (message, bg_color, icono, action_text, action_callback, sticky, duracion)
+        if self._snack_busy and not sticky:
+            self._snack_queue.append(item)
+            return
+        self._snack_busy = True
+        _pintar(*item)
+        if not sticky:
+            threading.Timer(duracion / 1000 + 0.4, _siguiente).start()
+
+    def hide_snackbar(self):
+        """Cierra el mensaje visible y muestra el siguiente en cola, si hay."""
+        try:
+            if getattr(self, "_snackbar", None) is not None:
+                self._snackbar.open = False
+            q = getattr(self, "_snack_queue", None)
+            if q:
+                nxt = q.popleft()
+                self._snack_busy = True
+                self._snackbar.content = ft.Row(
+                    [
+                        ft.Icon(nxt[2], color="#FFFFFF", size=20),
+                        ft.Text(
+                            nxt[0],
+                            size=14,
+                            weight=ft.FontWeight.W_500,
+                            color="#FFFFFF",
+                            expand=True,
+                        ),
+                    ],
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+                self._snackbar.bgcolor = nxt[1]
+                self._snackbar.duration = nxt[6]
+                self._snackbar.action = nxt[3]
+                self._snackbar.on_action = nxt[4]
+                self._snackbar.open = True
+                if not nxt[5]:
+                    import threading
+
+                    threading.Timer(nxt[6] / 1000 + 0.4, lambda: self.hide_snackbar()).start()
+                self.page.update()
+            else:
+                self._snack_busy = False
+                self.page.update()
+        except Exception:
+            pass
 
     # ── Components ────────────────────────────────────────────────────────
 

@@ -28,6 +28,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +64,37 @@ def _sha256(path: Path) -> str:
 
 def _ahora_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def frescura_cartucho(generado_en: str | None, ahora: datetime | None = None) -> str:
+    """Edad legible de un cartucho ("hace 3 h", "hace 2 días").
+
+    `generado_en` es el ISO del manifiesto (`_ahora_iso`). Sin valor o
+    ilegible devuelve "" (cartuchos viejos hechos a mano pueden no traerlo):
+    el llamador muestra solo la fecha del archivo en ese caso.
+    """
+    if not generado_en:
+        return ""
+    try:
+        gen = datetime.fromisoformat(str(generado_en).strip().replace("Z", ""))
+    except ValueError:
+        return ""
+    ref = ahora or datetime.now()
+    segs = max(0, int((ref - gen).total_seconds()))
+    if segs < 60:
+        return "recién generado"
+    mins = segs // 60
+    if mins < 60:
+        return f"hace {mins} min"
+    horas = mins // 60
+    if horas < 24:
+        return f"hace {horas} h"
+    dias = horas // 24
+    if dias < 7:
+        return f"hace {dias} día" if dias == 1 else f"hace {dias} días"
+    from src.core.fechas import fecha_hora_ui
+
+    return fecha_hora_ui(gen) or ""
 
 
 def _normaliza_rango(desde=None, hasta=None) -> tuple[str, str]:
@@ -156,12 +188,34 @@ def _sidecar_parcial(est_src: Path, est_dst: Path, desde: str, hasta: str) -> No
         src.close()
 
 
+def _estimar_export_segundos(db_bytes: int) -> int:
+    """Duracion estimada del export completo, en segundos.
+
+    Tasas medidas sobre la DB real (4.46 GB): quick_check ~30 MB/s, copia
+    ~60 MB/s, compresion nivel 6 ~40 MB/s. Es una estimacion para mostrar,
+    no una promesa: el disco y la CPU la mueven.
+    """
+    if db_bytes <= 0:
+        return 0
+    mb = db_bytes / 1024**2
+    return int(mb / 30 + mb / 60 + mb / 40)
+
+
+def _fmt_dur(segundos: float) -> str:
+    s = max(0, int(segundos))
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    return f"{m} min" if s < 10 else f"{m} min {s}s"
+
+
 def exportar_cartucho(
     destino: Path | str | None = None,
     comprimir: bool = True,
     conservar_carpeta: bool = False,
     desde=None,
     hasta=None,
+    progress_cb=None,
 ) -> dict:
     """Genera data/export/cartucho-<ts>.zip con DB + sidecar + config + manifiesto.
 
@@ -183,6 +237,16 @@ def exportar_cartucho(
 
     incremental = bool(desde or hasta)
     d0, h0 = _normaliza_rango(desde, hasta) if incremental else (None, None)
+
+    t0 = time.perf_counter()
+
+    def _avisa(etapa: str, msg: str):
+        if progress_cb is not None:
+            try:
+                progress_cb(etapa, f"[{_fmt_dur(time.perf_counter() - t0)}] {msg}")
+            except Exception:
+                pass
+        log.info("export %s: %s", etapa, msg)
 
     base = data_dir() / "export"
     base.mkdir(parents=True, exist_ok=True)
@@ -264,7 +328,11 @@ def exportar_cartucho(
         json.dumps(cfg_segura, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
-    # 5. Manifiesto.
+    # 5. Manifiesto. El timestamp se captura en variables para devolverlo
+    # también en el resultado: es la frescura de la copia ("generado hace
+    # 3 h por PC-X"), lo que el receptor mira antes de reemplazar o mergear.
+    generado_en = _ahora_iso()
+    generado_por = _origen_pc()
     alias_resumen: dict = {}
     day_resumen: dict = {}
     if sidecar:
@@ -285,8 +353,8 @@ def exportar_cartucho(
         # recién salida de g360-ventas-db, sin sidecar). El importador acepta
         # ambos; la semilla no trae alias ni watermark.
         "tipo": "trabajo" if sidecar else "semilla",
-        "generado_en": _ahora_iso(),
-        "generado_por": _origen_pc(),
+        "generado_en": generado_en,
+        "generado_por": generado_por,
         "contrato_version": ventas_db.CONTRACTO_VERSION,
         "db": {
             "archivo": "historial.db",
@@ -325,6 +393,8 @@ def exportar_cartucho(
         "fecha_max": fmax,
         "archivos": 4 if sidecar else 3,
         "incremental": incremental,
+        "generado_en": generado_en,
+        "generado_por": generado_por,
     }
     if incremental:
         out["rango"] = {"desde": d0, "hasta": h0}
@@ -332,6 +402,7 @@ def exportar_cartucho(
         zpath = carpeta.with_suffix(".zip")
         if zpath.exists():
             zpath.unlink()
+        _avisa("comprimir", f"comprimiendo {len(MIEMBROS)} archivos...")
         with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             for nombre in MIEMBROS:
                 p = carpeta / nombre
@@ -339,13 +410,17 @@ def exportar_cartucho(
                     zf.write(p, arcname=nombre)
         out["zip"] = str(zpath)
         out["zip_mb"] = round(zpath.stat().st_size / (1024 * 1024))
+        _avisa("comprimir", f"ZIP listo: {out['zip_mb']} MB")
         if not conservar_carpeta:
             shutil.rmtree(carpeta, ignore_errors=True)
             out["carpeta"] = None
         log.info(
             "cartucho exportado: %s (%s filas, %s MB)", zpath, f"{ventas_filas:,}", out["zip_mb"]
         )
+        out["segundos"] = round(time.perf_counter() - t0, 1)
+        _avisa("listo", f"terminado en {_fmt_dur(out['segundos'])}")
     else:
+        out["segundos"] = round(time.perf_counter() - t0, 1)
         log.info("cartucho exportado: %s (%s filas)", carpeta, f"{ventas_filas:,}")
     return out
 
@@ -664,6 +739,64 @@ def diagnostico_cobertura(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
+def previsualizar_cartucho(origen: Path | str) -> dict:
+    """Lee el manifiesto y decide el modo SIN extraer ni validar el contenido.
+
+    El manifiesto se lee directo del ZIP (sin descomprimir los GB) o de la
+    carpeta. Devuelve lo necesario para pedir confirmacion ANTES de lo pesado:
+    modo (reemplazar/mergear), filas, rango, tipo e incremental. La validacion
+    real (sha256, contrato, integridad) corre despues, al confirmar.
+    """
+    origen = Path(origen)
+    if origen.is_file() and origen.suffix.lower() == ".zip":
+        with zipfile.ZipFile(origen) as zf:
+            if MANIFIESTO not in zf.namelist():
+                raise ValueError("el ZIP no trae manifiesto: no es un cartucho")
+            man = json.loads(zf.read(MANIFIESTO).decode("utf-8"))
+        mb = round(origen.stat().st_size / 1024**2)
+    elif origen.is_dir() and (origen / MANIFIESTO).exists():
+        man = json.loads((origen / MANIFIESTO).read_text(encoding="utf-8"))
+        mb = None
+    else:
+        raise ValueError(f"no es un cartucho (ni ZIP ni carpeta con manifiesto): {origen}")
+
+    dbm = man.get("db", {})
+    man_dias = man.get("dias", {})
+    try:
+        conn_loc = ventas_db.connect(readonly=True)
+        try:
+            loc_dias = ventas_db.day_checksums_rango(conn_loc, "0000-01-01", "9999-12-31")
+        finally:
+            conn_loc.close()
+    except Exception:
+        loc_dias = {}
+
+    faltan = [d for d, v in loc_dias.items() if man_dias.get(d, [0, 0])[0] < v["filas"]]
+    modo = "reemplazar" if not faltan else "mergear"
+    if dbm.get("incremental"):
+        # Un parcial nunca reemplaza, aunque cubra todo lo local.
+        modo = "mergear"
+
+    return {
+        "modo": modo,
+        "ventas_filas": dbm.get("ventas_filas", dbm.get("filas", 0)),
+        "fecha_min": dbm.get("fecha_min"),
+        "fecha_max": dbm.get("fecha_max"),
+        "tipo": man.get("tipo", "?"),
+        "incremental": bool(dbm.get("incremental")),
+        "rango": dbm.get("rango_solicitado"),
+        "zip_mb": mb,
+        "dias_locales": len(loc_dias),
+        "dias_nuevos": len([d for d in man_dias if d not in loc_dias]),
+        # Frescura de la copia: lo que el receptor mira antes de decidir
+        # reemplazo (completo) o suma (incremental). "" si el manifiesto no
+        # lo trae (cartuchos viejos hechos a mano).
+        "generado_en": man.get("generado_en"),
+        "generado_por": man.get("generado_por"),
+        "frescura": frescura_cartucho(man.get("generado_en")),
+    }
+
+
 def importar_cartucho(origen: Path | str, forzar: str = "") -> dict:
     """Valida un cartucho y lo aplica: reemplazo si es superset, merge si no.
 
@@ -772,6 +905,11 @@ def importar_cartucho(origen: Path | str, forzar: str = "") -> dict:
         else:
             faltan = [d for d, v in loc_dias.items() if man_dias.get(d, [0, 0])[0] < v["filas"]]
             modo = "reemplazar" if not faltan else "mergear"
+            if man.get("db", {}).get("incremental"):
+                # Un parcial nunca reemplaza, aunque cubra todo lo local.
+                # (Igual que en previsualizar: si discrepan, el usuario ve
+                # una cosa y pasa otra.)
+                modo = "mergear"
 
         # 4. Backup SIEMPRE antes de tocar. Con force: el daily puede ya
         # existir y entonces la copia del estado actual se saltaba en

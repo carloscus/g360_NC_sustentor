@@ -63,3 +63,49 @@ class TestDialogsAbren:
 
         with pytest.raises(TypeError):
             ft.AlertDialog(title=ft.Text("t"), width=520)
+
+    def test_opciones_del_dialogo_llevan_texto(self):
+        """Un Option con solo `content` muestra la key ("inc") al cerrar.
+
+        El dropdown cerrado lee `text`, no `content`: sin text, el usuario ve
+        "inc"/"full" en vez del rotulo. Se detecto porque el modal mostraba
+        "inc".
+        """
+        import ast
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "src" / "ui" / "view_panels.py").read_text(
+            encoding="utf-8"
+        )
+        arbol = ast.parse(src)
+        sin_texto = []
+        for n in ast.walk(arbol):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            nombre = (
+                f.attr
+                if isinstance(f, ast.Attribute)
+                else (f.id if isinstance(f, ast.Name) else "")
+            )
+            if nombre != "Option":
+                continue
+            kws = {k.arg for k in n.keywords}
+            if "key" in kws and "content" in kws and "text" not in kws:
+                sin_texto.append(f"linea {n.lineno}")
+        assert sin_texto == [], (
+            "Option con content pero sin text: el dropdown cerrado muestra la key. "
+            + "; ".join(sin_texto)
+        )
+
+    def test_dropdown_muestra_el_rotulo_no_la_key(self):
+        """Prueba viva del patron correcto."""
+        dd = ft.Dropdown(
+            value="inc",
+            options=[
+                ft.dropdown.Option(key="inc", text="Incremental", content="Incremental"),
+                ft.dropdown.Option(key="full", text="Completo", content="Completo"),
+            ],
+        )
+        assert dd.options[0].text == "Incremental"
+        assert dd.value == "inc"
