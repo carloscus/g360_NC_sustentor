@@ -415,24 +415,9 @@ class CantidadDeterminadaStrategy:
             if excesos and "ALERTA" in df_result.columns:
                 df_result["ALERTA"] = df_result.apply(_con_exceso, axis=1)
         else:
-            # AL09 visible en la fila individual, igual que en consolidado:
-            # si no, el exceso solo aparece en el panel de alertas.
-            if excesos and "ALERTA" in alloc.columns:
-
-                def _fila_exceso(r):
-                    sku_fila = str(r.get("CODIGO", ""))
-                    for sku, (asig, pedido) in excesos.items():
-                        if sku_fila == sku:
-                            return (
-                                str(r.get("ALERTA", ""))
-                                + " · "
-                                + generar_texto_alerta(
-                                    "AL09", sku=sku, asignado=asig, solicitado=pedido
-                                )
-                            )
-                    return str(r.get("ALERTA", ""))
-
-                alloc["ALERTA"] = alloc.apply(_fila_exceso, axis=1)
+            # AL09 se deja SOLO en el panel de alertas del motor; no se añade
+            # a la columna ALERTA de cada fila para mantener el Calculo limpio.
+            # El banner de vista previa lo muestra cuando hay exceso.
             # Convención de columnas: el render espera SKU (DC renombra
             # CODIGO→SKU al salir, igual que ferias/stock).
             # Además de las columnas fijas, conservamos las de descuentos

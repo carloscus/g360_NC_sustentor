@@ -187,11 +187,16 @@ class TestBordesCDT:
         assert res.resumen["total_nc"] == pytest.approx(49.20)
 
     def test_al09_visible_en_fila_individual(self, historial, lista):
-        """El exceso salia solo en el panel de alertas, no en la fila."""
+        """El exceso NO se muestra en la fila para mantener el Calculo limpio;
+        la alerta va solo al panel de alertas del motor (y al banner de preview)."""
         res = self._run(historial, lista, _cant(A001=500), {"sort_mode": "fecha_asc"})
         alertas_fila = res.dataframe["ALERTA"].astype(str)
-        assert alertas_fila.str.contains("AL09").any()
-        assert alertas_fila.str.contains("500").any()
+        assert not alertas_fila.str.contains("AL09").any()
+        assert not alertas_fila.str.contains("500").any()
+        # La alerta SI existe en el motor.
+        al09 = [a for a in res.alertas if a.codigo == "AL09"]
+        assert len(al09) == 1
+        assert "AL09" in al09[0].mensaje and "500" in al09[0].mensaje
 
     def test_lista_con_espacios_cruza_con_el_historial(self, historial):
         """' A001 ' en la lista no debe dar 'Sin facturas'."""
