@@ -487,25 +487,22 @@ def _agregar_cobertura(
 ) -> None:
     """Escribe las columnas de cobertura (in-place).
 
-    Se calculan por SKU (no por fila) para que un SKU repartido en varias
-    facturas muestre el mismo total en todas sus filas, igual que la vista
-    consolidada.
+    Las cantidades se calculan por fila (por factura + SKU) para que el
+    usuario pueda ver cuántas unidades de cada factura fueron sustentadas.
+    El porcentaje muestra el grado de cobertura de cada factura
+    individualmente.
     """
-    pedido_por_sku = dict(
-        zip(
-            req["SKU"].astype(str),
-            pd.to_numeric(req["CANTIDAD"], errors="coerce").fillna(0),
-        )
+    # Cantidad facturada: original del historial por fila (no agregada por SKU).
+    alloc["Cantidad Facturada"] = alloc.get(
+        "CANTIDAD_FACTURADA", alloc.get("CANTIDAD", pd.Series(0.0))
     )
-    sustentado_por_sku = alloc.groupby("CODIGO", sort=False)["CANT_ASIG"].sum()
-    skus = alloc["CODIGO"].astype(str)
-    alloc["Cantidad Facturada"] = skus.map(lambda s: float(facturado_por_sku.get(s, 0.0)))
-    disponible_por_sku = disponible_por_sku or facturado_por_sku
-    alloc["Cantidad Disponible"] = skus.map(lambda s: float(disponible_por_sku.get(s, 0.0)))
-    alloc["Stock Sustentado"] = skus.map(lambda s: float(sustentado_por_sku.get(s, 0.0)))
+    alloc["Cantidad Disponible"] = alloc["Cantidad Facturada"]
+    # Stock sustentado: cantidad efectivamente asignada de esa fila.
+    alloc["Stock Sustentado"] = alloc.get("CANT_ASIG", pd.Series(0.0)).astype(float)
+    # Porcentaje: asignado / facturado de esa fila.
     alloc["% Stock Restante"] = [
-        round(float(pedido_por_sku.get(s, 0.0)) / f * 100, 1) if f > 0 else 0.0
-        for s, f in zip(skus, alloc["Cantidad Disponible"])
+        round(s / f * 100, 1) if f > 0 else 0.0
+        for s, f in zip(alloc["Stock Sustentado"], alloc["Cantidad Facturada"])
     ]
 
 
