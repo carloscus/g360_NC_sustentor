@@ -435,7 +435,12 @@ class CantidadDeterminadaStrategy:
                 alloc["ALERTA"] = alloc.apply(_fila_exceso, axis=1)
             # Convención de columnas: el render espera SKU (DC renombra
             # CODIGO→SKU al salir, igual que ferias/stock).
-            cols = _COLS_INDIVIDUAL + _COLS_COBERTURA
+            # Además de las columnas fijas, conservamos las de descuentos
+            # individuales (DESC01, DESC02…) cuando existen: el renderer las
+            # inyecta después de PRECIO LISTA y así el Cálculo muestra la
+            # cadena de descuentos desglosada igual que en DC.
+            cols_extra = [c for c in alloc.columns if re.match(r"^DESC\d+$", c, re.IGNORECASE)]
+            cols = _COLS_INDIVIDUAL + _COLS_COBERTURA + cols_extra
             df_result = (
                 alloc[[c for c in cols if c in alloc.columns]]
                 .rename(columns={"CODIGO": "SKU"})
