@@ -873,11 +873,16 @@ class _CalculoWriter:
                         pcol_hist = col_letters.get("PRECIO HIST. EFECTIVO")
                         # En VRS (diferencia_stock) no hay "PRECIO HIST. EFECTIVO"
                         # en tabla2: usa el PRECIO UNID. de tabla1 como fallback.
+                        # Nota: la referencia debe ir a la fila de tabla1
+                        # (t1_data_start + row_idx), no a la fila de tabla2 (r),
+                        # porque ambas tablas comparten el mismo registro pero
+                        # viven en filas distintas de la hoja.
                         if not pcol_hist:
                             pcol_hist = t1_col_letters.get("PRECIO UNID.")
                         neto_l = col_letters.get("PRECIO NETO")
                         if pcol_hist and neto_l:
-                            cell.value = f"=MAX(0,ROUND({pcol_hist}{r}-{neto_l}{r},5))"
+                            t1_row = t1_data_start + row_idx
+                            cell.value = f"=MAX(0,ROUND({pcol_hist}{t1_row}-{neto_l}{r},5))"
                         else:
                             cell.value = 0
                     elif hdr == "DIF. TOTAL":
