@@ -178,7 +178,7 @@ class _CalculoWriter:
             col_defs = columnas_consolidadas_dc(col_defs)
         if isinstance(col_defs, dict):
             return self._escribir_calculo_dual(
-                df, col_defs, alertas, start_row, desc_origen=desc_origen
+                df, col_defs, alertas, start_row, desc_origen=desc_origen, modalidad=modalidad
             )
 
         gs = G360Styles()
@@ -589,7 +589,9 @@ class _CalculoWriter:
             return f"{txt} | Docs relacionados: {nc}"
         return txt if txt and txt.lower() not in ("nan", "none") else vacio
 
-    def _escribir_calculo_dual(self, df, col_defs, alertas, start_row, desc_origen=None):
+    def _escribir_calculo_dual(
+        self, df, col_defs, alertas, start_row, desc_origen=None, modalidad="individual"
+    ):
         from src.render.excel_renderer import HEADER_NAVY  # noqa: E402
 
         ws = self.ws
@@ -916,20 +918,17 @@ class _CalculoWriter:
                             if dif_l and cant_l:
                                 cell.value = f"=ROUND({dif_l}{r}*{cant_l}{r},2)"
                             elif dif_l:
-                                # Sin columna CANTIDAD en tabla2 (VRS): usa el monto
-                                # exacto que ya calculó el motor; evita la fórmula
-                                # incorrecta `=ROUND(DIF*1,2)` que daba cero.
-                                monto_nc = row.get("MONTO_NC")
-                                if monto_nc is not None and str(monto_nc) not in (
-                                    "",
-                                    "nan",
-                                    "None",
-                                ):
-                                    try:
-                                        cell.value = round(float(monto_nc), 2)
-                                    except (TypeError, ValueError):
+                                # Sin columna CANTIDAD en tabla2 (VRS individual):
+                                # referencia la CANTIDAD SOLICITADA de tabla1 para que
+                                # el monto se recalcule automáticamente si el usuario
+                                # ajusta el stock o los descuentos en Excel.
+                                if modalidad == "individual":
+                                    t1_cant_l = t1_col_letters.get("CANTIDAD SOLICITADA")
+                                    if t1_cant_l:
+                                        t1_row = t1_data_start + row_idx
+                                        cell.value = f"=ROUND({dif_l}{r}*{t1_cant_l}{t1_row},2)"
+                                    else:
                                         cell.value = 0
-                                    cell.number_format = "#,##0.00"
                                 else:
                                     cell.value = 0
                             else:
