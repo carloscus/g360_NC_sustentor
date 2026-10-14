@@ -1,6 +1,6 @@
 [project]
 name = "g360-erp-nc-sustentor"
-version = "1.2.0"
+version = "1.2.1"
 description = "G360 ERP NC Sustentor - Automatización de cuadros de sustento de Notas de Crédito (NC) y análisis CRM."
 readme = "README.md"
 # 3.11 es el target de despliegue (run.bat/launch.vbs lo instalan): el mas

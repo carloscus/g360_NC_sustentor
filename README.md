@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Repo: GitHub](https://img.shields.io/badge/Repository-GitHub-blue.svg)](https://github.com/carloscus/g360_NC_sustentor.git)
 [![Python: 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Tests: 1123](https://img.shields.io/badge/tests-1123%20passing-brightgreen.svg)]()
+[![Tests: 1798](https://img.shields.io/badge/tests-1798%20passing-brightgreen.svg)]()
 
 ```mermaid
 flowchart TD
@@ -782,7 +782,44 @@ MIT License.
 
 - **Sin Supabase**: eliminado `src/api/supabase_endpoint.py` (sin consumidores) y las
   claves `supabase_*` de la config sanitizada del cartucho.
-- **Cliente API Go** (`src/core/`): `api_auth.py` (login → token HMAC contra
+- **NC/NDB independientes** (preview/expediente separados): el preview siempre
+  muestra las negativas; el expediente usa solo las positivas (`_clonar_solo_positivas`);
+  el `CalculoND` respeta un check explícito "Solo-NDB". La diferencia unitaria
+  se escribe en sentido inverso (`DIF. UNITARIA` = neto - hist) para que el monto
+  quede positivo cuando la lista es mayor que el precio atendido.
+- **Referencia sin letra de tipo**: cuando la NC no tiene letra de tipo, se intenta
+  emparejar por número con sufijo inambiguo; si no, se busca por texto libre y se
+  marca `ref_aproximada`. Las notas con facturas ajenas generan alerta AJENA con
+  monto destacado.
+- **Devolución física con factura apuntada**: el cálculo cruza por facturas
+  pedidas (no solo por SKU) y muestra los folios asignados/pendientes en la
+  sección de alertas; spillover avisa cuántas unidades quedaron sin asignar.
+- **Huérfanas**: las NC cuyo SKu/factura no encaja con nada del historial se
+  marcan y el motor las omite silenciosamente (sin fila fantasma).
+- **Lista de contingencia** (VINIFAN): lector multi-hoja por posición que acepta
+  plantillas sin columna `codigo_articulo`; precio numérico válido como criterio
+  de aceptación cuando no hay SKU.
+- **Higiene de insumos**: `contar_sku_vacios()` compartido; FPE/DF avisan si el
+  archivo trae filas sin SKU y las descartan (DF) o ignoran (FPE). Lista de SKU
+  duplicada: queda el primero y avisa AL08.
+- **UI snackbar rediseñado**: icono por tipo, cola con límite, `sticky`, duración
+  configurable y `hide_snackbar`; `reset_app` refresca la vista de resultados.
+- **Cartucho incremental con ETA**: export por rango con manifiesto que declara
+  el segmento; estimación de segundos por etapa y diálogo de progreso.
+- **Overflows en vista previa**: `warn_row` pasa a Column (el aviso ND envuelve),
+  leyenda con `wrap=True`; limpio huérfano de `alertas_container`.
+- **Adoptar del cartucho movido al tab Líneas** en feria/preventa.
+- **VRS (diferencia_stock) corregido en el Cálculo**: `PRECIO LISTA` ahora lee
+  `PRECIO_BASE` del motor; `DIF. UNITARIA` usa fallback a `PRECIO UNID.` de
+  tabla1 cuando falta `PRECIO HIST. EFECTIVO` (VRS no lo tiene); `MONTO` escribe
+  el valor exacto del motor en vez de la fórmula `=ROUND(DIF*1,2)`. El CF de
+  seguimiento sigue pinta correctamente (verde si dif>0, gris si cero).
+- **Portable** (`portable/build.py`): builder con whitelist, techo 50 MB,
+  `uv sync --frozen` verificado.
+- **Manual de usuario** (`manual-usuario.pptx`): 10 slides generados desde deck
+  via build-deck; lint clean.
+- **Fixes menores**: dialog width guard contra error `None`; log aislado por
+  instancia (`G360_LOG_DIR`); lock de app con PID; backups con rotación por mtime.
   `POST /api/login`), `ventas_api_client.py` (rutas reales: `status`, `checksums`,
   `folios`, `by-folios`, `data/{obj}`, `export/...`) y `sync_api.py` (diff de
   folios: `frescura()` → `folios_faltantes()` → `fetch_faltantes()`).
