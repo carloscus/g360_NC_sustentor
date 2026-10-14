@@ -591,6 +591,10 @@ class FeriaPreventaStrategy:
         else:
             for item in todos_items:
                 codigo_al, texto_al = _status_a_codigo_alerta(item.STATUS, item)
+                # AL09 de exceso va al panel de alertas del motor (banner),
+                # no ensucia la columna ALERTA del Calculo.
+                if codigo_al == "AL09":
+                    texto_al = ""
                 cant_sol = item.CANTIDAD_SOLICITADA or 0
                 cant_sus = item.CANTIDAD_REAL_ENCONTRADA or 0
                 fact, disp = _cobertura_de(item.CODIGO)
