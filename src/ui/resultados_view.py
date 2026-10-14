@@ -274,10 +274,17 @@ def render_resultado(
         fila_txt = "fila" if n_neg == 1 else "filas"
         nd_msg = (
             f"Diferencias negativas detectadas: {n_neg} {fila_txt} "
-            f"(potencial ND S/ {pot:,.2f}). Activa «Calcular Nota de Débito» "
-            "para generarlas: solo se generan a petición."
+            f"(potencial ND S/ {pot:,.2f}). Activa 'Calcular Nota de Debito' "
+            "para generarlas: solo se generan a peticion."
         )
         warn_msg = f"{warn_msg} {nd_msg}" if warn_msg else nd_msg
+    # AL09: cantidad determinada/solicitada excede lo facturado.
+    # Solo se muestra si hay al menos una alerta de exceso; el texto ya
+    # contiene los detalles por SKU (ej: "Solo 150 unid. de 500 sustentadas").
+    al09_msgs = [a.mensaje for a in alertas if getattr(a, "codigo", "") == "AL09"]
+    if al09_msgs:
+        al09_txt = " | ".join(al09_msgs)
+        warn_msg = f"{warn_msg} {al09_txt}" if warn_msg else al09_txt
     if warn_msg:
         expediente_warning = ft.Container(
             content=ft.Row(
