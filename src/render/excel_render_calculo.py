@@ -871,6 +871,10 @@ class _CalculoWriter:
                         # Precio histórico efectivo puede incorporar una FAE
                         # exacta; no usar el PU bruto de tabla1 para el cálculo.
                         pcol_hist = col_letters.get("PRECIO HIST. EFECTIVO")
+                        # En VRS (diferencia_stock) no hay "PRECIO HIST. EFECTIVO"
+                        # en tabla2: usa el PRECIO UNID. de tabla1 como fallback.
+                        if not pcol_hist:
+                            pcol_hist = t1_col_letters.get("PRECIO UNID.")
                         neto_l = col_letters.get("PRECIO NETO")
                         if pcol_hist and neto_l:
                             cell.value = f"=MAX(0,ROUND({pcol_hist}{r}-{neto_l}{r},5))"
@@ -907,7 +911,22 @@ class _CalculoWriter:
                             if dif_l and cant_l:
                                 cell.value = f"=ROUND({dif_l}{r}*{cant_l}{r},2)"
                             elif dif_l:
-                                cell.value = f"=ROUND({dif_l}{r}*1,2)"
+                                # Sin columna CANTIDAD en tabla2 (VRS): usa el monto
+                                # exacto que ya calculó el motor; evita la fórmula
+                                # incorrecta `=ROUND(DIF*1,2)` que daba cero.
+                                monto_nc = row.get("MONTO_NC")
+                                if monto_nc is not None and str(monto_nc) not in (
+                                    "",
+                                    "nan",
+                                    "None",
+                                ):
+                                    try:
+                                        cell.value = round(float(monto_nc), 2)
+                                    except (TypeError, ValueError):
+                                        cell.value = 0
+                                    cell.number_format = "#,##0.00"
+                                else:
+                                    cell.value = 0
                             else:
                                 cell.value = 0
                     else:

@@ -613,7 +613,7 @@ COLUMNAS_POR_TIPO = {
                 {"header": "ARTICULO", "keys": ["ARTICULO"], "format": None, "width": 35},
                 {
                     "header": "PRECIO LISTA",
-                    "keys": ["Precio Lista"],
+                    "keys": ["PRECIO_BASE", "Precio Lista"],
                     "format": "#,##0.00000",
                     "width": 13,
                 },
